@@ -10,14 +10,12 @@
 | [reverse-engineering.md](reverse-engineering.md) | the RE workflow and every tool in `tools/`, devtools, MCP bridge |
 | [engine-map.md](engine-map.md) | what is known about the engine: tick, threads, memory, rendering, loading, saves, console, VFS |
 | [plugins.md](plugins.md) | catalog of the 31 bundled plugins: status class, defaults, crash history, tests, installer |
-| [maturity.md](maturity.md) | maturity assessment (alpha) with evidence, work in progress and the road to 1.0 |
 | [configuration.md](configuration.md) | `v3x.ini` and every plugin's ini keys with defaults |
 | [console-commands.md](console-commands.md) | every V3X console command and the events between plugins |
 | [testing.md](testing.md) | build, repository layout, every test and how to run it |
 | [troubleshooting.md](troubleshooting.md) | reading `v3x.log` and `crash.log`, hangs, build problems |
 | [faq.md](faq.md) | common questions |
 | [re/](re/) | detailed reverse-engineering notes per topic (1.15.1) |
-| [sessions/](sessions/) | analyses of real play sessions (measurements, what to flip) |
 
 SDK: `include/` (the API), `sdk/` (helper headers and `build_plugin.py`),
 `templates/plugin_template/` (a complete minimal plugin with an offline test).

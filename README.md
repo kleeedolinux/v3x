@@ -163,7 +163,7 @@ index, built once in the background, that predicts those misses. *Result:* in ga
 **94.4 %** of the misses with **0 mismatches** against the engine (99.90 % in an offline replay
 after a coverage fix). With `mode=on` it now skips the predicted misses: in a 1 h 44 m session it
 did so with **0 mismatches** and 98,786 re-checked skips, and the remaining misses cost 1.43 s in
-the whole session ([session report](docs/sessions/2026-11-13-evening.md)). It is not shipped to
+the whole session. It is not shipped to
 players yet (default `mode=measure`).
 [Story](docs/re/modloading.md) · [textures](docs/re/lazy_gfx.md)
 
@@ -213,7 +213,7 @@ Status, defaults, crash history and tests of each: [docs/plugins.md](docs/plugin
 
 **In progress:** in a 1 h 44 m session (2026-11-13) `mod_loader mode=on` skipped 98,786 file
 misses with 0 mismatches, and `fast_lookup` checked 1.7 M answers in `measure` with 0 mismatches,
-so it can be switched on ([session report](docs/sessions/2026-11-13-evening.md)). Texture prefetch
+so it can be switched on. Texture prefetch
 and the decoded-image cache (`lazy_gfx`), parallel game init (`par_load`), AI tick analysis
 (`ai_par`) and `script_ext` are tested offline only; `loc_fallback`, `mod_menu` and `console_plus`
 loaded in that session, but their features were not checked in game.

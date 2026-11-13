@@ -29,3 +29,9 @@ tools/*.csv
 .idea/
 Thumbs.db
 scripts/*.log
+
+# agent-generated reports (kept local, never committed)
+docs/sessions/
+docs/maturity.md
+docs/security-audit.md
+docs/*-audit.md

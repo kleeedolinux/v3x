@@ -11,7 +11,7 @@ deleting it: `[plugins]` `<plugin> = 0` in `binaries/v3x/v3x.ini`, or the main-m
 
 Sources for this page (2026-11-13): each plugin's header comment (`plugins/<p>/<p>.c`, line 1 on),
 its `*.ini.example`, the player installer profile [`installer/profile.txt`](../installer/profile.txt),
-the session report [`docs/sessions/2026-11-13-evening.md`](sessions/2026-11-13-evening.md) (cited
+the 2026-11-13 play-session measurements (cited
 as `S:<line>`), [CHANGELOG.md](../CHANGELOG.md), [safety.md](safety.md) and `docs/re/*.md`.
 Line numbers in plugin sources are as of 2026-11-13; the sdk worker is adding manifests to those
 files, so they may shift by a few lines.

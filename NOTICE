@@ -1,0 +1,12 @@
+V3X - native mod loader and engine plugins for Victoria 3
+Copyright 2026 kleeedolinux and V3X contributors
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+This product includes third-party software:
+  - MinHook (https://github.com/TsudaKageyu/minhook), BSD 2-Clause License
+  - Zydis (https://github.com/zyantific/zydis), MIT License
+See third_party/NOTICES.md for the full license texts.
+
+Victoria 3 is a trademark of Paradox Interactive. V3X is an unofficial fan
+project and is not affiliated with or endorsed by Paradox Interactive.

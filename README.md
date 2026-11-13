@@ -8,7 +8,7 @@
   <img alt="Single player" src="https://img.shields.io/badge/mode-single%20player-b98b3e">
   <img alt="Status: pre-release" src="https://img.shields.io/badge/status-pre--release-b98b3e">
   <img alt="Plugin API v4" src="https://img.shields.io/badge/plugin%20API-v4-2f6f73">
-  <img alt="License: not chosen yet" src="https://img.shields.io/badge/license-not%20chosen%20yet-9b2d20">
+  <img alt="License: Apache 2.0" src="https://img.shields.io/badge/license-Apache%202.0-1f4e79">
 </p>
 
 **V3X is a free add-on for Victoria 3. It starts together with the game and fixes and speeds up the
@@ -368,7 +368,6 @@ Planned, not promised:
   `mod_loader`, and the newer `mem_tuner` and `lazy_mesh` features.
 * Measure the `lazy_mesh` follow-up fixes (start-up prefetch) and decide whether it can be on by default.
 * Keep plugins working on new game versions (update their anchors).
-* Choose a license (see below).
 
 ## Documentation
 
@@ -383,8 +382,7 @@ Planned, not promised:
 
 * **Contributing:** read [CONTRIBUTING.md](CONTRIBUTING.md) and [docs/safety.md](docs/safety.md)
   first. Changes: [CHANGELOG.md](CHANGELOG.md).
-* **License: not chosen yet.** Until the project lead picks one, no license is granted (all rights
-  reserved by the authors); see [LICENSE](LICENSE).
+* **License:** [Apache License 2.0](LICENSE). See also [NOTICE](NOTICE).
 * **Credits:** [MinHook](https://github.com/TsudaKageyu/minhook) (BSD 2-Clause) for inline hooks,
   [Zydis](https://github.com/zyantific/zydis) (MIT) for disassembly. Details:
   [third_party/NOTICES.md](third_party/NOTICES.md).

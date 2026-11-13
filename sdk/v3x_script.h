@@ -21,8 +21,10 @@
  *     the content_packs folder from the location of script_ext.dll (<game>/binaries/v3x/plugins/).
  *   - Not thread-safe: one plugin thread at a time (v3x_plugin_load calls are sequential).
  *
- * What it does NOT do (yet): run effect/trigger text at runtime, or add new script keywords
- * implemented in C. See docs/scripting.md "Not available". */
+ * Version 2 adds (docs/scripting.md): run_effect_text / eval_trigger_text (run script text once at
+ * runtime, main thread) and register_effect / register_trigger (new `v3x_*` keywords implemented in C,
+ * registered like vanilla ones at engine start). Both are engine calls found through anchors and
+ * fail closed (features() tells). NOT verified in a running game. */
 #ifndef V3X_SCRIPT_H
 #define V3X_SCRIPT_H
 
@@ -35,7 +37,7 @@
 #include <windows.h>
 #include "v3x.h"
 
-#define V3X_SCRIPT_VERSION 1
+#define V3X_SCRIPT_VERSION 2   /* 2: features, run_effect_text, eval_trigger_text, register_effect, register_trigger */
 #define V3X_SCRIPT_DLL "script_ext.dll"
 
 /* return codes */
@@ -43,6 +45,37 @@
 #define V3X_SCRIPT_EARG (-1)     /* bad pack name / path (must be relative, no "..", see below) */
 #define V3X_SCRIPT_EIO (-2)      /* file system error (GetLastError in v3x.log) */
 #define V3X_SCRIPT_ESTATE (-3)   /* write_file without begin_pack for that pack */
+/* version 2 */
+#define V3X_SCRIPT_ETHREAD (-4)  /* run/eval: not called on the game's main thread */
+#define V3X_SCRIPT_EOFF (-5)     /* feature unavailable: an engine anchor failed (see v3x.log) or script_ext not loaded yet */
+#define V3X_SCRIPT_ESCRIPT (-6)  /* the engine rejected the text; `err` holds its message */
+#define V3X_SCRIPT_ENOGAME (-7)  /* no game loaded / no player country */
+#define V3X_SCRIPT_EBUSY (-8)    /* random scope held by another thread, or a run is already in progress (re-entrant) */
+#define V3X_SCRIPT_ELATE (-9)    /* register_*: the engine already registered its script keywords (call it from v3x_plugin_load) */
+#define V3X_SCRIPT_EFULL (-10)   /* register_*: 64 keywords of that kind already */
+#define V3X_SCRIPT_EEXIST (-11)  /* register_*: that name is already registered */
+
+/* features() bits */
+#define V3X_SCRIPT_F_RUN 1u         /* run_effect_text / eval_trigger_text can work (all engine anchors resolved) */
+#define V3X_SCRIPT_F_REGISTER 2u    /* register_effect / register_trigger armed: keywords will be registered at engine start */
+#define V3X_SCRIPT_F_REGISTERED 4u  /* the engine's static initialization has run and the keywords are registered */
+
+/* Scope a native keyword runs in: a copy of the engine's 16-byte scope reference. type 5 = country,
+ * id = the object's id (for a country: the id the console commands use). Other type numbers are not named. */
+typedef struct V3X_ScriptScope {
+    uint16_t type;
+    uint16_t reserved[3];
+    uint64_t id;
+} V3X_ScriptScope;
+#define V3X_SCOPE_COUNTRY 5
+
+/* Native effect: `v3x_name = value` in script. `value` is the text after '=' (token or quoted string,
+ * no quotes), "" if none. Called on WHATEVER thread the engine executes the effect on (tick worker
+ * threads included): keep it short, thread-safe, no V3X API calls except log. */
+typedef void (*v3x_script_effect_fn)(const V3X_ScriptScope *scope, const char *value, void *user);
+/* Native trigger: `v3x_name = value`. Return non-zero = true. Same thread rules; may be evaluated many
+ * times per day by AI/tooltips: it must be pure and fast. */
+typedef int (*v3x_script_trigger_fn)(const V3X_ScriptScope *scope, const char *value, void *user);
 
 typedef struct V3X_ScriptExt {
     uint32_t struct_size;        /* sizeof(V3X_ScriptExt) of the DLL; check before newer fields */
@@ -61,7 +94,27 @@ typedef struct V3X_ScriptExt {
     int (*end_pack)(const char *pack);
     /* Absolute content_packs folder with trailing backslash ("" if unknown). */
     const char *(*packs_dir)(void);
+
+    /* ---- version 2 (check V3X_SCRIPT_HAS(t, field) first) ---- */
+    /* Bit mask of V3X_SCRIPT_F_*; meaningful once script_ext's own v3x_plugin_load has run (call it from
+     * on_frame / a command, not from your own v3x_plugin_load: 0 there if script_ext loads after you). */
+    uint32_t (*features)(void);
+    /* Runs effect script text (e.g. "add_treasury = 1000") once, root scope = the player's country, through
+     * the engine's Script Runner. MAIN THREAD only (api->run_on_main). Returns V3X_SCRIPT_OK or an error;
+     * `err` (may be NULL) gets the reason. OK means "the engine ran it": execution errors (wrong scope,
+     * missing field) are logged by the engine in game.log, not returned. Not for multiplayer. */
+    int (*run_effect_text)(const char *text, char *err, size_t errlen);
+    /* Evaluates trigger text (e.g. "is_ai = no") once, root = the player's country; *result = 0/1. Main thread. */
+    int (*eval_trigger_text)(const char *text, int *result, char *err, size_t errlen);
+    /* New script keywords written in C. Only from v3x_plugin_load (before the engine starts). `name` must be
+     * v3x_[a-z0-9_]+ (max 63 chars). Returns V3X_SCRIPT_OK (queued: it is registered when the engine runs its
+     * static initializers; check features() & V3X_SCRIPT_F_REGISTERED later) or an error. */
+    int (*register_effect)(const char *name, v3x_script_effect_fn cb, void *user);
+    int (*register_trigger)(const char *name, v3x_script_trigger_fn cb, void *user);
 } V3X_ScriptExt;
+
+/* 1 if the table (struct_size) has `field` (version 2 fields). */
+#define V3X_SCRIPT_HAS(t, field)     ((t) && (t)->struct_size >= offsetof(V3X_ScriptExt, field) + sizeof((t)->field) && (t)->field)
 
 typedef const V3X_ScriptExt *(*v3x_script_ext_fn)(void);
 

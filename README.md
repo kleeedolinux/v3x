@@ -12,7 +12,7 @@
   <img alt="License: not chosen yet" src="https://img.shields.io/badge/license-not%20chosen%20yet-9b2d20">
 </p>
 
-**V3X is a modding platform for Victoria 3 that works at the level of the game engine.** It is a
+**V3X (Victoria 3 eXtender) is a modding platform for Victoria 3 that works at the level of the game engine.** It is a
 native loader, a stable plugin API and an SDK. With them you write mods in C that run *inside the
 game's program*, so they can change Victoria 3 far more deeply than script mods can: hook engine
 functions safely, read live game data, add console commands, react to loads and saves, and ship

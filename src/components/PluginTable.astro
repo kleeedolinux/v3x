@@ -1,0 +1,20 @@
+---
+import { shipped } from "../data/facts";
+interface Props { lang: "en" | "pt-BR" }
+const pt = Astro.props.lang === "pt-BR";
+const rows = [...shipped].sort((a, b) => Number(b.on) - Number(a.on));
+---
+<table class="ledger">
+  <caption class="kicker">{pt ? "O que o instalador deixa ligado e desligado" : "What setup turns on and leaves off"}</caption>
+  <thead><tr><th scope="col">{pt ? "Parte" : "Part"}</th><th scope="col">{pt ? "O que faz por você" : "What it does for you"}</th><th scope="col">{pt ? "Depois de instalar" : "After install"}</th></tr></thead>
+  <tbody>
+    {rows.map((p) => (
+      <tr>
+        <th scope="row"><code>{p.id}</code></th>
+        <td set:html={pt ? p.what.pt : p.what.en} />
+        <td><span class={`stamp ${p.on ? "on" : "opt"}`}>{p.on ? (pt ? "ligado" : "on") : (pt ? "desligado" : "off")}</span></td>
+      </tr>
+    ))}
+  </tbody>
+</table>
+<p class="caption">{pt ? "Fonte: " : "Source: "}<a href="/docs/install/#which-plugins-are-on">docs/install.md</a>{pt ? " e o " : " and the "}<a href="/docs/plugins/">{pt ? "catálogo de plugins (em inglês)" : "plugin catalog"}</a>.</p>

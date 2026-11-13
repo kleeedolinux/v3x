@@ -1,0 +1,22 @@
+{
+  "name": "v3x-site",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "sync": "bun scripts/sync-docs.ts",
+    "dev": "astro dev",
+    "build": "bun scripts/sync-docs.ts && bun scripts/check-tokens.ts && astro build && bun scripts/check-links.ts",
+    "build:nosync": "bun scripts/check-tokens.ts && astro build && bun scripts/check-links.ts",
+    "check-links": "bun scripts/check-links.ts",
+    "check-tokens": "bun scripts/check-tokens.ts",
+    "og": "bun scripts/og.ts",
+    "preview": "astro preview",
+    "deploy": "bunx wrangler pages deploy dist --project-name v3x"
+  },
+  "dependencies": {
+    "astro": "^7.4.12"
+  },
+  "devDependencies": {
+    "@resvg/resvg-js": "^2.6.2"
+  }
+}

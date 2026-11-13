@@ -1,0 +1,70 @@
+---
+import { getCollection } from "astro:content";
+import Base from "../../layouts/Base.astro";
+import DocsNav from "../../components/DocsNav.astro";
+import { REPO_URL } from "../../data/facts";
+
+const docs = (await getCollection("docs")).sort((a, b) => a.data.order - b.data.order);
+const groups = [
+  { key: "players", label: "For players", intro: "Installing, settings, what each plugin does, and what to do when something goes wrong. The plain-language version is the players' guide." },
+  { key: "modders", label: "For modders", intro: "Writing a plugin: from the 10-minute first build to the full API, the rules that keep the game alive, script files from C, and testing without the game." },
+  { key: "engine", label: "Engine notes", intro: "What has been learned about the Victoria 3 engine, how it was found, and a measured play session." },
+] as const;
+const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;");
+const title = (s: string) => esc(s).replace(/`([^`]+)`/g, "<code>$1</code>");
+const quick = `cd "<Steam>/steamapps/common/Victoria 3"
+git clone --recursive ${REPO_URL}.git && cd v3x
+pip install ziglang && ./build.sh install       # loader + bundled plugins into ../binaries
+python sdk/build_plugin.py templates/plugin_template --test ../binaries/victoria3.exe`;
+---
+<Base title="V3X docs: Victoria 3 engine modding with a C API and SDK" ogImage="/og/docs.png" crumbs={[{ name: "V3X", href: "/" }, { name: "Docs", href: "/docs/" }]} description="V3X documentation: install and configure V3X, write engine plugins in C with the V3X API and SDK, safety rules, plugin catalog, testing and engine notes." section="docs" sheet="Docs · index">
+  <div class="page">
+    <aside><DocsNav /></aside>
+    <article>
+      <header class="title">
+        <p class="kicker">Docs</p>
+        <h1>The V3X documentation</h1>
+        <p class="lede" style="margin:0">V3X is a native loader, a stable plain-C plugin API and an SDK. Plugins run inside the game's program, so they can change how the engine loads, uses memory, saves and fails, which script mods cannot.</p>
+      </header>
+
+      <h2 class="head">Quick start</h2>
+      <p class="measure">You need Windows x64, Python and Git Bash. The compiler is zig from pip, so no Visual Studio. The last line builds the template plugin and tests it offline against the real <code>victoria3.exe</code>.</p>
+      <pre class="astro-code"><code>{quick}</code></pre>
+      <p class="small">Walkthrough, about 10 minutes: <a href="/docs/getting-started/">Getting started</a>. Read <a href="/docs/safety/">the safety rules</a> before you change game state.</p>
+
+      <figure class="plate">
+        <img src="/assets/anchors.svg" width="1200" height="470" loading="lazy" alt="How a plugin finds engine code: string anchor, cross-reference, function start with prologue check, safe hook. Any mismatch fails closed." />
+        <figcaption><b>Plate III</b>How a plugin finds engine code that survives patches: a string anchor, the code that references it, the start of its function, then a safe hook. Any mismatch installs nothing. Diagram from the V3X repository.</figcaption>
+      </figure>
+
+      {groups.map((g) => (
+        <section class="index-group" style="margin-top:var(--s8)" aria-labelledby={`g-${g.key}`}>
+          <h2 class="head" id={`g-${g.key}`}>{g.label}</h2>
+          <p class="measure small">{g.intro}</p>
+          <table class="ledger">
+            <thead><tr><th scope="col">Document</th><th scope="col">What it covers</th><th scope="col" class="n">File dated</th></tr></thead>
+            <tbody>
+              {g.key === "players" && <tr><th scope="row"><a href="/guide/">Players' guide</a></th><td>Install, the V3X button, plugins on and off, troubleshooting, in plain words. Also in <a href="/pt-br/guia/" lang="pt-BR">português</a>.</td><td class="n">site</td></tr>}
+              {docs.filter((d) => d.data.group === g.key).map((d) => (
+                <tr>
+                  <th scope="row"><a href={`/docs/${d.id}/`} set:html={title(d.data.title)} /></th>
+                  <td>{d.data.summary}</td>
+                  <td class="n">{d.data.updated}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </section>
+      ))}
+
+      <figure class="plate">
+        <img src="/assets/lifecycle.svg" width="1200" height="470" loading="lazy" alt="A plugin's life: process start, plugins load before the CRT, anchors resolve, hooks go in, the game runs, events, process_exit; and which thread runs which callback." />
+        <figcaption><b>Plate IV</b>A plugin's life, from process start to <code>process_exit</code>, and which thread runs which callback. Diagram from the V3X repository.</figcaption>
+      </figure>
+      <figure class="plate">
+        <img src="/assets/architecture.svg" width="1200" height="720" loading="lazy" alt="Architecture: victoria3.exe loads binaries/version.dll, which forwards to System32 version.dll and starts the V3X core (loader, code finding, hooks, frame tick, console, events), which loads the plugins." />
+        <figcaption><b>Plate V</b>The loader: <code>victoria3.exe</code> loads <code>binaries/version.dll</code>, which forwards the 17 real functions to System32 and starts the V3X core before the game's own startup code. Diagram from the V3X repository.</figcaption>
+      </figure>
+    </article>
+  </div>
+</Base>

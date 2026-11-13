@@ -1,0 +1,149 @@
+---
+import "../styles/site.css";
+import { tokensCss, colour } from "../design/tokens";
+import { GAME_VERSION, REPO_URL } from "../data/facts";
+import sync from "../data/sync.json";
+
+export type Lang = "en" | "pt-BR";
+interface Props {
+  title: string;
+  description: string;
+  lang?: Lang;
+  /** nav key of the current page */
+  section?: "home" | "guide" | "docs" | "design" | "none";
+  /** same page in the other language, if it exists */
+  alternate?: string;
+  /** title-block fields */
+  sheet: string;
+  source?: string;
+  sourceUrl?: string;
+  revised?: string;
+  /** SEO */
+  ogImage?: string;
+  ogType?: "website" | "article";
+  crumbs?: { name: string; href: string }[];
+  jsonLd?: Record<string, unknown>[];
+  noindex?: boolean;
+}
+const { title, description, lang = "en", section = "none", alternate, sheet, source, sourceUrl, revised,
+  ogImage = lang === "pt-BR" ? "/og/pt-br.png" : "/og/en.png", ogType = "website", crumbs, jsonLd = [], noindex = false } = Astro.props;
+const pt = lang === "pt-BR";
+const site = Astro.site!;
+const canonical = new URL(Astro.url.pathname, site).href;
+const fullTitle = section === "home" ? title : `${title} · V3X`;
+const synced = (sync as { syncedAt: string }).syncedAt.slice(0, 10);
+
+const nav = pt
+  ? [
+      { key: "home", href: "/pt-br/", label: "Início" },
+      { key: "guide", href: "/pt-br/guia/", label: "Guia do jogador" },
+      { key: "docs", href: "/docs/", label: "Documentação (EN)" },
+      { key: "design", href: "/design/", label: "Design (EN)" },
+    ]
+  : [
+      { key: "home", href: "/", label: "Home" },
+      { key: "guide", href: "/guide/", label: "Players' guide" },
+      { key: "docs", href: "/docs/", label: "Docs" },
+      { key: "design", href: "/design/", label: "Design" },
+    ];
+const enUrl = new URL(pt ? (alternate ?? "/") : Astro.url.pathname, site).href;
+const ptUrl = alternate || pt ? new URL(pt ? Astro.url.pathname : alternate!, site).href : undefined;
+const ogUrl = new URL(ogImage, site).href;
+const ld: Record<string, unknown>[] = [
+  { "@type": "WebSite", "@id": `${site.href}#website`, name: "V3X", url: site.href, inLanguage: ["en", "pt-BR"],
+    description: "V3X: script extender and engine-level modding platform for Victoria 3." },
+  ...(crumbs ? [{ "@type": "BreadcrumbList", itemListElement: crumbs.map((c, i) => ({ "@type": "ListItem", position: i + 1, name: c.name, item: new URL(c.href, site).href })) }] : []),
+  ...jsonLd,
+];
+const ldJson = JSON.stringify({ "@context": "https://schema.org", "@graph": ld }).replace(/</g, "\\u003c");
+const other = alternate ?? (pt ? "/" : "/pt-br/");
+const enHref = pt ? other : Astro.url.pathname;
+const ptHref = pt ? Astro.url.pathname : other;
+---
+<!doctype html>
+<html lang={lang}>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{fullTitle}</title>
+  <meta name="description" content={description} />
+  {!noindex && <link rel="canonical" href={canonical} />}
+  {noindex && <meta name="robots" content="noindex" />}
+  {(alternate || pt) && <link rel="alternate" hreflang="en" href={enUrl} />}
+  {ptUrl && <link rel="alternate" hreflang="pt-BR" href={ptUrl} />}
+  {(alternate || pt) && <link rel="alternate" hreflang="x-default" href={enUrl} />}
+  <meta name="theme-color" content={colour("paper", "light")} media="(prefers-color-scheme: light)" />
+  <meta name="theme-color" content={colour("paper", "dark")} media="(prefers-color-scheme: dark)" />
+  <meta property="og:type" content={ogType} />
+  <meta property="og:site_name" content="V3X" />
+  <meta property="og:title" content={fullTitle} />
+  <meta property="og:description" content={description} />
+  <meta property="og:url" content={canonical} />
+  <meta property="og:locale" content={pt ? "pt_BR" : "en_US"} />
+  {alternate && <meta property="og:locale:alternate" content={pt ? "en_US" : "pt_BR"} />}
+  <meta property="og:image" content={ogUrl} />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta property="og:image:alt" content={fullTitle} />
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content={fullTitle} />
+  <meta name="twitter:description" content={description} />
+  <meta name="twitter:image" content={ogUrl} />
+  <link rel="sitemap" href="/sitemap.xml" />
+  <link rel="icon" href="/assets/logo.svg" type="image/svg+xml" />
+  <link rel="preload" href="/fonts/old-standard-tt-latin-400-normal.woff2" as="font" type="font/woff2" crossorigin />
+  <link rel="preload" href="/fonts/source-serif-4-latin-opsz-normal.woff2" as="font" type="font/woff2" crossorigin />
+  <Fragment set:html={`<style>${tokensCss()}</style>`} />
+  <script type="application/ld+json" is:inline set:html={ldJson} />
+</head>
+<body>
+  <a class="skip" href="#main">{pt ? "Pular para o conteúdo" : "Skip to content"}</a>
+  <header class="masthead wrap">
+    <div class="mast-row">
+      <a class="nameplate" href={pt ? "/pt-br/" : "/"}>
+        <b>V3X</b><span>{pt ? "a oficina do motor de Victoria 3" : "engine works for Victoria 3"}</span>
+      </a>
+      <nav aria-label={pt ? "Principal" : "Main"}>
+        <ul class="nav">
+          {nav.map((n) => (
+            <li><a href={n.href} aria-current={n.key === section ? "page" : undefined}>{n.label}</a></li>
+          ))}
+          <li class="lang" aria-label={pt ? "Idioma" : "Language"}>
+            {pt ? <a href={enHref} hreflang="en" lang="en">EN</a> : <span aria-current="true">EN</span>}
+            {pt ? <span aria-current="true">PT</span> : <a href={ptHref} hreflang="pt-BR" lang="pt-BR">PT</a>}
+          </li>
+        </ul>
+      </nav>
+    </div>
+    <hr class="oxford" />
+    <div class="dateline label">
+      <ul>
+        <li>{pt ? "Pré-lançamento" : "Pre-release"}</li>
+        <li>Victoria 3 {GAME_VERSION}</li>
+        <li>Windows x64</li>
+        <li>{pt ? "Só um jogador" : "Single player"}</li>
+      </ul>
+      <span>{pt ? "Não oficial · sem vínculo com a Paradox Interactive" : "Unofficial · not affiliated with Paradox Interactive"}</span>
+    </div>
+  </header>
+
+  <main id="main" class="wrap">
+    <slot />
+  </main>
+
+  <footer class="foot wrap">
+    <div class="titleblock" role="group" aria-label={pt ? "Ficha desta página" : "About this page"}>
+      <div><span class="label">{pt ? "Projeto" : "Project"}</span>V3X</div>
+      <div><span class="label">{pt ? "Folha" : "Sheet"}</span>{sheet}</div>
+      <div><span class="label">{pt ? "Fonte" : "Source"}</span>{source ? (sourceUrl ? <a href={sourceUrl}>{source}</a> : source) : <a href={REPO_URL}>github.com/kleeedolinux/v3x</a>}</div>
+      <div><span class="label">{pt ? "Revisado" : "Revised"}</span><span class="mono">{revised ?? synced}</span></div>
+    </div>
+    <p class="fine">
+      {pt
+        ? "Victoria 3 é marca registrada da Paradox Interactive. V3X é um projeto de fãs, não oficial, sem vínculo nem endosso da Paradox Interactive. Licença do V3X: ainda não escolhida. Todos os números foram medidos no PC do autor; os seus serão diferentes."
+        : "Victoria 3 is a trademark of Paradox Interactive. V3X is an unofficial fan project and is not affiliated with or endorsed by Paradox Interactive. V3X licence: not chosen yet. All numbers were measured on the author's PC; yours will differ."}
+      {" "}<a href="/design/">{pt ? "Como este site é desenhado" : "How this site is designed"}</a>.
+    </p>
+  </footer>
+</body>
+</html>

@@ -1,0 +1,154 @@
+---
+import Base from "../layouts/Base.astro";
+import Sec from "../components/Sec.astro";
+import Bars from "../components/Bars.astro";
+import { colours, contrastTable, type, families, space, grid, MODULE } from "../design/tokens";
+
+const ct = contrastTable();
+const sample = { display: "Engine works", h1: "The players' guide", h2: "Measured, not promised", h3: "What setup puts on your PC", lede: "V3X runs underneath the game and keeps your playset as it is.", body: "Every fix went the same way: measure, find the cause, fix it in a plugin, check it offline, measure again.", small: "Measured on the author's PC (16 GB RAM, integrated GPU, Victoria 3 1.15.1).", mono: "37.5 s  6.7 s  156 MB  26 MB", label: "On by default" };
+const fam = (f: string) => (f === "display" ? "var(--f-display)" : f === "mono" ? "var(--f-mono)" : "var(--f-text)");
+---
+<Base title="Design system" description="The V3X site's design system: ledger-paper and blueprint colour tokens with computed contrast, a 6 px nonpareil module, three self-hosted typefaces, rules, figures and the checks that enforce them." section="design" sheet="99 · Design" source="src/design/tokens.ts" crumbs={[{ name: "V3X", href: "/" }, { name: "Design", href: "/design/" }]}>
+  <header class="title" style="margin-top:var(--s6)">
+    <p class="kicker">Design system</p>
+    <h1>How this site is drawn</h1>
+    <p class="lede" style="margin:0">Every value on this page is read from <code>src/design/tokens.ts</code>, the same file that writes the site's CSS, so the page and the screen cannot disagree. Ratios are computed at build time, not typed in.</p>
+  </header>
+
+  <Sec n={1} label="Idea" id="idea" title="A ledger, a broadsheet, a drawing">
+    <p class="measure">Victoria 3 runs from 1836 to 1936: the century of the account book, the daily paper and the engineering drawing. V3X is engine work with numbers attached, so the site borrows from all three and from nothing later.</p>
+    <table class="ledger" style="max-width:56rem">
+      <thead><tr><th scope="col">Source</th><th scope="col">What it lends</th><th scope="col">Where you see it</th></tr></thead>
+      <tbody>
+        <tr><th scope="row">The ledger</th><td>Columns of figures that line up; a double rule under the total; before and after side by side.</td><td>The front-page table, every table's last row.</td></tr>
+        <tr><th scope="row">The broadsheet</th><td>A nameplate, a thick-over-thin rule, a dateline strip; questions set in ruled columns; run-in heads.</td><td>The masthead, § 1 and § 6 of the front page.</td></tr>
+        <tr><th scope="row">The engineering drawing</th><td>Numbered plates with captions; numbered callouts for a procedure; a title block in the corner; hairline grids.</td><td>Diagrams, install steps, the footer of every page, figures.</td></tr>
+      </tbody>
+    </table>
+    <p class="small measure" style="margin-top:var(--s3)">What it refuses: gradients, glass, glow, rounded cards, emoji, stock charts, a centred hero. Corners are square. The only shadow is the brass offset under the primary button, a print register mark, which closes when pressed.</p>
+  </Sec>
+
+  <Sec n={2} label="Colour" id="colour" title="Ink and paper, blueprint by night">
+    <p class="measure">{colours.length} tokens, two schemes. Light is ledger paper and iron-gall ink, taken from the repo's own diagrams (<code>docs/assets/banner.svg</code>: paper, navy, teal, brass, red). Dark is a blueprint: the same navy as ground, paper as ink. The scheme follows the system setting; there is no switch to load.</p>
+    <table class="ledger">
+      <thead><tr><th scope="col">Token</th><th scope="col">Light</th><th scope="col">Dark</th><th scope="col">Role</th></tr></thead>
+      <tbody>
+        {colours.map((c) => (
+          <tr>
+            <th scope="row"><code>--{c.name}</code></th>
+            <td class="mono"><span class="swatch" style={`background:${c.light}`}></span> {c.light}</td>
+            <td class="mono"><span class="swatch" style={`background:${c.dark}`}></span> {c.dark}</td>
+            <td>{c.role}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+    <h3 class="sub">Contrast, computed</h3>
+    <p class="measure small">WCAG 2 contrast for every pair a text token is allowed on. Body text needs 4.5:1; the focus ring, a UI mark, needs 3:1. The build fails below the floor.</p>
+    <table class="ledger" style="max-width:40rem">
+      <thead><tr><th scope="col">Text</th><th scope="col">On</th><th scope="col">Scheme</th><th scope="col" class="n">Ratio</th><th scope="col" class="n">Floor</th></tr></thead>
+      <tbody>
+        {ct.map((r) => (
+          <tr><td><code>{r.fg}</code></td><td><code>{r.bg}</code></td><td>{r.scheme}</td><td class="n">{r.ratio.toFixed(2)}:1</td><td class="n">{r.min}:1</td></tr>
+        ))}
+      </tbody>
+    </table>
+  </Sec>
+
+  <Sec n={3} label="Type" id="type" title="Three faces, nine sizes">
+    {Object.entries(families).map(([k, f]) => (
+      <p class="measure"><b style={`font-family:${fam(k)}`}>{k === "display" ? "Display" : k === "text" ? "Text" : "Mono"}: {f.file}.</b> {f.why}</p>
+    ))}
+    <p class="small measure">All three are served from this site (<code>/fonts/</code>, latin subset, SIL Open Font License). No font CDN. If they fail, the stacks fall back to Georgia and Consolas, which the repo's diagrams already use.</p>
+    <div style="margin-top:var(--s4)">
+      {type.map((t) => (
+        <div class="specimen">
+          <span class="label">{t.name} · {t.size}/{t.line}{t.small ? ` · ${t.small.size}/${t.small.line} narrow` : ""}</span>
+          <div>
+            <div style={`font:var(--t-${t.name});${t.name === "label" ? "text-transform:uppercase;letter-spacing:.08em" : ""}${t.name === "h3" ? ";font-weight:600" : ""}`}>{(sample as Record<string, string>)[t.name]}</div>
+            <div class="caption">{t.use}</div>
+          </div>
+        </div>
+      ))}
+    </div>
+    <p class="small measure" style="margin-top:var(--s3)">Text uses old-style figures, which sit in a sentence like lower-case letters. Tables, code and figures switch to lining, tabular figures so that digits stack in columns.</p>
+  </Sec>
+
+  <Sec n={4} label="Space" id="module" title={`The module: ${MODULE} px, a nonpareil`}>
+    <p class="measure">Printers of the period named their type sizes; six-point type was <em>nonpareil</em>, the size of footnotes and the width of a column rule. The site's module is {MODULE} px. Every margin, gap and line height is a whole number of modules, so text in neighbouring columns sits on the same lines.</p>
+    <div class="ruler" aria-hidden="true" style="max-width:432px"></div>
+    <p class="caption">72 modules of 6 px, a major mark every 36 px.</p>
+    <table class="ledger" style="max-width:36rem;margin-top:var(--s3)">
+      <thead><tr><th scope="col">Token</th><th scope="col" class="n">px</th><th scope="col" class="n">modules</th><th scope="col">Length</th></tr></thead>
+      <tbody>
+        {space.map((s) => (
+          <tr><td><code>--{s.name}</code></td><td class="n">{s.px}</td><td class="n">{s.px / MODULE}</td><td><span class="track" aria-hidden="true" style={`width:${s.px * 2}px;max-width:100%;background:none`}><span class="bar"></span></span></td></tr>
+        ))}
+      </tbody>
+    </table>
+  </Sec>
+
+  <Sec n={5} label="Grid" id="grid" title="Twelve columns and a margin for numerals">
+    <p class="measure">The page is at most {grid.max} px wide: {grid.columns} columns with {grid.gutter} px gutters. Sections give two columns to their numeral, as a statute book gives its margin to section numbers, and ten to the text. Running text stops at {grid.measure}, about twelve words a line. Below 900 px the margin folds above the text; below 720 px everything is one column.</p>
+  </Sec>
+
+  <Sec n={6} label="Rules" id="rules" title="Rules, in the printer's sense">
+    <table class="ledger" style="max-width:52rem">
+      <thead><tr><th scope="col">Rule</th><th scope="col">Drawn</th><th scope="col">Means</th></tr></thead>
+      <tbody>
+        <tr><th scope="row">Hairline</th><td><span style="display:inline-block;width:72px;border-top:1px solid var(--rule)"></span> 1 px <code>--rule</code></td><td>Between rows and items. Separates, never encloses.</td></tr>
+        <tr><th scope="row">Head rule</th><td><span style="display:inline-block;width:72px;border-top:1px solid var(--ink)"></span> 1 px <code>--ink</code></td><td>Under table heads and page titles.</td></tr>
+        <tr><th scope="row">Oxford rule</th><td><span style="display:inline-block;width:72px;border-top:3px solid var(--ink);border-bottom:1px solid var(--ink);height:6px"></span> 3 + 1 px</td><td>Under the nameplate only.</td></tr>
+        <tr><th scope="row">Total rule</th><td><span style="display:inline-block;width:72px;border-top:3px double var(--ink)"></span> double</td><td>Under the last row of a table: the account is closed.</td></tr>
+        <tr><th scope="row">Brass hairline</th><td><span style="display:inline-block;width:72px;border-top:1px solid var(--brass)"></span> 1 px <code>--brass</code></td><td>Over section numerals. Ornament, never text.</td></tr>
+        <tr><th scope="row">Warning bar</th><td><span style="display:inline-block;width:3px;height:18px;background:var(--alarm)"></span> 3 px <code>--alarm</code></td><td>Left of a note that can cost you something.</td></tr>
+      </tbody>
+    </table>
+  </Sec>
+
+  <Sec n={7} label="Figures" id="figures" title="Data set as type">
+    <p class="measure">A figure is a table first: label, value, unit, readable by a screen reader and by search. The bar is decoration drawn from the same number. Before is hatched in red, like an engraver's shading; with V3X is solid teal. Hairlines mark each quarter of the scale. The caption names the machine.</p>
+    <div style="max-width:36rem">
+      <Bars caption="Fig. 1. The loading pass over all 3D models, in seconds" unit="s" max={40} rows={[{ label: "Before", value: 37.5, kind: "before" }, { label: "With V3X", value: 6.7, kind: "after" }]} note="Measured on the author's PC (16 GB RAM, integrated GPU, Victoria 3 1.15.1)." />
+    </div>
+  </Sec>
+
+  <Sec n={8} label="Parts" id="components" title="Components">
+    <table class="ledger" style="max-width:56rem">
+      <thead><tr><th scope="col">Part</th><th scope="col">Example</th><th scope="col">Use</th></tr></thead>
+      <tbody>
+        <tr><th scope="row">Stamp</th><td><span class="stamp on">on</span> <span class="stamp opt">optional</span> <span class="stamp no">no</span></td><td>A state, in the margin of an item. Text, not colour alone.</td></tr>
+        <tr><th scope="row">Button</th><td><a class="btn primary" href="#components">Primary</a> <a class="btn" href="#components">Secondary</a></td><td>One primary action per screen: download.</td></tr>
+        <tr><th scope="row">Kicker</th><td><span class="kicker">Players' guide</span></td><td>Above a headline: where you are.</td></tr>
+        <tr><th scope="row">Label</th><td><span class="label">File dated</span></td><td>Table heads, captions of the title block.</td></tr>
+        <tr><th scope="row">Note</th><td><p class="note small" style="margin:0">Single player only.</p></td><td>A caveat that can cost the reader something.</td></tr>
+        <tr><th scope="row">Plate</th><td>Numbered figure: <b>Plate I</b>, caption, source.</td><td>The repo's SVG diagrams. Illustrations say they are not screenshots.</td></tr>
+        <tr><th scope="row">Title block</th><td>Project · Sheet · Source · Revised</td><td>The footer of every page: what this sheet is and where its content came from.</td></tr>
+      </tbody>
+    </table>
+  </Sec>
+
+  <Sec n={9} label="Words" id="words" title="Words">
+    <ul class="measure">
+      <li>Plain, short, sentence case. Write for a player who has never heard of a DLL; put the technical word second, in <code>code</code>.</li>
+      <li>Numbers only from the V3X repository, always with the machine they were measured on. Say what is optional and off by default next to its number.</li>
+      <li>Say what is not done yet. An illustration says it is not a screenshot.</li>
+      <li>Portuguese is Brazilian Portuguese; the docs for modders stay in English and links to them say so.</li>
+    </ul>
+  </Sec>
+
+  <Sec n={10} label="Checks" id="checks" title="Rules, and what checks them">
+    <table class="ledger" style="max-width:56rem">
+      <thead><tr><th scope="col">Rule</th><th scope="col">Checked by</th></tr></thead>
+      <tbody>
+        <tr><td>No colour literal outside <code>src/design/tokens.ts</code>.</td><td><code>scripts/check-tokens.ts</code>, fails the build.</td></tr>
+        <tr><td>Every text pair meets its contrast floor, in both schemes.</td><td><code>scripts/check-tokens.ts</code>, from the table in § 2.</td></tr>
+        <tr><td>Every internal link and #anchor resolves.</td><td><code>scripts/check-links.ts</code> over <code>dist/</code>, fails the build.</td></tr>
+        <tr><td>Content needs no JavaScript; nothing loads from another host.</td><td><code>scripts/check-links.ts</code>: no script but JSON-LD, no external stylesheet, font or image.</td></tr>
+        <tr><td>Every image has an <code>alt</code>; every page has one <code>h1</code>, a title and a description.</td><td><code>scripts/check-links.ts</code>.</td></tr>
+        <tr><td>Motion only where it explains: a pressed button, smooth scrolling to an anchor. Both removed under <code>prefers-reduced-motion</code>.</td><td>CSS media query; review.</td></tr>
+        <tr><td>Docs are the repo's, not a fork.</td><td><code>scripts/sync-docs.ts</code> copies them at build and records the source file date.</td></tr>
+      </tbody>
+    </table>
+  </Sec>
+</Base>

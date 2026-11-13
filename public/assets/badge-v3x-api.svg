@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 132 20" width="132" height="20" role="img" aria-labelledby="t d">
+<title id="t">Built for V3X API v4, game 1.15.1</title><desc id="d">Built for V3X API v4, game 1.15.1</desc>
+<defs><clipPath id="r"><rect width="132" height="20" rx="3"/></clipPath></defs><g clip-path="url(#r)"><rect width="46" height="20" fill="#1f3550"/><rect x="46" width="86" height="20" fill="#2f6f73"/></g><text x="23" y="14" font-family="'Segoe UI', Helvetica, Arial, sans-serif" font-size="11" font-weight="bold" fill="#e2c07a" text-anchor="middle">V3X</text><text x="89" y="14" font-family="'Segoe UI', Helvetica, Arial, sans-serif" font-size="11" font-weight="bold" fill="#f4ecd8" text-anchor="middle">API v4 · 1.15.1</text>
+</svg>

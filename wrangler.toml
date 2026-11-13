@@ -1,0 +1,5 @@
+# Cloudflare Pages project for https://v3x.pages.dev
+# Deploy (after `bun run build`):  bunx wrangler pages deploy dist --project-name v3x
+name = "v3x"
+pages_build_output_dir = "dist"
+compatibility_date = "2026-11-01"

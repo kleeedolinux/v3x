@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-labelledby="t d">
+<title id="t">Less wasted CPU</title><desc id="d">Less wasted CPU</desc>
+<defs><linearGradient id="brass" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#e2c07a"/><stop offset=".55" stop-color="#b98b3e"/><stop offset="1" stop-color="#7a5a22"/></linearGradient></defs><circle cx="32" cy="32" r="30" fill="url(#brass)"/><circle cx="32" cy="32" r="26" fill="#1f3550"/><g fill="none" stroke="#f4ecd8" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><rect x="19" y="19" width="26" height="26" rx="3"/><path d="M26,14 V19 M32,14 V19 M38,14 V19 M26,45 V50 M32,45 V50 M38,45 V50 M14,26 H19 M14,32 H19 M14,38 H19 M45,26 H50 M45,32 H50 M45,38 H50"/></g>
+</svg>

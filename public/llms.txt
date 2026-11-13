@@ -1,0 +1,15 @@
+# V3X
+
+> V3X is an unofficial script extender and engine-level modding platform for Victoria 3 (single player, Windows x64, game version 1.15.1): a loader (version.dll) plus plugins that fix engine bugs, cut loading work and add a main-menu V3X button, and a plain-C API and SDK for modders. Numbers below were measured on the author's PC (16 GB RAM, integrated GPU).
+
+- 3D-model loading pass: 37.5 s before, 6.7 s with the optional lazy_mesh plugin.
+- Debug-mode autosave: 156 MB before, 26 MB with the optional enhance plugin.
+- GDP and other history graphs are kept when you switch country (keep_history, on by default).
+- Not for multiplayer. Uninstall: run V3X-Setup.exe > Uninstall, or delete binaries\version.dll and binaries\v3x.
+
+## Pages
+- [Front page](https://v3x.pages.dev/): what V3X does for a player, measured results, install, FAQ
+- [Players' guide](https://v3x.pages.dev/guide/): install, the V3X button, plugins on/off, troubleshooting
+- [Guia do jogador (pt-BR)](https://v3x.pages.dev/pt-br/guia/)
+- [Docs](https://v3x.pages.dev/docs/): getting started, API reference, safety rules, scripting, plugin catalog, testing
+- [Source code](https://github.com/kleeedolinux/v3x)

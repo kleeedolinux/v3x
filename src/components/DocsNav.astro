@@ -1,0 +1,26 @@
+---
+import { getCollection } from "astro:content";
+interface Props { current?: string }
+const { current } = Astro.props;
+const docs = (await getCollection("docs")).sort((a, b) => a.data.order - b.data.order);
+const groups = [
+  { key: "players", label: "For players" },
+  { key: "modders", label: "For modders" },
+  { key: "engine", label: "Engine notes" },
+] as const;
+const short = (t: string) => t.replace(/\s*\(.*\)\s*$/, "").replace(/`/g, "");
+---
+<nav aria-label="Documentation">
+  <h2><a href="/docs/" aria-current={current === undefined ? "page" : undefined} style="color:inherit">Docs index</a></h2>
+  {groups.map((g) => (
+    <>
+      <h2>{g.label}</h2>
+      <ul>
+        {g.key === "players" && <li><a href="/guide/">Players' guide</a></li>}
+        {docs.filter((d) => d.data.group === g.key).map((d) => (
+          <li><a href={`/docs/${d.id}/`} aria-current={d.id === current ? "page" : undefined}>{short(d.data.title)}</a></li>
+        ))}
+      </ul>
+    </>
+  ))}
+</nav>

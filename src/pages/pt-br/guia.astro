@@ -1,0 +1,150 @@
+---
+import Base from "../../layouts/Base.astro";
+import Sec from "../../components/Sec.astro";
+import PluginTable from "../../components/PluginTable.astro";
+import { RELEASES_URL } from "../../data/facts";
+
+const toc = [
+  ["antes", "Antes de começar"], ["instalar", "Instalar"], ["primeira-vez", "A primeira abertura"],
+  ["menu", "O botão V3X"], ["partes", "O que vem ligado e desligado"], ["manual", "Mudar as partes à mão"],
+  ["conquistas", "Conquistas, ironman, multijogador"], ["atualizar", "Atualizar, reparar, desinstalar"], ["problemas", "Quando algo dá errado"],
+];
+const ini = `[plugins]
+ironman_console=0
+loc_fallback=1`;
+---
+<Base lang="pt-BR" title="Como instalar o V3X no Victoria 3: guia do jogador" ogType="article" crumbs={[{ name: "V3X", href: "/pt-br/" }, { name: "Guia do jogador", href: "/pt-br/guia/" }]} jsonLd={[{ "@type": "TechArticle", headline: "Como instalar e usar o V3X", inLanguage: "pt-BR", about: "Victoria 3", proficiencyLevel: "Beginner" }]} description="Como instalar o V3X no Victoria 3, usar o botão V3X do menu principal, ligar e desligar partes, manter as conquistas, desinstalar e o que fazer quando algo dá errado." section="guide" alternate="/guide/" sheet="02 · Guia do jogador" source="docs/install.md" sourceUrl="/docs/install/">
+  <div class="page">
+    <aside>
+      <nav aria-label="Nesta página">
+        <h2>Guia do jogador</h2>
+        <ol>{toc.map(([id, t], i) => <li><a href={`#${id}`}>{i + 1}. {t}</a></li>)}</ol>
+        <h2>Veja também</h2>
+        <ul>
+          <li><a href="/pt-br/#faq">Perguntas de jogadores</a></li>
+          <li><a href="/docs/troubleshooting/" hreflang="en">Solução de problemas (técnico, em inglês)</a></li>
+          <li><a href="/docs/configuration/" hreflang="en">Todas as configurações (em inglês)</a></li>
+          <li><a href="/guide/" lang="en">Guide in English</a></li>
+        </ul>
+      </nav>
+    </aside>
+    <article>
+      <header class="title">
+        <p class="kicker">Guia do jogador</p>
+        <h1>Como instalar e usar o V3X</h1>
+        <p class="lede" style="margin:0">Tudo o que um jogador precisa, na ordem em que vai precisar. Sem programação.</p>
+      </header>
+
+      <Sec n={1} id="antes" title="Antes de começar">
+        <ul class="measure">
+          <li><b>Victoria 3 1.15.1 no Windows.</b> O V3X é feito para essa versão. Em outra versão o instalador avisa antes.</li>
+          <li><b>Só para um jogador.</b> Não use o V3X no multijogador (<a href="#conquistas">por quê, e como desligar por uma sessão</a>).</li>
+          <li><b>Faça backup dos seus saves</b> antes de experimentar algo novo. Eles ficam em <code>Documentos\Paradox Interactive\Victoria 3\save games</code>.</li>
+          <li><b>Deixe alguns GB livres no disco C:.</b> Um autosave já falhou com <code>Failed to write to disk</code> quando o C: estava quase cheio.</li>
+        </ul>
+      </Sec>
+
+      <Sec n={2} id="instalar" title="Instalar">
+        <ol class="measure">
+          <li><b>Baixe</b> o <code>V3X-Setup.exe</code> na <a href={RELEASES_URL}>página de Releases</a>. A versão também traz um checksum SHA-256 (<code>SHA256SUMS.txt</code>) se você quiser conferir o arquivo.</li>
+          <li>Se o SmartScreen do Windows ou o antivírus avisar, é porque o arquivo é novo e não assinado. Escolha <em>Mais informações › Executar assim mesmo</em> se confia na origem.</li>
+          <li><b>Feche o Victoria 3.</b> O instalador não roda com o jogo aberto.</li>
+          <li><b>Dê dois cliques no <code>V3X-Setup.exe</code>.</b> Ele acha o jogo pela Steam. Se não achar, pede a pasta: na Steam, botão direito em Victoria 3 › <em>Gerenciar</em> › <em>Ver arquivos locais</em>, e escolha essa pasta <code>Victoria 3</code>.</li>
+          <li><b>Confira</b> se a janela mostra <code>Game version: release/1.15.1 (supported)</code> e clique em <b>Install V3X</b>.</li>
+          <li><b>Abra o jogo como sempre</b>, pela Steam ou pelo launcher da Paradox.</li>
+        </ol>
+        <p class="note small">Se o seu jogo estiver numa versão mais nova, o instalador avisa e só instala se você clicar em <b>Install anyway</b>. As partes se desligam sozinhas onde o código do jogo mudou, mas essa combinação nunca foi testada: esperar uma atualização do V3X é o mais seguro.</p>
+
+        <h3 class="sub">O que o instalador coloca no seu PC</h3>
+        <p class="measure small">Tudo vai para a pasta <code>binaries</code> do jogo. Sem administrador, sem alterar arquivos do jogo. A opção da Steam <em>Verificar integridade dos arquivos</em> não remove o V3X.</p>
+        <table class="ledger" style="max-width:52rem">
+          <thead><tr><th scope="col">Arquivo</th><th scope="col">O que é</th></tr></thead>
+          <tbody>
+            <tr><th scope="row"><code>binaries\version.dll</code></th><td>O carregador do V3X. O Windows o carrega com o jogo; ele carrega os plugins.</td></tr>
+            <tr><th scope="row"><code>binaries\v3x\plugins\*.dll</code></th><td>Os plugins: as partes do V3X.</td></tr>
+            <tr><th scope="row"><code>binaries\v3x\*.ini</code></th><td>Configurações. Só são criadas se não existirem: o instalador nunca sobrescreve as suas.</td></tr>
+            <tr><th scope="row"><code>binaries\v3x\install_manifest.txt</code></th><td>A lista dos arquivos instalados com checksums, usada para reparar e desinstalar.</td></tr>
+            <tr><th scope="row"><code>binaries\v3x\install.log</code></th><td>O que o instalador fez.</td></tr>
+            <tr><th scope="row"><code>binaries\v3x\backup\version.dll</code></th><td>Só se já havia um <code>version.dll</code> de outra ferramenta. Ele volta no lugar ao desinstalar.</td></tr>
+          </tbody>
+        </table>
+
+        <h3 class="sub" id="sem-instalador">Sem o instalador</h3>
+        <p class="measure small">O V3X está em pré-lançamento. Se a página de Releases ainda não tiver o <code>V3X-Setup.exe</code>, hoje o único caminho é a instalação de desenvolvedor: clonar o repositório dentro da pasta do jogo e rodar <code>./build.sh install</code>, que coloca as mesmas duas coisas (<code>version.dll</code> e a pasta <code>v3x</code>) no lugar. Precisa de Python e Git Bash; o <a href="/docs/getting-started/" hreflang="en">Getting started (em inglês)</a> mostra o passo a passo.</p>
+      </Sec>
+
+      <Sec n={3} id="primeira-vez" title="A primeira abertura">
+        <p class="measure">Uma pequena janela <b>V3X console</b> abre ao lado do jogo e lista o que carregou: linhas do carregador, dos plugins e, em vermelho, qualquer parte que se recusou a carregar, com o motivo.</p>
+        <p class="measure">O botão de fechar foi removido de propósito: fechar uma janela de console fecharia o jogo junto. Para escondê-la, coloque a linha <code>console=0</code> no começo de <code>binaries\v3x\v3x.ini</code>.</p>
+        <p class="measure small">Se o jogo parecer congelar depois que você clicou na janela do console, aperte <kbd>Esc</kbd>: o Windows pausa um console enquanto há texto selecionado nele.</p>
+        <figure class="plate">
+          <img src="/assets/mockup-console.svg" width="960" height="430" loading="lazy" alt="Ilustração da janela do console do V3X: linhas do carregador em ciano, linhas dos plugins em verde, uma falha em vermelho." />
+          <figcaption><b>Prancha I</b>Ilustração da janela do console, não é uma captura de tela. Do repositório do V3X (em inglês).</figcaption>
+        </figure>
+      </Sec>
+
+      <Sec n={4} id="menu" title="O botão V3X no menu principal">
+        <p class="measure">No menu principal aparece um botão <b>V3X</b>. Ele abre uma janela com uma caixa de seleção para cada parte do V3X. Desmarque para desligar, marque para ligar. A mudança é gravada no <code>v3x.ini</code> e vale <b>na próxima vez que abrir o jogo</b>.</p>
+        <p class="measure small">Se algum mod seu substituir o menu principal, o botão pode não aparecer. Tudo continua funcionando pelo <code>v3x.ini</code> (<a href="#manual">seção 6</a>). A janela do menu é uma das partes mais novas do V3X; se ela se comportar mal, use o arquivo ini e relate o problema.</p>
+        <figure class="plate">
+          <img src="/assets/mockup-menu.svg" width="960" height="520" loading="lazy" alt="Ilustração da janela de plugins do V3X aberta pelo botão V3X do menu principal, com uma caixa de seleção por plugin." />
+          <figcaption><b>Prancha II</b>Ilustração da janela de plugins, não é uma captura de tela. Do repositório do V3X (em inglês).</figcaption>
+        </figure>
+      </Sec>
+
+      <Sec n={5} id="partes" title="O que vem ligado e desligado">
+        <p class="measure">O V3X é um conjunto de partes (plugins). O instalador liga as que corrigem ou protegem sem mudar o seu jogo, e instala as outras desligadas, para você experimentar.</p>
+        <PluginTable lang="pt-BR" />
+      </Sec>
+
+      <Sec n={6} id="manual" title="Mudar as partes à mão">
+        <p class="measure">Abra <code>binaries\v3x\v3x.ini</code> no Bloco de Notas. Embaixo de <code>[plugins]</code>, escreva o nome da parte com <code>=0</code> para desligar ou <code>=1</code> para ligar:</p>
+        <pre class="astro-code"><code>{ini}</code></pre>
+        <ul class="measure small">
+          <li>Uma parte que não aparece na lista é carregada. <code>0</code> quer dizer "não carregar".</li>
+          <li>As mudanças valem na próxima abertura do jogo.</li>
+          <li>Comentários ficam numa linha só deles, começando com <code>;</code>. Um comentário depois de um valor vira parte do valor: <code>lazy_mesh = 0 ; teste</code> <em>não</em> desliga o lazy_mesh.</li>
+          <li>Cada parte pode ter o seu próprio arquivo, <code>binaries\v3x\&lt;parte&gt;.ini</code>. São opcionais; <a href="/docs/configuration/" hreflang="en">todas as opções estão aqui (em inglês)</a>.</li>
+        </ul>
+      </Sec>
+
+      <Sec n={7} id="conquistas" title="Conquistas, ironman, multijogador">
+        <p class="measure"><b>Conquistas.</b> O V3X não mexe no código das conquistas nem na posse de DLCs e não desbloqueia nada. Uma parte ligada por padrão, <code>ironman_console</code>, libera o console no ironman. Se as conquistas importam para você, coloque <code>ironman_console=0</code> e deixe desligadas as partes que mudam a simulação (o throttle do <code>sim_opt</code>).</p>
+        <p class="measure"><b>Multijogador.</b> Não use o V3X online: os outros jogadores estariam rodando um código diferente, e as partes que mudam a simulação dessincronizariam a partida. Antes de uma sessão multijogador, renomeie <code>binaries\version.dll</code> para <code>version.dll.off</code> e depois renomeie de volta. Ou desinstale.</p>
+      </Sec>
+
+      <Sec n={8} id="atualizar" title="Atualizar, reparar, desinstalar">
+        <p class="measure">Rode o <code>V3X-Setup.exe</code> de novo (um mais novo, para atualizar):</p>
+        <ul class="measure">
+          <li><b>Repair / update V3X</b> copia de volta qualquer arquivo do V3X que esteja faltando ou danificado, ou os troca pela versão nova. As suas configurações ficam.</li>
+          <li><b>Uninstall V3X</b> remove exatamente os arquivos que o instalador colocou e devolve um <code>version.dll</code> que já existia antes. Logs, relatórios e configurações que você mudou ficam em <code>binaries\v3x\</code>; marque <em>Also delete logs, reports and settings</em> para apagar essa pasta também.</li>
+        </ul>
+        <p class="measure">Perdeu o instalador? Apague <code>binaries\version.dll</code> e a pasta <code>binaries\v3x</code>. A desinstalação é só isso.</p>
+        <p class="measure small">Quando o próprio Victoria 3 atualiza, as partes cujo código do motor mudou se desligam sozinhas até o V3X ser atualizado. Elas avisam em <code>binaries\v3x\v3x.log</code>.</p>
+      </Sec>
+
+      <Sec n={9} id="problemas" title="Quando algo dá errado">
+        <table class="ledger">
+          <thead><tr><th scope="col">Problema</th><th scope="col">O que fazer</th></tr></thead>
+          <tbody>
+            <tr><th scope="row">O instalador diz "Victoria 3 is running"</th><td>Feche o jogo (procure <code>victoria3.exe</code> no Gerenciador de Tarefas) e rode o instalador de novo.</td></tr>
+            <tr><th scope="row">"Victoria 3 was not found automatically"</th><td>Escolha a pasta <code>Victoria 3</code>, a que tem a pasta <code>binaries</code> dentro.</td></tr>
+            <tr><th scope="row">"This setup file is damaged"</th><td>Baixe de novo. O arquivo é conferido antes de qualquer coisa ser gravada.</td></tr>
+            <tr><th scope="row">"could not write … is it in use?"</th><td>Feche o jogo e qualquer programa que possa estar usando o arquivo, e rode <b>Repair</b>.</td></tr>
+            <tr><th scope="row">O jogo não abre ou fecha logo de cara</th><td>Renomeie <code>binaries\version.dll</code> para abrir sem o V3X. Se resolver, desligue as partes uma a uma no <code>v3x.ini</code> para achar a causa, ou desinstale.</td></tr>
+            <tr><th scope="row">Falta de memória no Novo Jogo</th><td>Se o <code>v3x.log</code> disser <code>Windows commit limit is exhausted</code>, aumente o arquivo de paginação do Windows (gerenciado pelo sistema, ou 16 GB ou mais).</td></tr>
+            <tr><th scope="row">Um save falha com "Failed to write to disk"</th><td>Libere vários GB no disco C:. O arquivo de paginação também cresce nesse disco.</td></tr>
+            <tr><th scope="row">Uma parte não faz nada depois de uma atualização do jogo</th><td>Esperado: ela se desligou porque o código do jogo mudou. Aguarde uma atualização do V3X.</td></tr>
+          </tbody>
+        </table>
+        <h3 class="sub">Relatar um problema</h3>
+        <p class="measure">Antes de abrir o jogo de novo, copie estes arquivos para outro lugar, porque a próxima abertura os sobrescreve:</p>
+        <ul class="measure small">
+          <li><code>binaries\v3x\v3x.log</code>, <code>crash.log</code>, <code>crash.prev.log</code> e <code>install.log</code>. Se aparecer <code>v3x.&lt;número&gt;.log</code>, o relator de erros do jogo estava segurando o <code>v3x.log</code>: envie esse.</li>
+          <li>Os logs do próprio jogo: <code>Documentos\Paradox Interactive\Victoria 3\logs\</code>.</li>
+        </ul>
+        <p class="small">Detalhes técnicos, para quem for ler o seu relato: <a href="/docs/troubleshooting/" hreflang="en">Troubleshooting (em inglês)</a>.</p>
+      </Sec>
+    </article>
+  </div>
+</Base>

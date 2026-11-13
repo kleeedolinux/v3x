@@ -1,0 +1,96 @@
+{
+  "syncedAt": "2026-11-13T22:14:36.130Z",
+  "repo": "D:/SteamLibrary/steamapps/common/Victoria 3/v3x",
+  "docs": [
+    {
+      "slug": "install",
+      "src": "docs/install.md",
+      "updated": "2026-11-13"
+    },
+    {
+      "slug": "faq",
+      "src": "docs/faq.md",
+      "updated": "2026-11-13"
+    },
+    {
+      "slug": "troubleshooting",
+      "src": "docs/troubleshooting.md",
+      "updated": "2026-11-13"
+    },
+    {
+      "slug": "configuration",
+      "src": "docs/configuration.md",
+      "updated": "2026-11-13"
+    },
+    {
+      "slug": "plugins",
+      "src": "docs/plugins.md",
+      "updated": "2026-11-13"
+    },
+    {
+      "slug": "getting-started",
+      "src": "docs/getting-started.md",
+      "updated": "2026-11-13"
+    },
+    {
+      "slug": "plugin-template",
+      "src": "templates/plugin_template/README.md",
+      "updated": "2026-11-13"
+    },
+    {
+      "slug": "api-reference",
+      "src": "docs/api-reference.md",
+      "updated": "2026-11-13"
+    },
+    {
+      "slug": "api-stability",
+      "src": "docs/api-stability.md",
+      "updated": "2026-11-13"
+    },
+    {
+      "slug": "v3x-h",
+      "src": "include/v3x.h",
+      "updated": "2026-11-13"
+    },
+    {
+      "slug": "safety",
+      "src": "docs/safety.md",
+      "updated": "2026-11-13"
+    },
+    {
+      "slug": "scripting",
+      "src": "docs/scripting.md",
+      "updated": "2026-11-13"
+    },
+    {
+      "slug": "testing",
+      "src": "docs/testing.md",
+      "updated": "2026-11-13"
+    },
+    {
+      "slug": "console-commands",
+      "src": "docs/console-commands.md",
+      "updated": "2026-11-13"
+    },
+    {
+      "slug": "reverse-engineering",
+      "src": "docs/reverse-engineering.md",
+      "updated": "2026-11-13"
+    },
+    {
+      "slug": "engine-map",
+      "src": "docs/engine-map.md",
+      "updated": "2026-11-13"
+    },
+    {
+      "slug": "maturity",
+      "src": "docs/maturity.md",
+      "updated": "2026-11-13"
+    },
+    {
+      "slug": "session-2026-11-13",
+      "src": "docs/sessions/2026-11-13-evening.md",
+      "updated": "2026-11-13"
+    }
+  ]
+}

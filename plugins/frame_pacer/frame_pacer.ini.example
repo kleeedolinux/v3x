@@ -1,0 +1,36 @@
+# frame_pacer configuration. Copy to <game>/binaries/v3x/frame_pacer.ini and edit.
+# Without that file the plugin uses exactly these built-in defaults.
+#
+# enabled             1/0. 0 = the plugin installs nothing.
+# replace_busy_wait   1 = the engine's own frame cap (Settings > Framerate cap) spins a CPU core
+#                     at 100% until the next frame; replace that with a high-resolution timer
+#                     sleep. Same frame rate, less CPU heat, which leaves more of the shared
+#                     power budget to the integrated GPU.
+# idle_fps            cap while idle. Idle = no keyboard/mouse input for idle_after_s, or the
+#                     simulation is paused and no input for paused_idle_after_s. Any input
+#                     ends idle on the next frame. 0 = no idle cap.
+# idle_after_s        see idle_fps.
+# paused_idle_after_s see idle_fps.
+# background_fps      cap while another window is in the foreground. 0 = off.
+# minimized_fps       cap while the game is minimised. 0 = off.
+# sim_idle_ms         the simulation counts as paused after this long without tick activity.
+# tick_render_hz      while a simulation tick runs, the engine hands the game state to the
+#                     renderer whenever the tick held it for GameStateTick.MinLockTime ms
+#                     (default 1 ms). This sets MinLockTime = 1000 / tick_render_hz, so the
+#                     tick runs longer between renders: faster ticks, choppier frames while
+#                     the simulation is busy. 0 = keep the engine value (default; 10 gave
+#                     >100 ms frames while ticks ran; try 30 if you want more tick speed).
+# log_interval_s      status line in v3x.log every N seconds with the true engine frame
+#                     times (measured once per engine frame). 0 = never.
+
+[frame_pacer]
+enabled = 1
+replace_busy_wait = 1
+idle_fps = 20
+idle_after_s = 30
+paused_idle_after_s = 3
+background_fps = 20
+minimized_fps = 5
+sim_idle_ms = 3000
+tick_render_hz = 0
+log_interval_s = 10

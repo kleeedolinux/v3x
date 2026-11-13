@@ -1,0 +1,20 @@
+# build outputs
+build/
+*.dll
+*.exe
+*.lib
+*.pdb
+*.obj
+*.o
+
+# python / analysis scratch
+__pycache__/
+*.pkl
+tools/*_tmp/
+tools/re_*_tmp/
+
+# generated from the user's own game files (Paradox copyright) - regenerate with make_mod.py
+mods/v3x_lowspec_shaders/gfx/
+
+# local config
+.mcp.json

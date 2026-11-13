@@ -1,0 +1,7 @@
+; my_plugin configuration. Copy to <game>/binaries/v3x/my_plugin.ini. Every key is optional;
+; a missing file means these defaults.
+[my_plugin]
+; 0 = load but install nothing
+enabled = 1
+; write a log line every N game ticks (0 = never)
+log_every = 0

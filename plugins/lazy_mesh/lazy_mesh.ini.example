@@ -1,0 +1,32 @@
+# lazy_mesh.ini - copy to <game>/binaries/v3x/lazy_mesh.ini (all keys optional). See docs/re/lazy_mesh.md.
+#
+# mode = off      no hooks at all (default)
+# mode = measure  no behaviour change: records which mesh types are really requested (CMeshObject
+#                 creation, entity overrides, entity blend shapes) and writes v3x/lazy_mesh_used.txt
+#                 (every 30 s and on 'lazymesh dump'). It also records what 'lazy' WOULD defer with the
+#                 rules below (column 'decision'). Run this first, play a normal session, then copy
+#                 lazy_mesh_used.txt to lazy_mesh_eager.txt.
+# mode = lazy     EXPERIMENTAL: types chosen by the rules below are not loaded at startup; each one is
+#                 loaded the first time something requests it (short hitch at that moment).
+mode = off
+
+# --- rules for mode=lazy (a type is deferred if no eager rule keeps it and a defer rule matches) ---
+skip_debug = 1                    # defer types whose .mesh is under gfx/models/debug/
+defer_dirs = gfx/models/portraits/, gfx/models/military/   # defer types whose .mesh path contains one of these; "none" = empty
+defer_all = 0                     # 1 = defer every type not kept by an eager rule (needs a good eager file)
+eager_contains = bridge           # never defer a type whose NAME contains one of these (route graphics reads
+                                  # bridge mesh bounds without creating a mesh object); "none" = empty
+eager_file = lazy_mesh_eager.txt  # v3x/<file>: type names (first column) that are always loaded at startup
+
+startup_from_report = 1           # types the previous session's lazy_mesh_used.txt shows as first requested by
+                                  # entity parsing (blend shapes / overrides) load in the parallel pass instead of
+                                  # serially right after it (1.15.1 session: 364 types, ~14 s on one thread)
+prefetch_on_game = 1              # when the map is ready (load_transition to Game), load the deferred types the
+                                  # previous report lists as used, most-used first, one at a time on a low-priority thread
+prefetch_all = 0                  # 1 = prefetch also types never used before (no RAM saving left)
+prefetch_gap_ms = 20              # pause between two prefetched types
+merge_report = 1                  # merge this session's usage into lazy_mesh_used.txt (counts add up, nothing is lost)
+prefetch_after_s = 0              # 0 = off; N = N s after the startup pass, load ALL remaining deferred types
+                                  # in the background (replaces prefetch_on_game)
+wait_timeout_ms = 60000           # max wait for a type another thread is loading
+log_loads = 1                     # log each on-demand load (first 400) to v3x.log

@@ -1,0 +1,9 @@
+# fast_load.ini - copy to <game>/binaries/v3x/fast_load.ini (all keys optional, values 0|1)
+timeline = 1         # timing hooks + v3x/load_timeline.txt + one summary line per transition in v3x.log
+db_nodes = 1         # list every database node (engine's own per-node ms) in the timeline
+mesh_threads = 0     # 0 = don't touch; 2..15 = mesh loader thread count (restored afterwards)
+counters = 1         # 1 Hz CPU / file I/O / page-in / free RAM lines in the timeline until the load ends
+pump_yield = 0       # main-thread loading pump spins: 0 = leave, 1 = SwitchToThread after each step, 2 = Sleep(1)
+worker_spin = 0      # idle task workers busy-poll: 0 = leave, 1 = pause backoff, 2 = + SwitchToThread, 3 = + Sleep(1) when long idle
+checksum_cache = 0   # accepted but fails closed in this build (see docs/re/loading.md section 4)
+cache_verify = 1     # reserved for the checksum cache

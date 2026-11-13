@@ -1,0 +1,12 @@
+{
+  "name" : "V3X Low-Spec Shaders",
+  "id" : "v3x.lowspec_shaders",
+  "version" : "0.1",
+  "supported_game_version" : "1.15.*",
+  "short_description" : "Cheaper terrain, water and tree shaders for integrated GPUs (V3X perf project). Graphics only, no gameplay change.",
+  "tags" : ["Graphics", "Fixes"],
+  "relationships" : [],
+  "game_custom_data" : {
+    "multiplayer_synchronized" : false
+  }
+}

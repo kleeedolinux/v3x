@@ -1,0 +1,24 @@
+; sim_opt config. Copy to <game>/binaries/v3x/sim_opt.ini.
+; Without this file only the read-only diag_trades and diag_journal probes run; everything else is OFF by default.
+
+[sim_opt]
+enabled=1
+; diag=1: per tick task, record how its first stage runs (parallel / whole / serial-loop / single),
+; range size, Execute time and main-thread share. Read-only, does not change the simulation.
+; Report: console "simopt", automatically on Game->Empty; also writes v3x/sim_opt_diag.csv.
+diag=0
+; diag_trades=1 (default ON, read-only): UpdateStateTrades probe. Per run: iterations of the trade solver, records per
+; iteration, run / parallel-phase / longest-iteration time; runs >= 1 s are logged. Report in "simopt", at Game->Empty
+; and in v3x/sim_opt_diag.csv (trades_metric rows).
+diag_trades=1
+; diag_journal=1 (default ON, read-only): journal pulse cost per journal-entry type (ExecuteOnPulse, daily/monthly/
+; yearly) and of the per-country stage incl. the costliest countries; top 20 in "simopt", at Game->Empty and in
+; v3x/sim_opt_diag.csv (journal_type / journal_country_stage rows).
+diag_journal=1
+; throttle=1: skip 1 of every N runs of the listed tasks (Name:N, N = 2..64). CHANGES THE SIMULATION.
+; Single-player only: the skip counter is local to this process, so MP clients would desync.
+; TICK-rate tasks run 4x per game day; use odd N (3, 5) so the skips do not always hit the same tick of the day.
+; Refused: modifier recalculation, object removal, Prepare/Flush pairs, Clear*/Validate*/Remove*, movement, battles,
+; journal pulses. Console: "simopt throttle off" / "simopt throttle on".
+throttle=0
+throttle_tasks=HandleAutonomousInvestment:3,UpdateBuildingSpendingPriorities_Stage1:3,UpdateBuildingSpendingPriorities_Stage2:3,UpdateSpendingVariables:3

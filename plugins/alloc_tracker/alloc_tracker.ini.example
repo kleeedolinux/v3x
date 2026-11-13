@@ -1,0 +1,31 @@
+; alloc_tracker config. Copy to <game>/binaries/v3x/alloc_tracker.ini. Diagnostic only: enable for one load,
+; read binaries/v3x/alloc_report.txt (or type `allocs top 30` in the V3X console), then set enabled=0 again.
+
+[alloc_tracker]
+; 0 = nothing is hooked (default). 1 = hook mi_new / mi_new_aligned / mi_malloc / mi_free at startup.
+enabled=0
+; Allocations of at least this many KiB are always recorded and tracked until freed (LIVE bytes per site).
+big_kb=64
+; Smaller allocations: one sample per this many KiB allocated per thread, weighted by that amount.
+sample_kb=256
+; The first block of at least this many MiB at a site stores a 6-frame stack in the report.
+stack_mb=1
+; Report file interval (0 = only on console command / load_transition event).
+report_interval_s=30
+; Lines per table in alloc_report.txt.
+report_top=40
+; Functions of at most this many bytes that call an allocator are treated as wrappers (std::_Allocate,
+; make_X() { return new X; }): the call site is attributed to their caller instead.
+wrapper_max_bytes=256
+; Extra wrapper functions to skip, as hex RVAs (any address inside the function), comma separated.
+skip=
+; Sampled small blocks stay in the live table until mi_free: LIVE estimate for blocks < big_kb per site.
+small_live=1
+; Live table size = 2^live_slots_log2 entries x 32 bytes (19 = 16 MiB; big blocks + live samples).
+live_slots_log2=19
+; Report section with mimalloc's own commit counter + segment walk (in use / slack / free / pending decommit).
+mimalloc_walk=1
+; Hook ntdll NtAllocateVirtualMemory(Ex): record who reserved each allocation, so the report can split the
+; NON-mimalloc private commit by module (driver, d3d, fmod, steam, ...). Private memory without a record
+; was mapped by the kernel (GPU allocations on an iGPU) or reserved before the hook.
+vm_owners=1

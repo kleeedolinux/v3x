@@ -1,0 +1,17 @@
+# asset_stream configuration. Copy to <game>/binaries/v3x/asset_stream.ini and edit.
+# Without that file the plugin uses exactly these built-in defaults (= does nothing).
+#
+# enabled             1/0. 0 = the plugin installs nothing (default).
+# texture_streaming   1 = force the engine's own texture streamer on (Graphics setting
+#                     texture_streaming, which every quality preset forces off). Textures loaded
+#                     with the engine's "streamable" flag (mesh materials: portraits, units,
+#                     buildings, map objects) then get mips added and dropped at runtime within
+#                     cache_mb. Other textures (GUI) load as before. Read once at startup, when
+#                     the renderer is created. Untested in game: watch for blurry/popping models.
+# cache_mb            streamer budget in MB (128..4096, the engine's own setting range).
+#                     0 = keep the texture_streaming_cache value from the game settings.
+
+[asset_stream]
+enabled = 0
+texture_streaming = 1
+cache_mb = 512

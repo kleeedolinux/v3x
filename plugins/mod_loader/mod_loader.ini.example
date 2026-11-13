@@ -1,0 +1,26 @@
+# mod_loader: copy to binaries/v3x/mod_loader.ini (every key optional; these are the defaults).
+# See docs/re/modloading.md.
+
+# off     = hook nothing
+# measure = count VFS probes per search-path root, build file indexes for mod/DLC roots and check every
+#           index prediction against the engine's real answer (no behaviour change)
+# on      = answer probes the index says are misses with "not found" without a syscall
+mode = measure
+
+# which roots get an index (files in them must not change while the game runs)
+index_workshop = 1     # steamapps/workshop/content/529340/<id>
+index_dlc = 1          # <game>/game/dlc/<dlc>
+index_local = 0        # Documents/Paradox Interactive/Victoria 3/mod/<x> (often edited live)
+
+# mode=on: every Nth skipped miss is re-checked with the real call; one mismatch = cache off (0 = never)
+verify_every = 64
+
+# write binaries/v3x/mod_report.txt after every load transition (and on the `modload` command)
+report = 1
+
+# Hide mods (their files become invisible, as if the mod had none). Changes the game; off by default.
+# skip_fatal = 1 hides mods with >= fatal_min parse errors in the previous run's logs/error.log.
+skip_fatal = 0
+fatal_min = 1
+# comma separated workshop ids / mod folder names
+skip_mods =

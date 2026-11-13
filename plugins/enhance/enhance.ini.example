@@ -1,0 +1,44 @@
+# enhance configuration. Copy to <game>/binaries/v3x/enhance.ini and edit.
+# Without that file the plugin uses exactly these built-in defaults.
+# Every feature checks the game code it changes and is skipped (logged in v3x.log) if the game
+# version does not match what was reverse-engineered (1.15.1). Details: v3x/docs/re/enhance.md.
+#
+# binary_saves_in_debug  1 = with debug_mode on, saves are still written in the normal release
+#                        format (zipped binary, like a game without debug_mode) instead of
+#                        uncompressed text. In the lead's 1.15.1 session each text autosave was
+#                        156 MB and froze the game for about 3.2 s. 0 = vanilla (text in debug_mode).
+# deflate_level          0 = keep the engine's zip compression level (default).
+#                        1..9 = zlib level for zipped saves: 1 is fastest with bigger files.
+#                        Any level loads normally. When set, the level the engine asked for
+#                        is logged on the first save (`enhance` in the console shows it too).
+# speed_table            1 = use speed1..speed4 below as seconds per simulation tick
+#                        (4 ticks = 1 day). Vanilla: 2.0 1.0 0.5 0.25. Speed 5 stays as it is:
+#                        it is already "as fast as possible" (0.0001 s). Values are clamped to
+#                        0.0001..10. Console: `speed` shows the table, `speed 4 0.1` changes
+#                        one speed while the game runs (not saved to this file).
+# save_timing            1 = log every save to v3x.log: name, format and how long the game
+#                        was blocked ("save #3 'autosave_2' format 3 (zipped binary): 812 ms").
+#                        Logging only, changes nothing. 0 = off. (The save hook itself is always
+#                        installed: it sends the save_begin/save_end events other plugins use.)
+# lean_debug             1 = keep debug_mode (console + cheats keep working) but switch off its
+#                        debug-only extras below. Console `lean off` / `lean on` to compare.
+#   lean_gui             the GUI's InDebugMode is false: no error deer/lion, FPS line, debug
+#                        buttons and debug parts of panels and tooltips.
+#   lean_tooltips        no debug text added to tooltips / localization (12 places).
+#   lean_theater_cache   keep a per-frame cache that debug_mode bypasses (military theater text).
+# (fast_speed5 was withdrawn: it let a tick overlap console commands and crashed the game.
+#  The key is ignored.)
+
+[enhance]
+binary_saves_in_debug = 1
+deflate_level = 0
+speed_table = 0
+speed1 = 2.0
+speed2 = 1.0
+speed3 = 0.5
+speed4 = 0.25
+save_timing = 1
+lean_debug = 0
+lean_gui = 1
+lean_tooltips = 1
+lean_theater_cache = 1

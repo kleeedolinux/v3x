@@ -1,0 +1,12 @@
+; tick_par config. Copy to <game>/binaries/v3x/tick_par.ini. Without this file: mode=measure.
+; tick_par never changes the simulation: it measures the due tasks of every tick and estimates what
+; fork/join scheduling of the engine-declared-independent tasks could save (docs/re/tick_par.md).
+[tick_par]
+enabled=1
+; off     = install nothing
+; measure = (default) read-only: per-tick due list + per-task time, simulated 2-lane schedule.
+;           Report: console "tickpar" ("tickpar reset"), on Game->Empty, v3x/tick_par_report.csv;
+;           the live dependency graph is written once to v3x/tick_par_graph.csv.
+; on      = REFUSED in this build (runs as measure): the engine's dependencies only order a serial
+;           runner, RunTask / script RNG / render-frame state is global, so no task pair is vetted.
+mode=measure

@@ -1,0 +1,19 @@
+# map_cache: texture re-read diagnostics + optional keep-alive (docs/re/mapmode.md)
+# Copy to binaries/v3x/map_cache.ini. Without the ini the plugin runs as mode=measure.
+#   off     = no hooks
+#   measure = no behaviour change: logs slow texture loads, main-thread stalls (spikes) with the texture
+#             disk reads inside them, and writes v3x/map_cache_report.txt every summary_sec
+#   on      = measure + keep textures that were read from disk repeat_min times alive (LRU, budget_mb)
+mode=measure
+spike_ms=250
+load_log_ms=50
+load_log_mb=8
+log_budget=2000
+big_reserve_mb=16
+summary_sec=300
+# mode=on only (budget counts file bytes; RAM is tight on 16 GB machines, keep it small)
+budget_mb=256
+max_texture_mb=32
+repeat_min=2
+max_pins=1024
+unknown_size_kb=1024

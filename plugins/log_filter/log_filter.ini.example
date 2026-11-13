@@ -1,0 +1,62 @@
+# log_filter configuration. Copy to <game>/binaries/v3x/log_filter.ini and edit.
+# Without that file the plugin uses exactly these built-in defaults.
+#
+# Options
+#   preset           default | aggressive. Sets the dedupe options below; options written
+#                    after the preset line override it.
+#                      default:    dedupe_first = 3, dedupe_template = 0, summary_interval = 60
+#                      aggressive: dedupe_first = 1, dedupe_template = 1, summary_interval = 0
+#                    aggressive logs the FIRST message of every (file:line, template) pair and
+#                    only counts the rest in log_filter_stats.txt: every kind of error stays
+#                    visible once, the repeats of the same mod bug do not.
+#   enabled          1/0. 0 = hook stays installed but every message passes through.
+#   dedupe_first     log the first N identical messages (same file:line and same text),
+#                    suppress the rest. 0 = no dedupe.
+#   dedupe_template  1 = 'identical' means same file:line and same message template: quoted
+#                    text, numbers, paths and identifiers (words with digits or _ . / \ :)
+#                    are ignored. 0 = exact text.
+#   summary_interval seconds between 'suppressed N more like this' lines in the game log.
+#                    0 = never write summaries (counts still go to log_filter_stats.txt).
+#   min_level        only filter messages at this spdlog level or above:
+#                    0 trace, 1 debug, 2 info, 3 warning, 4 error, 5 critical.
+#
+# Rules (any number, max 128). LOC is matched against 'file.cpp:123', MSG against the
+# formatted message text (multi-line messages included). Globs: * = anything, ? = one char,
+# case-sensitive, the whole string must match (so use *text* for 'contains').
+#   drop_loc = LOC           drop every message from that source location
+#   drop_msg = MSG           drop messages whose text matches
+#   drop     = LOC :: MSG    drop when both match
+#   keep_loc / keep_msg / keep   same syntax; a keep match always wins over drop rules
+#                                and is exempt from dedupe.
+# Dropped messages vanish from every log the engine writes (error.log, debug.log, ...)
+# and from the in-game error view, so only drop what is noise.
+
+[log_filter]
+# change only this line to switch presets (default | aggressive)
+preset = default
+enabled = 1
+min_level = 0
+# optional overrides of the preset (uncomment to force a value):
+# dedupe_first = 3
+# dedupe_template = 0
+# summary_interval = 60
+
+# Harmless noise (mod-authoring lint, not bugs):
+# an event nothing fires; it can still be fired by console or other mods
+drop = jomini_eventmanager.cpp:* :: Event * is orphaned
+# a modifier type that only exists in script; works, the engine just wants script_only = yes
+drop = modifier_type_definition_database.cpp:* :: Modifier type definition * is defined in script but not in code*
+# a variable written but never read
+drop = jomini_effect.cpp:* :: Variable '*' is set but is never used*
+# script file without BOM; the engine reads it anyway
+drop = lexer.cpp:* :: File '*' should be in utf8-bom encoding (will try to use it anyways)
+# store lookup of DLC items when offline / not on that store
+drop = dlc.cpp:* :: Could not find item in store backend.
+
+# Opt-in examples (remove the # to enable):
+# drop = pdx_gui_localize.cpp:* :: Unlocalized text '*'
+# drop = pdx_localize.cpp:* :: Duplicate localization key.*
+# drop_loc = pdx_mod_metadata.cpp:168
+
+# Never hidden by default: parse errors (pdx_persistent_reader), script runtime errors
+# (jomini_script_system), missing files/textures, shader compile errors, crashes.

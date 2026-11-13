@@ -1,0 +1,88 @@
+; mem_tuner config. Copy to <game>/binaries/v3x/mem_tuner.ini. Every key is optional; shown values are the defaults.
+; Note: GetPrivateProfileInt cannot read negative numbers (they become 0).
+
+[mem_tuner]
+enabled=1
+
+[options]
+; Write mimalloc 2.0.x options into the engine's option table before CRT init (fail closed if the table shape differs).
+enabled=1
+; Commit 32 MiB segments on demand instead of all at once (mimalloc default 1).
+eager_commit=0
+; Decommit free pages in segments abandoned by exited threads (default 0).
+abandoned_page_decommit=1
+; ms before freed page spans are decommitted (default 25). Lower = commit drops sooner, a few more syscalls.
+decommit_delay=10
+; ms before cached free segments are decommitted (default 500).
+segment_decommit_delay=100
+; ms added to the delay on repeated decommit requests (default 1).
+decommit_extend_delay=0
+; Any other option of the 26 can be set by name, e.g. (opt-in, needs the "Lock pages in memory" user right,
+; NOT recommended on 16 GB / iGPU machines: large pages are always committed and never paged):
+; large_os_pages=1
+; show_errors=1
+
+[collect]
+; Call mi_collect(true) on the main thread this many frames after each game-state transition (load finished).
+after_transition=1
+; API v3 loaders: triggered by fast_load's "load_transition" event. own_hook=1 hooks the transition fn
+; directly instead (only if fast_load is NOT installed - two hooks on one function fail).
+own_hook=0
+delay_frames=30
+
+[oom]
+; On the first out-of-memory in operator new: free this reserve (committed, never touched), mi_collect, log, retry.
+enabled=1
+reserve_mb=128
+; Log mimalloc's own error reports (ENOMEM, double free, ...) to v3x.log, at most max_error_logs lines.
+log_mimalloc_errors=1
+max_error_logs=32
+
+[periodic]
+; Every check_sec a low-priority thread reads process commit. When it grew by grow_mb since the lowest
+; point after the last collect (and min_interval_min passed), the MAIN thread calls mi_collect(force)
+; and logs commit before/after. (mi_collect on a thread without a mimalloc heap is a no-op, so the
+; call itself must run on a game thread.) If one call takes longer than max_ms it is switched off.
+enabled=1
+force=0
+check_sec=30
+grow_mb=256
+min_interval_min=5
+max_ms=100
+
+[census]
+; Log where committed memory lives (VirtualQuery walk on the monitor thread, a few ms):
+; mimalloc 32 MiB segments / huge segments vs other private (Win32 heaps, GPU driver, D3D) every
+; every_min minutes and after each collect. Console command: memstat.
+enabled=1
+every_min=10
+
+[gui_anim_pool]
+; Diagnostic only: pass-through hook on the GUI animation-state pool insert (exe 0x39304d0 in 1.15.1,
+; 776-byte slots, array grows x1.5 and never shrinks: 524 MiB after 4 h). The census line then shows
+; "gui anim pool N: live X of Y slots, array Z MiB". Changes nothing; there is no safe cap (see
+; docs/re/memory.md section 10). Fails closed if the code pattern is not found exactly once.
+diag=1
+
+[mimalloc_walk]
+; Census/memstat add mimalloc's own OS commit counter (_mi_stats_main) and a read-only walk of every
+; segment header (ReadProcessMemory copy, a few ms): IN USE vs page slack vs empty pages vs committed free
+; spans vs pending decommit, by block size, and (memstat threads) by owner thread.
+enabled=1
+
+[thread_collect]
+; mi_collect only works on the CALLING thread's heap, so the main-thread collects never reach the ~30
+; worker heaps. This puts a callback in mimalloc's deferred-free slot (called by every thread at the start
+; of the allocation slow path, where the heap is consistent). Every every_s seconds (and after each load /
+; memcollect) each thread runs mi_collect(false) once on its own heap. Off for the session if one call
+; takes longer than max_ms. Armed at the first frame. Logs "thread collect gen N: ..." with the effect.
+enabled=1
+every_s=120
+max_ms=50
+
+[heap_compact]
+; HeapCompact on all process heaps (CRT, DLLs, driver) from the monitor thread every every_min minutes,
+; logged as "heap compact: committed A -> B MiB". Off for the session if one heap takes longer than max_ms.
+enabled=1
+every_min=10
+max_ms=100

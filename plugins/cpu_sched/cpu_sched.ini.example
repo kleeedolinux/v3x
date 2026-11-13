@@ -1,0 +1,16 @@
+; cpu_sched config. Copy to <game>/binaries/v3x/cpu_sched.ini. Every key is optional; shown values are the defaults.
+; Only acts on hybrid CPUs (more than one EfficiencyClass in GetSystemCpuSetInformation); otherwise logs "not hybrid".
+; Policies: all (no restriction) | pcores | ecores. Uses CPU sets (soft affinity, SetThreadSelectedCpuSets).
+
+[cpu_sched]
+enabled=1
+; Game main thread (the thread that calls the task-scheduler init).
+main=pcores
+; Task workers by kind (engine thread priority): kind 0 BELOW_NORMAL, kind 1 NORMAL, kind 2 ABOVE_NORMAL.
+below_normal=ecores
+normal=all
+above_normal=pcores
+; 0 = leave the engine's thread count alone. N (1..64) = passed as Threading.TaskThreadCount when the game asks for
+; auto (-1). The engine then clamps N to [4, logical CPUs] and spawns ceil(N*0.8)-2 NORMAL + floor(N*0.4)-2 BELOW_NORMAL workers.
+; Works on non-hybrid CPUs too.
+task_threads=0

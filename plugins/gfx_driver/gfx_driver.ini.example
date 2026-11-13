@@ -1,0 +1,11 @@
+# gfx_driver configuration. Copy to <game>/binaries/v3x/gfx_driver.ini.
+#
+# prevent_driver_threading  1 = create the D3D11 device with
+#   D3D11_CREATE_DEVICE_PREVENT_INTERNAL_THREADING_OPTIMIZATIONS: the GPU driver does not
+#   spread its work over its own worker threads (on Intel Iris Xe ~10 igd10um64xe threads,
+#   ~400% CPU). Less CPU power drawn means more power budget left for the iGPU; it can also
+#   cost FPS if the main thread becomes the bottleneck. Measure both. 0 = plugin does nothing.
+#   Takes effect at game start (device creation).
+
+[gfx_driver]
+prevent_driver_threading = 1   # default

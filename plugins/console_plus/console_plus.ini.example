@@ -1,0 +1,38 @@
+# console_plus configuration. Copy to <game>/binaries/v3x/console_plus.ini and edit.
+# Without that file the plugin uses exactly these built-in defaults.
+# Details: v3x/docs/re/console.md. Console (V3X window): `complete`, `complete <game command>`.
+
+[console_plus]
+# enabled          0 = the plugin does nothing.
+enabled=1
+# game_console     1 = in the in-game console ('~'), Tab also completes ARGUMENTS of commands that
+#                  have no completer of their own: country tags (tag, annex, own ... SOK),
+#                  state regions (own, treatyport, set_pollution_level ... STATE_*), laws,
+#                  journal entries, cultures, goods, buildings, ... and literal choices from the
+#                  command's help ("all" for disable_ai, the `debug` switches). The engine's own
+#                  Tab UI is used unchanged: "(found: N | tab: next, esc: exit)", Tab cycles.
+#                  Command names were already completed by the engine.
+#                  If the game version does not match 1.15.1 this part does nothing (v3x.log says why).
+game_console=1
+# v3x_console      1 = Tab completion in the V3X console window: command names, and sub-command
+#                  words written as a|b|c in a command's help (profile on|off|report|reset).
+#                  Several matches: the common prefix is inserted and the matches are listed.
+#                  The first Tab prints the V3X `help` list once (that is where the names come from).
+v3x_console=1
+# override_engine  1 = also replace the engine's own argument completers (event, mapmode,
+#                  research, ...) when the argument descriptions give a kind. 0 = keep them.
+override_engine=0
+# log_installs     1 = log every command that got a completer, with its argument kinds.
+log_installs=1
+# scan_frames      check the engine's command registry every N frames (new commands get a
+#                  completer; nothing is done while the registry does not change). 10..100000.
+scan_frames=120
+
+[commands]
+# <command> = <kind> [<kind> ...]   one kind per argument; this wins over the automatic choice
+# and over the engine's own completer. Kinds: country state_region strategic_region law goods
+# journal building production_method culture religion ideology pop_type decree tech movement
+# country_type war_goal company_type social_hierarchy strait ig_type subgoal event none
+# Examples (these are already chosen automatically from the engine's descriptions):
+# own = state_region country
+# tag = country

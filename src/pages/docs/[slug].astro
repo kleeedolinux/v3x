@@ -2,41 +2,44 @@
 import { getCollection, render } from "astro:content";
 import Base from "../../layouts/Base.astro";
 import DocsNav from "../../components/DocsNav.astro";
+import DocsShell from "../../components/DocsShell.astro";
+import Icon from "../../components/Icon.astro";
 
 export async function getStaticPaths() {
-  const docs = await getCollection("docs");
-  return docs.map((entry) => ({ params: { slug: entry.id }, props: { entry } }));
+  const docs = (await getCollection("docs")).sort((a, b) => a.data.order - b.data.order);
+  return docs.map((entry, i) => ({ params: { slug: entry.id }, props: { entry, prev: docs[i - 1], next: docs[i + 1] } }));
 }
-const { entry } = Astro.props;
+const { entry, prev, next } = Astro.props;
 const { Content, headings } = await render(entry);
-const h2 = headings.filter((h) => h.depth === 2);
 // titles may hold `code`: escape, then set code spans
 const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 const titleHtml = esc(entry.data.title).replace(/`([^`]+)`/g, "<code>$1</code>");
 const plainTitle = entry.data.title.replace(/`/g, "");
+const short = (t: string) => t.replace(/\s*\(.*\)\s*$/, "").replace(/`/g, "");
 const groupLabel = { players: "For players", modders: "For modders", engine: "Engine notes" }[entry.data.group];
 ---
-<Base title={`${plainTitle}: V3X docs`} description={`${entry.data.summary || plainTitle} V3X, the Victoria 3 script extender: ${groupLabel.toLowerCase()} documentation.`} section="docs" ogType="article"
+<Base title={`${plainTitle} (docs)`} description={`${entry.data.summary || plainTitle} V3X, the Victoria 3 eXtender: ${groupLabel.toLowerCase()} documentation.`} section="docs" ogType="article"
   ogImage="/og/docs.png"
   crumbs={[{ name: "V3X", href: "/" }, { name: "Docs", href: "/docs/" }, { name: plainTitle, href: `/docs/${entry.id}/` }]}
-  jsonLd={[{ "@type": "TechArticle", headline: plainTitle, description: entry.data.summary, inLanguage: "en", dateModified: entry.data.updated, about: "Victoria 3 modding", isBasedOn: entry.data.sourceUrl, proficiencyLevel: entry.data.group === "players" ? "Beginner" : "Expert" }]}
-  sheet={`Docs · ${entry.id}`} source={entry.data.source} sourceUrl={entry.data.sourceUrl} revised={entry.data.updated}>
-  <div class="page">
-    <aside><DocsNav current={entry.id} /></aside>
+  jsonLd={[{ "@type": "TechArticle", headline: plainTitle, description: entry.data.summary, inLanguage: "en", dateModified: entry.data.updated, about: "Victoria 3 modding", isBasedOn: entry.data.sourceUrl, proficiencyLevel: entry.data.group === "players" ? "Beginner" : "Expert" }]}>
+  <DocsShell toc={headings}>
+    <DocsNav slot="nav" current={entry.id} />
     <article>
-      <header class="title">
-        <p class="kicker">Docs · {groupLabel}</p>
-        <h1 set:html={titleHtml} />
-        {entry.data.summary && <p class="lede" style="margin:0">{entry.data.summary}</p>}
-        <p class="caption" style="margin:var(--s2) 0 0">Copied from <a href={entry.data.sourceUrl}><code>{entry.data.source}</code></a> in the V3X repository, file dated <span class="mono">{entry.data.updated}</span>.</p>
+      <header class="border-b border-white/[0.08] pb-8">
+        <p class="flex items-center gap-2 font-mono text-[12px] tracking-[0.12em] text-brass-300 uppercase"><a href="/docs/" class="hover:text-brass-200">Docs</a><span class="text-ink-500">/</span>{groupLabel}</p>
+        <h1 class="mt-4 text-[clamp(2rem,1.5rem+2vw,2.875rem)] leading-[1.1] font-bold tracking-[-0.025em] text-white [&_code]:rounded-lg [&_code]:bg-white/[0.07] [&_code]:px-2 [&_code]:font-mono [&_code]:text-[0.85em] [&_code]:text-brass-100" set:html={titleHtml} />
+        {entry.data.summary && <p class="mt-4 max-w-2xl text-lg text-ink-200">{entry.data.summary}</p>}
+        <p class="mt-5 flex flex-wrap items-center gap-x-4 gap-y-1 text-[13px] text-ink-400">
+          <a href={entry.data.sourceUrl} class="inline-flex items-center gap-1.5 hover:text-brass-200"><Icon name="github" class="size-3.5" /><code class="font-mono">{entry.data.source}</code></a>
+          <span>Updated <time datetime={entry.data.updated}>{entry.data.updated}</time></span>
+        </p>
       </header>
-      {h2.length > 2 && (
-        <nav class="contents" aria-label="On this page">
-          <p class="label" style="margin:0 0 var(--s1)">On this page</p>
-          <ol>{h2.map((h) => <li><a href={`#${h.slug}`}>{h.text}</a></li>)}</ol>
-        </nav>
-      )}
-      <div class="prose"><Content /></div>
+      <div class="prose-v3x mt-10 max-w-[76ch]"><Content /></div>
+
+      <nav class="mt-16 grid gap-4 border-t border-white/[0.08] pt-8 sm:grid-cols-2" aria-label="Previous and next">
+        {prev ? <a href={`/docs/${prev.id}/`} class="card card-hover p-5"><span class="text-xs text-ink-400">Previous</span><span class="mt-1 block font-semibold text-white">{short(prev.data.title)}</span></a> : <span></span>}
+        {next && <a href={`/docs/${next.id}/`} class="card card-hover p-5 text-right"><span class="text-xs text-ink-400">Next</span><span class="mt-1 block font-semibold text-white">{short(next.data.title)}</span></a>}
+      </nav>
     </article>
-  </div>
+  </DocsShell>
 </Base>

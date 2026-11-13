@@ -7,6 +7,9 @@
 export const REPO_URL = "https://github.com/kleeedolinux/v3x";
 export const RELEASES_URL = "https://github.com/kleeedolinux/v3x/releases";
 export const GAME_VERSION = "1.15.1";
+/** docs/install.md "The easy way: one line". */
+export const INSTALL_CMD = "irm https://v3extender.pages.dev/install.ps1 | iex";
+export const BRAND = { short: "V3X", full: "Victoria 3 eXtender" };
 
 /** README.md: "All numbers were measured on the author's PC (16 GB RAM, integrated GPU, Victoria 3 1.15.1)." */
 export const MACHINE = { ram: "16 GB", gpu: "integrated", game: "1.15.1" };
@@ -57,8 +60,8 @@ export const shipped: ShippedPlugin[] = [
     en: "Lets files in <code>binaries\\v3x\\content_packs\\</code> replace game files without a mod. Needed by the V3X button.",
     pt: "Permite que arquivos em <code>binaries\\v3x\\content_packs\\</code> substituam arquivos do jogo sem um mod. Necessário para o botão V3X." } },
   { id: "lazy_mesh", on: false, what: {
-    en: "Loads the 3D models your game uses at start and the rest on first use: 37.5 s down to 6.7 s on the author's PC.",
-    pt: "Carrega no início os modelos 3D que o seu jogo usa e o resto no primeiro uso: de 37,5 s para 6,7 s no PC do autor." } },
+    en: "Loads the 3D models your game uses at start and the rest on first use: 37.5 s down to 6.7 s in a measured run.",
+    pt: "Carrega no início os modelos 3D que o seu jogo usa e o resto no primeiro uso: de 37,5 s para 6,7 s numa medição." } },
   { id: "loc_fallback", on: false, what: {
     en: "Fills text that a mod lacks in your language with the mod's English text.",
     pt: "Preenche com o texto em inglês do mod as linhas que faltam no seu idioma." } },

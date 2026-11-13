@@ -1,0 +1,38 @@
+---
+/**
+ * Three-column reading layout for docs and the players' guide:
+ * left: section nav (slot "nav"), centre: prose, right: on-page table of contents.
+ * Below lg the nav folds into a <details> menu; below xl the TOC is hidden.
+ */
+interface TocItem { depth: number; slug: string; text: string }
+interface Props { toc?: TocItem[]; tocLabel?: string; menuLabel?: string; flush?: boolean }
+const { toc = [], tocLabel = "On this page", menuLabel = "Menu", flush = false } = Astro.props;
+const navHtml = Astro.slots.has("nav") ? await Astro.slots.render("nav") : "";
+const items = toc.filter((h) => h.depth === 2 || h.depth === 3);
+---
+<div class:list={["mx-auto w-full max-w-[1400px] px-5 sm:px-8", flush ? "pt-4" : "pt-24 md:pt-28"]}>
+  <div class="grid gap-10 lg:grid-cols-[240px_minmax(0,1fr)] xl:grid-cols-[250px_minmax(0,1fr)_220px] xl:gap-12">
+    <aside class="lg:sticky lg:top-24 lg:max-h-[calc(100dvh-7rem)] lg:self-start lg:overflow-y-auto lg:pr-2 lg:pb-10 [scrollbar-width:thin]">
+      <details class="group card lg:hidden">
+        <summary class="flex cursor-pointer list-none items-center justify-between px-4 py-3 text-sm font-semibold text-white [&::-webkit-details-marker]:hidden">{menuLabel}<span class="text-brass-300 transition-transform group-open:rotate-45" aria-hidden="true">+</span></summary>
+        <div class="border-t border-white/[0.08] px-4 py-4" set:html={navHtml} />
+      </details>
+      <div class="hidden lg:block" set:html={navHtml} />
+    </aside>
+
+    <div class="min-w-0 pb-24">
+      <slot />
+    </div>
+
+    {items.length > 1 && (
+      <nav class="hidden xl:sticky xl:top-24 xl:block xl:max-h-[calc(100dvh-7rem)] xl:self-start xl:overflow-y-auto" aria-label={tocLabel}>
+        <p class="eyebrow !text-ink-300">{tocLabel}</p>
+        <ul class="mt-4 space-y-2 border-l border-white/[0.08] text-[13.5px]">
+          {items.map((h) => (
+            <li><a href={`#${h.slug}`} class={`-ml-px block border-l border-transparent py-0.5 text-ink-300 transition-colors hover:border-brass-300 hover:text-white ${h.depth === 3 ? "pl-7" : "pl-4"}`}>{h.text}</a></li>
+          ))}
+        </ul>
+      </nav>
+    )}
+  </div>
+</div>

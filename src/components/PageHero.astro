@@ -1,0 +1,20 @@
+---
+/** Header band for inner pages: kicker, h1, lede over the hero grid and a brass glow. */
+interface Props { kicker: string; title: string; lede?: string; titleHtml?: boolean }
+const { kicker, title, lede, titleHtml = false } = Astro.props;
+---
+<header class="relative isolate overflow-hidden pt-36 pb-16 md:pt-44 md:pb-20">
+  <div aria-hidden="true" class="pointer-events-none absolute inset-0 -z-10">
+    <div class="hero-grid absolute inset-0 opacity-70"></div>
+    <div class="absolute -top-40 left-1/2 h-[480px] w-[900px] -translate-x-1/2 animate-drift rounded-full bg-[radial-gradient(closest-side,rgb(185_139_62/0.2),transparent)] blur-2xl"></div>
+    <div class="absolute inset-x-0 bottom-0 h-24 bg-gradient-to-b from-transparent to-ink-900"></div>
+  </div>
+  <div class="container-x">
+    <p data-reveal class="eyebrow">{kicker}</p>
+    {titleHtml
+      ? <h1 data-reveal style="--d:60ms" class="mt-5 max-w-4xl text-[clamp(2.5rem,1.6rem+3.6vw,4.25rem)] leading-[1.04] font-bold tracking-[-0.03em] text-white" set:html={title} />
+      : <h1 data-reveal style="--d:60ms" class="mt-5 max-w-4xl text-[clamp(2.5rem,1.6rem+3.6vw,4.25rem)] leading-[1.04] font-bold tracking-[-0.03em] text-white">{title}</h1>}
+    {lede && <p data-reveal style="--d:120ms" class="mt-6 max-w-2xl text-lg text-ink-200 md:text-xl">{lede}</p>}
+    <slot />
+  </div>
+</header>

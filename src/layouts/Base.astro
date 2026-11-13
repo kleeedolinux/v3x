@@ -1,8 +1,7 @@
 ---
-import "../styles/site.css";
-import { tokensCss, colour } from "../design/tokens";
-import { GAME_VERSION, REPO_URL } from "../data/facts";
-import sync from "../data/sync.json";
+import "../styles/global.css";
+import Icon from "../components/Icon.astro";
+import { GAME_VERSION, REPO_URL, RELEASES_URL, BRAND } from "../data/facts";
 
 export type Lang = "en" | "pt-BR";
 interface Props {
@@ -10,14 +9,9 @@ interface Props {
   description: string;
   lang?: Lang;
   /** nav key of the current page */
-  section?: "home" | "guide" | "docs" | "design" | "none";
+  section?: "home" | "install" | "guide" | "docs" | "none";
   /** same page in the other language, if it exists */
   alternate?: string;
-  /** title-block fields */
-  sheet: string;
-  source?: string;
-  sourceUrl?: string;
-  revised?: string;
   /** SEO */
   ogImage?: string;
   ogType?: "website" | "article";
@@ -25,33 +19,33 @@ interface Props {
   jsonLd?: Record<string, unknown>[];
   noindex?: boolean;
 }
-const { title, description, lang = "en", section = "none", alternate, sheet, source, sourceUrl, revised,
+const { title, description, lang = "en", section = "none", alternate,
   ogImage = lang === "pt-BR" ? "/og/pt-br.png" : "/og/en.png", ogType = "website", crumbs, jsonLd = [], noindex = false } = Astro.props;
 const pt = lang === "pt-BR";
 const site = Astro.site!;
 const canonical = new URL(Astro.url.pathname, site).href;
-const fullTitle = section === "home" ? title : `${title} · V3X`;
-const synced = (sync as { syncedAt: string }).syncedAt.slice(0, 10);
+const brandTitle = `${BRAND.short} — ${BRAND.full}`;
+const fullTitle = section === "home" ? title : `${title} | ${brandTitle}`;
 
 const nav = pt
   ? [
       { key: "home", href: "/pt-br/", label: "Início" },
-      { key: "guide", href: "/pt-br/guia/", label: "Guia do jogador" },
-      { key: "docs", href: "/docs/", label: "Documentação (EN)" },
-      { key: "design", href: "/design/", label: "Design (EN)" },
+      { key: "install", href: "/pt-br/instalar/", label: "Instalar" },
+      { key: "guide", href: "/pt-br/guia/", label: "Guia" },
+      { key: "docs", href: "/docs/", label: "Docs" },
     ]
   : [
       { key: "home", href: "/", label: "Home" },
-      { key: "guide", href: "/guide/", label: "Players' guide" },
+      { key: "install", href: "/install/", label: "Install" },
+      { key: "guide", href: "/guide/", label: "Guide" },
       { key: "docs", href: "/docs/", label: "Docs" },
-      { key: "design", href: "/design/", label: "Design" },
     ];
 const enUrl = new URL(pt ? (alternate ?? "/") : Astro.url.pathname, site).href;
 const ptUrl = alternate || pt ? new URL(pt ? Astro.url.pathname : alternate!, site).href : undefined;
 const ogUrl = new URL(ogImage, site).href;
 const ld: Record<string, unknown>[] = [
-  { "@type": "WebSite", "@id": `${site.href}#website`, name: "V3X", url: site.href, inLanguage: ["en", "pt-BR"],
-    description: "V3X: script extender and engine-level modding platform for Victoria 3." },
+  { "@type": "WebSite", "@id": `${site.href}#website`, name: brandTitle, alternateName: "V3X", url: site.href, inLanguage: ["en", "pt-BR"],
+    description: "V3X, the Victoria 3 eXtender: script extender and engine-level modding platform for Victoria 3." },
   ...(crumbs ? [{ "@type": "BreadcrumbList", itemListElement: crumbs.map((c, i) => ({ "@type": "ListItem", position: i + 1, name: c.name, item: new URL(c.href, site).href })) }] : []),
   ...jsonLd,
 ];
@@ -59,6 +53,26 @@ const ldJson = JSON.stringify({ "@context": "https://schema.org", "@graph": ld }
 const other = alternate ?? (pt ? "/" : "/pt-br/");
 const enHref = pt ? other : Astro.url.pathname;
 const ptHref = pt ? Astro.url.pathname : other;
+const home = pt ? "/pt-br/" : "/";
+const foot = pt
+  ? {
+      cols: [
+        { h: "Jogadores", l: [["/pt-br/instalar/", "Instalar"], ["/pt-br/guia/", "Guia do jogador"], ["/pt-br/#faq", "Perguntas"], [RELEASES_URL, "Releases"]] },
+        { h: "Modders", l: [["/docs/", "Documentação"], ["/docs/getting-started/", "Primeiros passos"], ["/docs/api-reference/", "Referência da API"], ["/docs/safety/", "Regras de segurança"]] },
+        { h: "Projeto", l: [[REPO_URL, "GitHub"], [`${REPO_URL}/issues`, "Relatar um problema"], ["/", "English"]] },
+      ],
+      fine: "Victoria 3 é marca registrada da Paradox Interactive. O V3X é um projeto de fãs, não oficial, sem vínculo nem endosso da Paradox Interactive. Licença do V3X: ainda não escolhida.",
+      tag: `Para Victoria 3 ${GAME_VERSION} · Windows x64 · Um jogador · Pré-lançamento`,
+    }
+  : {
+      cols: [
+        { h: "Players", l: [["/install/", "Install"], ["/guide/", "Players' guide"], ["/#faq", "FAQ"], [RELEASES_URL, "Releases"]] },
+        { h: "Modders", l: [["/docs/", "Documentation"], ["/docs/getting-started/", "Getting started"], ["/docs/api-reference/", "API reference"], ["/docs/safety/", "Safety rules"]] },
+        { h: "Project", l: [[REPO_URL, "GitHub"], [`${REPO_URL}/issues`, "Report a problem"], ["/pt-br/", "Português"]] },
+      ],
+      fine: "Victoria 3 is a trademark of Paradox Interactive. V3X is an unofficial fan project and is not affiliated with or endorsed by Paradox Interactive. V3X licence: not chosen yet.",
+      tag: `For Victoria 3 ${GAME_VERSION} · Windows x64 · Single player · Pre-release`,
+    };
 ---
 <!doctype html>
 <html lang={lang}>
@@ -72,10 +86,9 @@ const ptHref = pt ? Astro.url.pathname : other;
   {(alternate || pt) && <link rel="alternate" hreflang="en" href={enUrl} />}
   {ptUrl && <link rel="alternate" hreflang="pt-BR" href={ptUrl} />}
   {(alternate || pt) && <link rel="alternate" hreflang="x-default" href={enUrl} />}
-  <meta name="theme-color" content={colour("paper", "light")} media="(prefers-color-scheme: light)" />
-  <meta name="theme-color" content={colour("paper", "dark")} media="(prefers-color-scheme: dark)" />
+  <meta name="theme-color" content="#0b1522" />
   <meta property="og:type" content={ogType} />
-  <meta property="og:site_name" content="V3X" />
+  <meta property="og:site_name" content={brandTitle} />
   <meta property="og:title" content={fullTitle} />
   <meta property="og:description" content={description} />
   <meta property="og:url" content={canonical} />
@@ -91,59 +104,123 @@ const ptHref = pt ? Astro.url.pathname : other;
   <meta name="twitter:image" content={ogUrl} />
   <link rel="sitemap" href="/sitemap.xml" />
   <link rel="icon" href="/assets/logo.svg" type="image/svg+xml" />
-  <link rel="preload" href="/fonts/old-standard-tt-latin-400-normal.woff2" as="font" type="font/woff2" crossorigin />
-  <link rel="preload" href="/fonts/source-serif-4-latin-opsz-normal.woff2" as="font" type="font/woff2" crossorigin />
-  <Fragment set:html={`<style>${tokensCss()}</style>`} />
+  <link rel="preload" href="/fonts/inter-latin-opsz-normal.woff2" as="font" type="font/woff2" crossorigin />
+  <script is:inline>document.documentElement.classList.add("js");</script>
   <script type="application/ld+json" is:inline set:html={ldJson} />
 </head>
-<body>
-  <a class="skip" href="#main">{pt ? "Pular para o conteúdo" : "Skip to content"}</a>
-  <header class="masthead wrap">
-    <div class="mast-row">
-      <a class="nameplate" href={pt ? "/pt-br/" : "/"}>
-        <b>V3X</b><span>{pt ? "a oficina do motor de Victoria 3" : "engine works for Victoria 3"}</span>
+<body class="min-h-dvh overflow-x-clip">
+  <a class="sr-only z-[100] rounded-lg bg-brass-300 px-4 py-2 font-semibold text-ink-950 focus:not-sr-only focus:fixed focus:top-3 focus:left-3" href="#main">{pt ? "Pular para o conteúdo" : "Skip to content"}</a>
+
+  <header class="site-nav fixed inset-x-0 top-0 z-50 border-b border-transparent">
+    <div class="container-x flex h-16 items-center gap-4 md:h-[72px]">
+      <a href={home} class="group flex items-center gap-3 rounded-lg" aria-label={`${brandTitle}, ${pt ? "início" : "home"}`}>
+        <img src="/assets/logo.svg" alt="" width="36" height="36" class="size-9 transition-transform duration-700 group-hover:rotate-[30deg]" />
+        <span class="flex flex-col leading-none">
+          <span class="text-[17px] font-bold tracking-tight text-white">V3X</span>
+          <span class="mt-1 text-[11px] font-medium tracking-wide text-ink-300">{BRAND.full}</span>
+        </span>
       </a>
-      <nav aria-label={pt ? "Principal" : "Main"}>
-        <ul class="nav">
-          {nav.map((n) => (
-            <li><a href={n.href} aria-current={n.key === section ? "page" : undefined}>{n.label}</a></li>
-          ))}
-          <li class="lang" aria-label={pt ? "Idioma" : "Language"}>
-            {pt ? <a href={enHref} hreflang="en" lang="en">EN</a> : <span aria-current="true">EN</span>}
-            {pt ? <span aria-current="true">PT</span> : <a href={ptHref} hreflang="pt-BR" lang="pt-BR">PT</a>}
-          </li>
-        </ul>
+
+      <nav class="ml-auto hidden items-center gap-1 md:flex" aria-label={pt ? "Principal" : "Main"}>
+        {nav.map((n) => (
+          <a href={n.href} aria-current={n.key === section ? "page" : undefined}
+            class="rounded-lg px-3.5 py-2 text-[15px] font-medium text-ink-200 transition-colors hover:bg-white/[0.05] hover:text-white aria-[current=page]:bg-white/[0.06] aria-[current=page]:text-white">{n.label}</a>
+        ))}
+        <span class="mx-2 h-5 w-px bg-white/10" aria-hidden="true"></span>
+        <a href={REPO_URL} class="grid size-10 place-items-center rounded-lg text-ink-200 transition-colors hover:bg-white/[0.05] hover:text-white" aria-label="GitHub"><Icon name="github" class="size-5" /></a>
+        <div class="ml-1 flex items-center rounded-lg bg-white/[0.04] p-1 text-xs font-semibold ring-1 ring-white/[0.08]" role="group" aria-label={pt ? "Idioma" : "Language"}>
+          {pt ? <a href={enHref} hreflang="en" lang="en" class="rounded-md px-2.5 py-1.5 text-ink-300 hover:text-white">EN</a> : <span aria-current="true" class="rounded-md bg-white/10 px-2.5 py-1.5 text-white">EN</span>}
+          {pt ? <span aria-current="true" class="rounded-md bg-white/10 px-2.5 py-1.5 text-white">PT</span> : <a href={ptHref} hreflang="pt-BR" lang="pt-BR" class="rounded-md px-2.5 py-1.5 text-ink-300 hover:text-white">PT</a>}
+        </div>
+        <a href={pt ? "/pt-br/instalar/" : "/install/"} class="btn-primary ml-3 !px-4 !py-2 text-sm">{pt ? "Baixar" : "Download"}</a>
       </nav>
-    </div>
-    <hr class="oxford" />
-    <div class="dateline label">
-      <ul>
-        <li>{pt ? "Pré-lançamento" : "Pre-release"}</li>
-        <li>Victoria 3 {GAME_VERSION}</li>
-        <li>Windows x64</li>
-        <li>{pt ? "Só um jogador" : "Single player"}</li>
-      </ul>
-      <span>{pt ? "Não oficial · sem vínculo com a Paradox Interactive" : "Unofficial · not affiliated with Paradox Interactive"}</span>
+
+      <details class="group relative ml-auto md:hidden">
+        <summary class="grid size-11 cursor-pointer list-none place-items-center rounded-lg text-ink-100 ring-1 ring-white/10 [&::-webkit-details-marker]:hidden" aria-label="Menu">
+          <Icon name="menu" class="size-5 group-open:hidden" /><Icon name="plus" class="hidden size-5 rotate-45 group-open:block" />
+        </summary>
+        <div class="absolute top-14 right-0 w-[min(88vw,320px)] rounded-2xl border border-white/10 bg-ink-850/95 p-3 shadow-2xl backdrop-blur-xl">
+          {nav.map((n) => (
+            <a href={n.href} aria-current={n.key === section ? "page" : undefined} class="block rounded-lg px-3 py-3 text-base font-medium text-ink-100 hover:bg-white/[0.06] aria-[current=page]:text-brass-300">{n.label}</a>
+          ))}
+          <a href={REPO_URL} class="flex items-center gap-2 rounded-lg px-3 py-3 text-base font-medium text-ink-100 hover:bg-white/[0.06]"><Icon name="github" class="size-4" />GitHub</a>
+          <div class="mt-2 flex gap-2 border-t border-white/10 px-1 pt-3 text-sm font-semibold">
+            {pt ? <a href={enHref} hreflang="en" lang="en" class="rounded-md px-3 py-2 text-ink-300 ring-1 ring-white/10">English</a> : <span class="rounded-md bg-white/10 px-3 py-2 text-white">English</span>}
+            {pt ? <span class="rounded-md bg-white/10 px-3 py-2 text-white">Português</span> : <a href={ptHref} hreflang="pt-BR" lang="pt-BR" class="rounded-md px-3 py-2 text-ink-300 ring-1 ring-white/10">Português</a>}
+          </div>
+        </div>
+      </details>
     </div>
   </header>
 
-  <main id="main" class="wrap">
+  <main id="main">
     <slot />
   </main>
 
-  <footer class="foot wrap">
-    <div class="titleblock" role="group" aria-label={pt ? "Ficha desta página" : "About this page"}>
-      <div><span class="label">{pt ? "Projeto" : "Project"}</span>V3X</div>
-      <div><span class="label">{pt ? "Folha" : "Sheet"}</span>{sheet}</div>
-      <div><span class="label">{pt ? "Fonte" : "Source"}</span>{source ? (sourceUrl ? <a href={sourceUrl}>{source}</a> : source) : <a href={REPO_URL}>github.com/kleeedolinux/v3x</a>}</div>
-      <div><span class="label">{pt ? "Revisado" : "Revised"}</span><span class="mono">{revised ?? synced}</span></div>
+  <footer class="relative border-t border-white/[0.07] bg-ink-950">
+    <div class="container-x grid gap-12 py-16 sm:grid-cols-3 md:grid-cols-[1.4fr_repeat(3,1fr)] md:py-20">
+      <div class="sm:col-span-3 md:col-span-1">
+        <a href={home} class="flex items-center gap-3">
+          <img src="/assets/logo.svg" alt="" width="44" height="44" class="size-11" />
+          <span class="flex flex-col leading-none"><span class="text-lg font-bold text-white">V3X</span><span class="mt-1 text-xs text-ink-300">{BRAND.full}</span></span>
+        </a>
+        <p class="mt-5 max-w-xs text-sm text-ink-300">{foot.tag}</p>
+      </div>
+      {foot.cols.map((c) => (
+        <div>
+          <p class="eyebrow !text-ink-300">{c.h}</p>
+          <ul class="mt-4 space-y-2.5 text-[15px]">
+            {c.l.map(([href, label]) => <li><a href={href} class="text-ink-200 transition-colors hover:text-brass-200">{label}</a></li>)}
+          </ul>
+        </div>
+      ))}
     </div>
-    <p class="fine">
-      {pt
-        ? "Victoria 3 é marca registrada da Paradox Interactive. V3X é um projeto de fãs, não oficial, sem vínculo nem endosso da Paradox Interactive. Licença do V3X: ainda não escolhida. Todos os números foram medidos no PC do autor; os seus serão diferentes."
-        : "Victoria 3 is a trademark of Paradox Interactive. V3X is an unofficial fan project and is not affiliated with or endorsed by Paradox Interactive. V3X licence: not chosen yet. All numbers were measured on the author's PC; yours will differ."}
-      {" "}<a href="/design/">{pt ? "Como este site é desenhado" : "How this site is designed"}</a>.
-    </p>
+    <div class="container-x border-t border-white/[0.06] py-8">
+      <p class="max-w-3xl text-[13px] leading-relaxed text-ink-400">{foot.fine}</p>
+    </div>
   </footer>
+
+  <script is:inline>
+  (() => {
+    const root = document.documentElement;
+    const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const onScroll = () => root.toggleAttribute("data-scrolled", scrollY > 12);
+    onScroll();
+    addEventListener("scroll", onScroll, { passive: true });
+
+    const fmt = (v, dec, sep) => v.toFixed(dec).replace(".", sep);
+    const count = (el) => {
+      const from = +el.dataset.from, to = +el.dataset.to, dec = +(el.dataset.decimals || 0), sep = el.dataset.sep || ".";
+      if (reduce) return;
+      const t0 = performance.now(), dur = 1800;
+      const tick = (t) => {
+        const p = Math.min(1, (t - t0) / dur), e = 1 - Math.pow(1 - p, 4);
+        el.textContent = fmt(from + (to - from) * e, dec, sep);
+        if (p < 1) requestAnimationFrame(tick);
+      };
+      el.textContent = fmt(from, dec, sep);
+      requestAnimationFrame(tick);
+    };
+    const io = "IntersectionObserver" in window ? new IntersectionObserver((entries) => {
+      for (const en of entries) {
+        if (!en.isIntersecting) continue;
+        en.target.classList.add("is-in");
+        en.target.querySelectorAll("[data-count]").forEach(count);
+        io.unobserve(en.target);
+      }
+    }, { rootMargin: "0px 0px -10% 0px", threshold: 0.1 }) : null;
+    document.querySelectorAll("[data-reveal], .bars, .tilt").forEach((el) => io ? io.observe(el) : el.classList.add("is-in"));
+
+    document.querySelectorAll("[data-copy]").forEach((b) => {
+      b.hidden = false;
+      const label = b.querySelector("span"), orig = label.textContent;
+      b.addEventListener("click", async () => {
+        try { await navigator.clipboard.writeText(b.dataset.copy); } catch { return; }
+        b.setAttribute("data-copied", ""); label.textContent = b.dataset.labelDone;
+        setTimeout(() => { b.removeAttribute("data-copied"); label.textContent = orig; }, 1800);
+      });
+    });
+  })();
+  </script>
 </body>
 </html>

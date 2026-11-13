@@ -1,7 +1,7 @@
 /**
  * Checks dist/ after a build. Fails (exit 1) on:
  *  - an internal href/src that does not resolve to a file in dist/ (or a #fragment with no matching id)
- *  - a <script> other than JSON-LD, an external stylesheet / font / image / script
+ *  - a <script> loaded from another origin, an external stylesheet / font / image
  *  - an <img> without alt, a page without exactly one <h1>, a <title> or a meta description
  * External links (https://...) are listed, not fetched.
  *
@@ -11,7 +11,7 @@ import { readdirSync, readFileSync, statSync, existsSync } from "node:fs";
 import { join, relative } from "node:path";
 
 const DIST = join(import.meta.dir, "../dist");
-const SITE = "https://v3x.pages.dev";
+const SITE = "https://v3extender.pages.dev";
 
 function walk(dir: string, out: string[] = []) {
   for (const f of readdirSync(dir)) {
@@ -64,7 +64,11 @@ for (const [page, html] of pages) {
   if (!is404 && !/<link rel="canonical"/.test(html)) errors.push(`${page}: no canonical link`);
   for (const m of html.matchAll(/<img\b[^>]*>/g)) if (!/\salt="/.test(m[0])) errors.push(`${page}: <img> without alt: ${m[0].slice(0, 80)}`);
   // scripts and external resources
-  for (const m of html.matchAll(/<script\b([^>]*)>/g)) if (!/type="application\/ld\+json"/.test(m[1])) errors.push(`${page}: script that is not JSON-LD: <script${m[1]}>`);
+  // inline scripts (progressive enhancement only) are allowed; scripts from another origin are not
+  for (const m of html.matchAll(/<script\b([^>]*)>/g)) {
+    const src = m[1].match(/\ssrc="([^"]+)"/)?.[1];
+    if (src && /^(https?:)?\/\//.test(src)) errors.push(`${page}: external script: ${src}`);
+  }
   for (const m of html.matchAll(/<link\b[^>]*rel="(stylesheet|preload|icon)"[^>]*>/g)) {
     const href = m[0].match(/href="([^"]+)"/)?.[1] ?? "";
     if (/^(https?:)?\/\//.test(href)) errors.push(`${page}: external ${m[1]}: ${href}`);

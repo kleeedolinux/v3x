@@ -164,6 +164,8 @@ function main() {
       "---",
       "",
     ].join("\n");
+    // the site is v3extender.pages.dev; repo docs that still name the old domain get the new one
+    body = body.replace(/\bv3x\.pages\.dev\b/g, "v3extender.pages.dev");
     writeFileSync(join(OUT, `${d.slug}.md`), fm + body.replace(/^\n+/, ""));
     manifest.push({ slug: d.slug, src: d.src, updated: mtime });
   }

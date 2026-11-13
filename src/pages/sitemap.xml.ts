@@ -3,7 +3,7 @@ import { getCollection } from "astro:content";
 import sync from "../data/sync.json";
 
 /** Pages with a translation: [en, pt-BR]. Others are English only. */
-const pairs: [string, string][] = [["/", "/pt-br/"], ["/guide/", "/pt-br/guia/"]];
+const pairs: [string, string][] = [["/", "/pt-br/"], ["/install/", "/pt-br/instalar/"], ["/guide/", "/pt-br/guia/"]];
 
 export const GET: APIRoute = async ({ site }) => {
   const s = (p: string) => new URL(p, site).href;
@@ -17,7 +17,6 @@ export const GET: APIRoute = async ({ site }) => {
   urls.push({ loc: s("/docs/"), lastmod: today, priority: "0.8" });
   for (const d of docs.sort((a, b) => a.data.order - b.data.order))
     urls.push({ loc: s(`/docs/${d.id}/`), lastmod: d.data.updated, priority: d.data.group === "engine" ? "0.5" : "0.7" });
-  urls.push({ loc: s("/design/"), lastmod: today, priority: "0.3" });
 
   const body = `<?xml version="1.0" encoding="UTF-8"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" xmlns:xhtml="http://www.w3.org/1999/xhtml">

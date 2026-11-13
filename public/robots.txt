@@ -1,4 +1,4 @@
 User-agent: *
 Allow: /
 
-Sitemap: https://v3x.pages.dev/sitemap.xml
+Sitemap: https://v3extender.pages.dev/sitemap.xml

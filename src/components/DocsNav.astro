@@ -9,18 +9,19 @@ const groups = [
   { key: "engine", label: "Engine notes" },
 ] as const;
 const short = (t: string) => t.replace(/\s*\(.*\)\s*$/, "").replace(/`/g, "");
+const link = "block rounded-lg px-3 py-1.5 text-[14px] text-ink-300 transition-colors hover:bg-white/[0.04] hover:text-white aria-[current=page]:bg-brass-500/[0.12] aria-[current=page]:font-medium aria-[current=page]:text-brass-200";
 ---
-<nav aria-label="Documentation">
-  <h2><a href="/docs/" aria-current={current === undefined ? "page" : undefined} style="color:inherit">Docs index</a></h2>
+<nav aria-label="Documentation" class="space-y-7 text-sm">
+  <a href="/docs/" aria-current={current === undefined ? "page" : undefined} class={link + " !text-[15px] !font-semibold !text-white"}>Overview</a>
   {groups.map((g) => (
-    <>
-      <h2>{g.label}</h2>
-      <ul>
-        {g.key === "players" && <li><a href="/guide/">Players' guide</a></li>}
+    <div>
+      <p class="mb-2 px-3 font-mono text-[11px] font-medium tracking-[0.16em] text-brass-300/90 uppercase">{g.label}</p>
+      <ul class="space-y-0.5">
+        {g.key === "players" && <li><a href="/guide/" class={link}>Players' guide</a></li>}
         {docs.filter((d) => d.data.group === g.key).map((d) => (
-          <li><a href={`/docs/${d.id}/`} aria-current={d.id === current ? "page" : undefined}>{short(d.data.title)}</a></li>
+          <li><a href={`/docs/${d.id}/`} aria-current={d.id === current ? "page" : undefined} class={link}>{short(d.data.title)}</a></li>
         ))}
       </ul>
-    </>
+    </div>
   ))}
 </nav>

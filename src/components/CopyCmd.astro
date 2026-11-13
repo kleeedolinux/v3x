@@ -1,0 +1,15 @@
+---
+/** A one-line shell command with a copy button. The button is hidden until the inline script runs. */
+import Icon from "./Icon.astro";
+import { INSTALL_CMD } from "../data/facts";
+interface Props { cmd?: string; lang?: "en" | "pt-BR"; class?: string; label?: string | false }
+const { cmd = INSTALL_CMD, lang = "en", class: cls = "", label = "PowerShell" } = Astro.props;
+const pt = lang === "pt-BR";
+---
+<div class={`cmd ${cls}`}>
+  {label && <span class="hidden shrink-0 rounded-md bg-white/[0.06] px-2 py-1 font-sans text-[11px] font-semibold tracking-wide text-ink-300 sm:inline">{label}</span>}
+  <code><span class="prompt">&gt; </span>{cmd}</code>
+  <button type="button" class="copy-btn" data-copy={cmd} data-label-done={pt ? "Copiado" : "Copied"} aria-label={pt ? "Copiar comando" : "Copy command"} hidden>
+    <Icon name="copy" class="size-3.5" /><span>{pt ? "Copiar" : "Copy"}</span>
+  </button>
+</div>

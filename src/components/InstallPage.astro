@@ -1,0 +1,136 @@
+---
+import Base from "../layouts/Base.astro";
+import Icon from "./Icon.astro";
+import CopyCmd from "./CopyCmd.astro";
+import PageHero from "./PageHero.astro";
+import { en, pt } from "../i18n/landing";
+import { RELEASES_URL, REPO_URL, GAME_VERSION } from "../data/facts";
+
+interface Props { lang: "en" | "pt-BR" }
+const { lang } = Astro.props;
+const isPt = lang === "pt-BR";
+const t = isPt ? pt : en;
+const guide = isPt ? "/pt-br/guia/" : "/guide/";
+const x = isPt
+  ? {
+      title: "Instalar o V3X no Victoria 3",
+      description: "Instale o V3X com uma linha no PowerShell ou com o V3X-Setup.exe da página de Releases no GitHub. Sem administrador, nenhum arquivo do jogo alterado.",
+      kicker: "Instalar", h1: "Instale o V3X",
+      lede: `Para Victoria 3 ${GAME_VERSION} no Windows x64. Sem administrador, nenhum arquivo do jogo alterado. Escolha um dos dois caminhos.`,
+      aTag: "Recomendado", aTitle: "Uma linha no PowerShell",
+      aSteps: [
+        "Feche o Victoria 3.",
+        "Aperte a <b>tecla Windows</b>, digite <code>powershell</code>, aperte <b>Enter</b>.",
+        "Cole esta linha (botão direito cola) e aperte <b>Enter</b>:",
+        "Ele diz <code>Achei seu jogo em ... Está certo? [S/n]</code>. Aperte <b>Enter</b> se a pasta estiver certa.",
+        "Espere aparecer <code>Pronto! O V3X ... está instalado.</code> Abra o jogo como sempre.",
+      ],
+      aNote: "Ele acha o jogo pela Steam, baixa o <code>V3X-Setup.exe</code> da última versão no GitHub, confere o SHA-256 e roda. Se o download vier com defeito ou o jogo estiver aberto, nada é alterado. <b>Atualizar, reparar ou desinstalar:</b> rode a mesma linha de novo.",
+      bTag: "Clássico", bTitle: "Baixar o instalador",
+      bBody: "Pegue o <code>V3X-Setup.exe</code> na página de Releases do GitHub. Ela também lista o checksum SHA-256 (<code>SHA256SUMS.txt</code>).",
+      releases: "Abrir GitHub Releases",
+      beforeTitle: "Antes de começar",
+      before: [
+        ["Só um jogador", "Não use o V3X no multijogador. Antes de jogar online, desinstale ou renomeie <code>binaries\\version.dll</code>."],
+        ["Faça backup dos saves", "Eles ficam em <code>Documentos\\Paradox Interactive\\Victoria 3\\save games</code>."],
+        ["Espaço livre no C:", "Deixe alguns GB livres: um autosave já falhou com o disco quase cheio."],
+      ],
+      more: "Mais detalhes", moreLinks: [["/pt-br/guia/", "Guia do jogador"], ["/docs/install/", "docs/install.md (em inglês)"], ["/docs/troubleshooting/", "Solução de problemas (em inglês)"]],
+    }
+  : {
+      title: "Install V3X for Victoria 3",
+      description: "Install V3X with one line in PowerShell, or with V3X-Setup.exe from the GitHub Releases page. No admin rights, no game file changed.",
+      kicker: "Install", h1: "Install V3X",
+      lede: `For Victoria 3 ${GAME_VERSION} on Windows x64. No admin rights, no game file changed. Pick either way.`,
+      aTag: "Recommended", aTitle: "One line in PowerShell",
+      aSteps: [
+        "Close Victoria 3.",
+        "Press the <b>Windows key</b>, type <code>powershell</code>, press <b>Enter</b>.",
+        "Paste this line (right-click pastes) and press <b>Enter</b>:",
+        "It says <code>Found your game at ... Is this right? [Y/n]</code>. Press <b>Enter</b> if the folder is right.",
+        "Wait for <code>Done! V3X ... is installed.</code> Start the game as usual.",
+      ],
+      aNote: "It finds the game through Steam, downloads <code>V3X-Setup.exe</code> from the latest GitHub release, checks its SHA-256 and runs it. Nothing is changed if the download is damaged or the game is open. <b>Update, repair or uninstall:</b> run the same line again.",
+      bTag: "Classic", bTitle: "Download the installer",
+      bBody: "Get <code>V3X-Setup.exe</code> from the GitHub Releases page. The release also lists its SHA-256 checksum (<code>SHA256SUMS.txt</code>).",
+      releases: "Open GitHub Releases",
+      beforeTitle: "Before you start",
+      before: [
+        ["Single player only", "Do not use V3X in multiplayer. Before you play online, uninstall it or rename <code>binaries\\version.dll</code>."],
+        ["Back up your saves", "They are in <code>Documents\\Paradox Interactive\\Victoria 3\\save games</code>."],
+        ["Free space on C:", "Keep a few GB free: an autosave once failed when C: was nearly full."],
+      ],
+      more: "More detail", moreLinks: [["/guide/", "Players' guide"], ["/docs/install/", "docs/install.md"], ["/docs/troubleshooting/", "Troubleshooting"]],
+    };
+const jsonLd = [{ "@type": "HowTo", name: x.title, inLanguage: lang, step: x.aSteps.map((s, i) => ({ "@type": "HowToStep", position: i + 1, text: s.replace(/<[^>]+>/g, "") })) }];
+---
+<Base title={x.title} description={x.description} lang={lang} section="install" alternate={isPt ? "/install/" : "/pt-br/instalar/"} ogType="article"
+  crumbs={[{ name: "V3X", href: isPt ? "/pt-br/" : "/" }, { name: x.kicker, href: isPt ? "/pt-br/instalar/" : "/install/" }]} jsonLd={jsonLd}>
+  <PageHero kicker={x.kicker} title={x.h1} lede={x.lede} />
+
+  <section class="container-x pb-24 md:pb-32">
+    <div class="grid gap-5 lg:grid-cols-[1.25fr_1fr]">
+      <article data-reveal class="card relative overflow-hidden !border-brass-400/35 p-7 md:p-10">
+        <div aria-hidden="true" class="absolute -top-32 -right-32 size-80 rounded-full bg-brass-400/15 blur-3xl"></div>
+        <span class="pill bg-brass-400 text-ink-950">{x.aTag}</span>
+        <h2 class="mt-5 text-3xl font-semibold tracking-tight text-white md:text-4xl">{x.aTitle}</h2>
+        <ol class="mt-8 space-y-5">
+          {x.aSteps.map((s, i) => (
+            <li class="flex gap-4">
+              <span class="grid size-8 shrink-0 place-items-center rounded-full bg-white/[0.06] font-mono text-sm font-semibold text-brass-200 ring-1 ring-white/10">{i + 1}</span>
+              <div class="min-w-0 flex-1 pt-0.5">
+                <p class="rich text-ink-100" set:html={s} />
+                {i === 2 && <CopyCmd lang={lang} label={false} class="mt-4" />}
+              </div>
+            </li>
+          ))}
+        </ol>
+        <p class="rich mt-8 border-t border-white/[0.08] pt-6 text-[15px] text-ink-300" set:html={x.aNote} />
+      </article>
+
+      <article data-reveal style="--d:120ms" class="card flex flex-col p-7 md:p-10">
+        <span class="pill-opt self-start">{x.bTag}</span>
+        <h2 class="mt-5 text-3xl font-semibold tracking-tight text-white md:text-4xl">{x.bTitle}</h2>
+        <p class="rich mt-4 text-ink-200" set:html={x.bBody} />
+        <div class="mt-7 flex flex-wrap gap-3">
+          <a class="btn-primary" href={RELEASES_URL}><Icon name="download" />{t.download}</a>
+          <a class="btn-secondary" href={REPO_URL}><Icon name="github" />GitHub</a>
+        </div>
+        <ol class="mt-9 space-y-5 border-t border-white/[0.08] pt-7">
+          {t.steps.map((s, i) => (
+            <li class="flex gap-4">
+              <span class="grid size-8 shrink-0 place-items-center rounded-full bg-gradient-to-b from-brass-300 to-brass-600 text-sm font-bold text-ink-950">{i + 1}</span>
+              <div class="pt-0.5"><p class="font-semibold text-white">{s.b}</p><p class="rich mt-1 text-[15px] text-ink-300" set:html={s.t} /></div>
+            </li>
+          ))}
+        </ol>
+        <a href={RELEASES_URL} class="mt-auto inline-flex items-center gap-2 pt-8 font-semibold text-brass-300 hover:text-brass-200">{x.releases}<Icon name="external" class="size-4" /></a>
+      </article>
+    </div>
+
+    <div class="callout rich mt-6" data-reveal set:html={t.preNote} />
+
+    <h2 data-reveal class="mt-24 text-3xl font-semibold tracking-tight text-white md:text-4xl">{x.beforeTitle}</h2>
+    <div class="mt-8 grid gap-4 md:grid-cols-3">
+      {x.before.map(([h, b], i) => (
+        <div data-reveal style={`--d:${i * 80}ms`} class="card p-6">
+          <p class="text-lg font-semibold text-white">{h}</p>
+          <p class="rich mt-2 text-[15px] text-ink-300" set:html={b} />
+        </div>
+      ))}
+    </div>
+
+    <h2 id="off" data-reveal class="mt-24 text-3xl font-semibold tracking-tight text-white md:text-4xl">{t.s5}</h2>
+    <div data-reveal class="card mt-8 overflow-x-auto">
+      <table class="tbl rich">
+        <thead><tr><th scope="col">{t.offHead[0]}</th><th scope="col">{t.offHead[1]}</th></tr></thead>
+        <tbody>{t.off.map((r) => <tr><th scope="row" class="w-[34%]">{r[0]}</th><td class="text-ink-200" set:html={r[1]} /></tr>)}</tbody>
+      </table>
+    </div>
+
+    <div data-reveal class="mt-16 flex flex-wrap items-center gap-x-6 gap-y-3 border-t border-white/[0.08] pt-8">
+      <span class="eyebrow !text-ink-300">{x.more}</span>
+      {x.moreLinks.map(([h, l]) => <a href={h} class="inline-flex items-center gap-1.5 font-medium text-brass-300 hover:text-brass-200">{l}<Icon name="arrow" class="size-4" /></a>)}
+    </div>
+  </section>
+</Base>

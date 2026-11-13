@@ -1,0 +1,61 @@
+---
+/**
+ * Hero artwork: the V3X logo over a set of slowly turning brass gears (the gears of banner.svg),
+ * with a few status chips taken from the console mockup. Pure SVG + CSS animation; static without motion.
+ */
+function gear(n: number, ro: number, ri: number, cx = 0, cy = 0) {
+  const pts: string[] = [];
+  const step = (2 * Math.PI) / n;
+  const w1 = step * 0.3, w2 = step * 0.17;
+  for (let i = 0; i < n; i++) {
+    const a = i * step;
+    const p = (ang: number, r: number) => `${(cx + r * Math.cos(ang)).toFixed(2)},${(cy + r * Math.sin(ang)).toFixed(2)}`;
+    pts.push(p(a - step / 2 + 0.0001, ri), p(a - w1, ri), p(a - w2, ro), p(a + w2, ro), p(a + w1, ri));
+  }
+  return "M" + pts.join("L") + "Z";
+}
+const pt = Astro.props.lang === "pt-BR";
+const big = gear(28, 248, 228);
+const mid = gear(14, 96, 82);
+const small = gear(10, 64, 53);
+---
+<div class="relative aspect-square w-full">
+  <svg viewBox="-260 -260 520 520" class="absolute inset-0 size-full" aria-hidden="true">
+    <defs>
+      <linearGradient id="hb" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#e2c07a" /><stop offset="1" stop-color="#7a5a22" /></linearGradient>
+      <radialGradient id="hg"><stop offset="0" stop-color="#b98b3e" stop-opacity=".35" /><stop offset="1" stop-color="#b98b3e" stop-opacity="0" /></radialGradient>
+    </defs>
+    <circle r="250" fill="url(#hg)" />
+    <g class="origin-center animate-spin-slow" style="transform-box: fill-box">
+      <path d={big} fill="none" stroke="#cfa45a" stroke-opacity=".28" stroke-width="1.5" />
+      <circle r="200" fill="none" stroke="#cfa45a" stroke-opacity=".14" stroke-width="1" stroke-dasharray="2 8" />
+    </g>
+    <circle r="168" fill="none" stroke="#74c6c1" stroke-opacity=".18" stroke-width="1" />
+  </svg>
+
+  <svg viewBox="-100 -100 200 200" class="absolute top-[2%] right-[0%] w-[34%] animate-spin-rev" aria-hidden="true">
+    <path d={mid} fill="url(#hb2)" stroke="#7a5a22" stroke-width="2" />
+    <defs><linearGradient id="hb2" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#e2c07a" /><stop offset="1" stop-color="#7a5a22" /></linearGradient></defs>
+    <circle r="56" fill="#14202e" stroke="#e2c07a" stroke-width="2" />
+    <circle r="16" fill="#e2c07a" />
+  </svg>
+  <svg viewBox="-70 -70 140 140" class="absolute bottom-[4%] left-[2%] w-[24%] animate-spin-slow [animation-duration:24s]" aria-hidden="true">
+    <path d={small} fill="url(#hb3)" stroke="#7a5a22" stroke-width="2" />
+    <defs><linearGradient id="hb3" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#e2c07a" /><stop offset="1" stop-color="#7a5a22" /></linearGradient></defs>
+    <circle r="34" fill="#1f3550" stroke="#e2c07a" stroke-width="2" />
+    <circle r="10" fill="#e2c07a" />
+  </svg>
+
+  <img src="/assets/logo.svg" alt="V3X logo: a brass gear around a navy disc with the letters V3X" width="256" height="256" fetchpriority="high"
+    class="absolute top-1/2 left-1/2 w-[58%] -translate-x-1/2 -translate-y-1/2 drop-shadow-[0_30px_60px_rgb(0_0_0/0.55)]" />
+
+  <div aria-hidden="true" class="absolute top-[14%] left-[-4%] hidden animate-float rounded-xl border border-white/10 bg-ink-850/85 px-3.5 py-2.5 font-mono text-[12px] shadow-xl backdrop-blur sm:block">
+    <span class="mr-2 inline-block size-2 rounded-full bg-[#4ee06a] shadow-[0_0_10px_#4ee06a]"></span><span class="text-ink-100">keep_history</span> <span class="text-ink-400">ok</span>
+  </div>
+  <div aria-hidden="true" class="absolute right-[-2%] bottom-[22%] hidden animate-float rounded-xl border border-white/10 bg-ink-850/85 px-3.5 py-2.5 font-mono text-[12px] shadow-xl backdrop-blur [animation-delay:-3s] sm:block">
+    <span class="mr-2 inline-block size-2 rounded-full bg-cyan shadow-[0_0_10px_var(--color-cyan)]"></span><span class="text-ink-100">lazy_mesh</span> <span class="text-teal-200">{pt ? "37,5 s → 6,7 s" : "37.5 s → 6.7 s"}</span>
+  </div>
+  <div aria-hidden="true" class="absolute bottom-[-2%] left-[30%] hidden animate-float rounded-xl border border-white/10 bg-ink-850/85 px-3.5 py-2.5 font-mono text-[12px] shadow-xl backdrop-blur [animation-delay:-6s] md:block">
+    <span class="mr-2 inline-block size-2 rounded-full bg-brass-300 shadow-[0_0_10px_var(--color-brass-300)]"></span><span class="text-ink-100">{pt ? "21/23 plugins carregados" : "21/23 plugins loaded"}</span>
+  </div>
+</div>

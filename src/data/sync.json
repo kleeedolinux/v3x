@@ -1,5 +1,5 @@
 {
-  "syncedAt": "2026-11-13T22:14:36.130Z",
+  "syncedAt": "2026-11-13T22:55:30.018Z",
   "repo": "D:/SteamLibrary/steamapps/common/Victoria 3/v3x",
   "docs": [
     {
@@ -90,6 +90,11 @@
     {
       "slug": "session-2026-11-13",
       "src": "docs/sessions/2026-11-13-evening.md",
+      "updated": "2026-11-13"
+    },
+    {
+      "slug": "updating",
+      "src": "docs/updating.md",
       "updated": "2026-11-13"
     }
   ]

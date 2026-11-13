@@ -8,8 +8,8 @@
 - Not for multiplayer. Uninstall: run V3X-Setup.exe > Uninstall, or delete binaries\version.dll and binaries\v3x.
 
 ## Pages
-- [Front page](https://v3x.pages.dev/): what V3X does for a player, measured results, install, FAQ
-- [Players' guide](https://v3x.pages.dev/guide/): install, the V3X button, plugins on/off, troubleshooting
-- [Guia do jogador (pt-BR)](https://v3x.pages.dev/pt-br/guia/)
-- [Docs](https://v3x.pages.dev/docs/): getting started, API reference, safety rules, scripting, plugin catalog, testing
+- [Front page](https://v3extender.pages.dev/): what V3X does for a player, measured results, install, FAQ
+- [Players' guide](https://v3extender.pages.dev/guide/): install, the V3X button, plugins on/off, troubleshooting
+- [Guia do jogador (pt-BR)](https://v3extender.pages.dev/pt-br/guia/)
+- [Docs](https://v3extender.pages.dev/docs/): getting started, API reference, safety rules, scripting, plugin catalog, testing
 - [Source code](https://github.com/kleeedolinux/v3x)

@@ -1,126 +1,380 @@
 ---
+import { Code } from "astro:components";
 import Base from "../layouts/Base.astro";
-import Sec from "./Sec.astro";
-import Bars from "./Bars.astro";
+import Icon from "./Icon.astro";
+import CopyCmd from "./CopyCmd.astro";
+import HeroArt from "./HeroArt.astro";
 import { en, pt } from "../i18n/landing";
-import { RELEASES_URL, measured } from "../data/facts";
+import { RELEASES_URL, REPO_URL, BRAND, measured } from "../data/facts";
 
 interface Props { lang: "en" | "pt-BR" }
 const { lang } = Astro.props;
 const t = lang === "pt-BR" ? pt : en;
 const isPt = lang === "pt-BR";
 const guide = isPt ? "/pt-br/guia/" : "/guide/";
-const L = t.labels;
+const install = isPt ? "/pt-br/instalar/" : "/install/";
 const strip = (h: string) => h.replace(/<[^>]+>/g, "").replace(/&[a-z]+;/g, " ");
 const jsonLd = [
-  { "@type": "SoftwareApplication", name: "V3X", alternateName: "V3X script extender for Victoria 3",
+  { "@type": "SoftwareApplication", name: "V3X", alternateName: [BRAND.full, "V3X script extender for Victoria 3"],
     applicationCategory: "GameApplication", applicationSubCategory: "Game modification (script extender)",
     operatingSystem: "Windows (x64)", inLanguage: lang, description: t.description,
     url: new URL(isPt ? "/pt-br/" : "/", Astro.site).href, downloadUrl: RELEASES_URL, softwareRequirements: "Victoria 3 1.15.1",
-    codeRepository: "https://github.com/kleeedolinux/v3x",
+    codeRepository: REPO_URL,
     featureList: t.register.map((r) => r.head) },
   { "@type": "FAQPage", inLanguage: lang, mainEntity: t.qa.map((q) => ({ "@type": "Question", name: q.q, acceptedAnswer: { "@type": "Answer", text: strip(q.a) } })) },
 ];
+const code = `#include <windows.h>
+#include "v3x.h"
+
+V3X_PLUGIN_MANIFEST("tick_counter", "0.1.0", "you", "counts game ticks", "release/1.15*");
+static volatile LONG g_ticks;
+
+static void on_tick(V3X_HookCall *call) { (void)call; InterlockedIncrement(&g_ticks); }
+
+V3X_EXPORT int v3x_plugin_load(const V3X_API *api)
+{
+    if (!V3X_HAS(api, hook_safe)) return 1;                 /* loader older than API v4 */
+    void *s  = api->find_string("Processing Tick: ");      /* 1. anchor: a log string */
+    void *x  = s ? api->find_xref(s, 0) : NULL;            /* 2. the code that loads it */
+    void *fn = x ? api->function_start(x) : NULL;          /* 3. its function (.pdata) */
+    if (!fn) { api->log("tick_counter", "anchor FAILED: nothing installed"); return 1; }
+    return api->hook_safe(fn, on_tick, NULL, NULL);        /* 4. observe; args forwarded */
+}`;
+const bars = [
+  { before: measured.meshLoad.before, after: measured.meshLoad.after },
+  { before: measured.debugSave.before, after: measured.debugSave.after },
+];
+const isOn = (p: string) => / · (on|ligado)$/.test(p);
 ---
-<Base title={t.title} description={t.description} lang={lang} section="home" alternate={isPt ? "/" : "/pt-br/"} sheet={isPt ? "01 · Início" : "01 · Front page"} jsonLd={jsonLd}>
-  <div class="front">
-    <div>
-      <p class="kicker">{t.kicker}</p>
-      <h1 set:html={t.h1} />
-      <p class="lede" set:html={t.lede} />
-      <div class="actions">
-        <a class="btn primary" href={RELEASES_URL}>{t.download} <small>{t.downloadSub}</small></a>
-        <a class="btn" href={guide}>{t.guide} →</a>
-      </div>
-      <p class="small">{t.promise}</p>
-    </div>
-    <div>
-      <table class="ledger">
-        <caption class="kicker">{t.ledgerCaption}</caption>
-        <thead><tr><th scope="col"><span class="vh">{isPt ? "Medida" : "Measure"}</span></th><th scope="col" class="n">{t.ledgerHead[1]}</th><th scope="col" class="n">{t.ledgerHead[2]}</th></tr></thead>
-        <tbody>
-          {t.ledgerRows.map((r) => (
-            <tr>
-              <th scope="row">{r.what}<span class="tag">{r.tag}</span></th>
-              <td class="n before">{r.before}</td>
-              <td class="n after">{r.after}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-      <p class="caption" style="margin-top:var(--s2)">{t.ledgerNote}</p>
-    </div>
-  </div>
+<Base title={t.title} description={t.description} lang={lang} section="home" alternate={isPt ? "/" : "/pt-br/"} jsonLd={jsonLd}>
 
-  <Sec n={1} label={L[0]} id="what" title={t.s1}>
-    <dl class="register">
-      {t.register.map((r) => (
-        <div>
-          <dt><span>{r.head}</span><span class={`stamp ${r.on ? "on" : "opt"}`}>{r.on ? t.stampOn : t.stampOpt}</span></dt>
-          <dd set:html={r.body} />
+  <!-- HERO -->
+  <section class="noise relative isolate flex min-h-[100svh] items-center overflow-hidden pt-28 pb-20 md:pt-32">
+    <div aria-hidden="true" class="pointer-events-none absolute inset-0 -z-10">
+      <div class="absolute inset-0 bg-[radial-gradient(120%_80%_at_50%_0%,#16263a_0%,var(--color-ink-900)_60%)]"></div>
+      <div class="hero-grid absolute inset-0 animate-grid"></div>
+      <div class="absolute -top-[20%] right-[-10%] size-[70vmax] animate-drift rounded-full bg-[radial-gradient(closest-side,rgb(185_139_62/0.28),transparent)] blur-2xl"></div>
+      <div class="absolute bottom-[-30%] left-[-15%] size-[60vmax] animate-drift-2 rounded-full bg-[radial-gradient(closest-side,rgb(47_111_115/0.32),transparent)] blur-2xl"></div>
+      <div class="absolute inset-x-0 bottom-0 h-40 bg-gradient-to-b from-transparent to-ink-900"></div>
+    </div>
+
+    <div class="container-x grid grid-cols-[minmax(0,1fr)] items-center gap-14 lg:grid-cols-[minmax(0,1.1fr)_minmax(0,0.9fr)] lg:gap-8">
+      <div class="min-w-0">
+        <p data-reveal class="inline-flex flex-wrap items-center gap-2.5 rounded-full border border-brass-400/25 bg-brass-500/10 py-1.5 pr-4 pl-2 text-[13px] font-medium text-brass-100 backdrop-blur">
+          <span class="rounded-full bg-brass-400 px-2 py-0.5 text-[11px] font-bold tracking-wide text-ink-950 uppercase">{isPt ? "Pré-lançamento" : "Pre-release"}</span>
+          {t.eyebrow}
+        </p>
+        <h1 data-reveal style="--d:80ms" class="mt-7 font-bold tracking-[-0.04em]">
+          <span class="text-gradient-brass block animate-shimmer text-[clamp(5rem,3rem+9vw,9.5rem)] leading-[0.9]">V3X</span>
+          <span class="mt-3 block text-[clamp(2rem,1.2rem+2.6vw,3.4rem)] leading-[1.05] tracking-[-0.03em] whitespace-nowrap text-white">{BRAND.full}</span>
+        </h1>
+        <p data-reveal style="--d:160ms" class="mt-7 max-w-[34rem] text-lg leading-relaxed text-ink-200 md:text-[1.3rem] md:leading-[1.55]">{t.tagline}</p>
+
+        <div data-reveal style="--d:240ms" class="mt-10 flex flex-wrap items-center gap-3">
+          <a class="btn-primary w-full !px-6 !py-3.5 text-[17px] sm:w-auto" href={RELEASES_URL}><Icon name="download" class="size-5" />{t.download}</a>
+          <a class="btn-secondary w-full !px-6 !py-3.5 text-[17px] sm:w-auto" href={REPO_URL}><Icon name="github" class="size-5" />{t.github}</a>
         </div>
+        <p data-reveal style="--d:280ms" class="mt-3 text-sm text-ink-300">{t.downloadSub}</p>
+
+        <div data-reveal style="--d:340ms" class="mt-9 max-w-[36rem]">
+          <p class="mb-2.5 text-[13px] font-medium text-ink-300">{t.orPaste}</p>
+          <CopyCmd lang={lang} label={false} />
+        </div>
+      </div>
+
+      <div data-reveal="scale" style="--d:200ms" class="relative mx-auto w-full max-w-[520px]">
+        <HeroArt lang={lang} />
+      </div>
+    </div>
+
+
+  </section>
+
+  <!-- TRUST STRIP -->
+  <section id="trust" class="relative border-y border-white/[0.07] bg-ink-950/60">
+    <ul class="container-x grid grid-cols-1 gap-y-6 py-10 sm:grid-cols-2 lg:grid-cols-4 lg:divide-x lg:divide-white/[0.07]">
+      {t.trust.map((x, i) => (
+        <li data-reveal style={`--d:${i * 70}ms`} class="flex items-center gap-4 lg:px-7 lg:first:pl-0">
+          <img src={`/assets/icon-${x.icon}.svg`} alt="" width="44" height="44" class="size-11 shrink-0" loading="lazy" />
+          <div>
+            <p class="text-[16px] font-semibold text-white">{x.h}</p>
+            <p class="text-sm text-ink-300">{x.t}</p>
+          </div>
+        </li>
       ))}
-    </dl>
-  </Sec>
+    </ul>
+  </section>
 
-  <Sec n={2} label={L[1]} id="measured" title={t.s2}>
-    <p class="measure" set:html={t.s2intro} />
-    <div class="plates">
-      <Bars caption={t.fig1} unit="s" max={40} decimal={t.decimal} rows={[
-        { label: t.figBefore, value: measured.meshLoad.before, kind: "before" },
-        { label: t.figAfter, value: measured.meshLoad.after, kind: "after" },
-      ]} />
-      <Bars caption={t.fig2} unit="MB" max={160} decimal={t.decimal} rows={[
-        { label: t.figBefore, value: measured.debugSave.before, kind: "before" },
-        { label: t.figAfter, value: measured.debugSave.after, kind: "after" },
-      ]} />
+  <!-- PRODUCT SHOTS -->
+  <section class="section relative">
+    <div class="container-x space-y-24 md:space-y-32">
+      <div class="grid items-center gap-12 lg:grid-cols-[0.8fr_1.2fr] lg:gap-16">
+        <div data-reveal>
+          <p class="eyebrow">{t.shotMenuKicker}</p>
+          <h2 class="section-title mt-4">{t.shotMenuTitle}</h2>
+          <p class="mt-5 text-lg text-ink-200">{t.shotMenuBody}</p>
+          <a href={`${guide}#menu`} class="mt-7 inline-flex items-center gap-2 font-semibold text-brass-300 hover:text-brass-200">{t.guide}<Icon name="arrow" class="size-4" /></a>
+        </div>
+        <figure class="tilt relative">
+          <div aria-hidden="true" class="absolute -inset-10 -z-10 rounded-[3rem] bg-[radial-gradient(closest-side,rgb(185_139_62/0.22),transparent)] blur-2xl"></div>
+          <div class="frame">
+            <div class="frame-bar"><i></i><i></i><i></i><span class="ml-3 font-mono text-[11px] text-ink-400">Victoria 3 · {isPt ? "menu principal" : "main menu"}</span></div>
+            <img src="/assets/mockup-menu.svg" width="960" height="520" alt={t.shotMenuAlt} class="block w-full" loading="lazy" />
+          </div>
+          <figcaption class="mt-3 text-center text-xs text-ink-400">{t.illustration}</figcaption>
+        </figure>
+      </div>
+
+      <div class="grid items-center gap-12 lg:grid-cols-[1.2fr_0.8fr] lg:gap-16">
+        <figure class="tilt relative order-2 lg:order-1">
+          <div aria-hidden="true" class="absolute -inset-10 -z-10 rounded-[3rem] bg-[radial-gradient(closest-side,rgb(58_215_224/0.14),transparent)] blur-2xl"></div>
+          <div class="frame">
+            <img src="/assets/mockup-console.svg" width="960" height="430" alt={t.shotConsoleAlt} class="block w-full" loading="lazy" />
+          </div>
+          <figcaption class="mt-3 text-center text-xs text-ink-400">{t.illustration}</figcaption>
+        </figure>
+        <div data-reveal class="order-1 lg:order-2">
+          <p class="eyebrow">{t.shotConsoleKicker}</p>
+          <h2 class="section-title mt-4">{t.shotConsoleTitle}</h2>
+          <p class="mt-5 text-lg text-ink-200">{t.shotConsoleBody}</p>
+        </div>
+      </div>
     </div>
-    <p class="caption measure" style="margin-top:var(--s2)" set:html={t.figNote} />
-    <p class="note plain small" set:html={t.method} />
-  </Sec>
+  </section>
 
-  <Sec n={3} label={L[2]} id="mods" title={t.s3}>
-    <p class="measure" set:html={t.s3intro} />
-    <table class="ledger" style="max-width:48rem">
-      <thead><tr>{t.cmpHead.map((h, i) => <th scope="col">{i === 0 ? <span class="vh">{isPt ? "Aspecto" : "Aspect"}</span> : h}</th>)}</tr></thead>
-      <tbody>{t.cmp.map((r) => <tr><th scope="row">{r[0]}</th><td>{r[1]}</td><td>{r[2]}</td></tr>)}</tbody>
-    </table>
-    <figure class="plate">
-      <img src="/assets/how-it-works.svg" width="1200" height="330" loading="lazy" alt={isPt ? "Diagrama: você abre Victoria 3, o V3X carrega junto como um arquivo a mais (version.dll), os plugins corrigem o motor, você joga. Apague version.dll para voltar ao jogo original." : "Diagram: you start Victoria 3, V3X loads with it as one extra file (version.dll), plugins fix the engine, you play. Delete version.dll to return to vanilla."} />
-      <figcaption><b>{isPt ? "Prancha I" : "Plate I"}</b>{t.plate1}</figcaption>
-    </figure>
-  </Sec>
+  <!-- MEASURED -->
+  <section id="measured" class="section relative overflow-hidden border-t border-white/[0.06] bg-ink-950/50">
+    <div aria-hidden="true" class="pointer-events-none absolute top-0 left-1/2 h-px w-[80%] -translate-x-1/2 bg-gradient-to-r from-transparent via-brass-400/50 to-transparent"></div>
+    <div aria-hidden="true" class="pointer-events-none absolute -top-40 left-1/2 h-80 w-[60%] -translate-x-1/2 rounded-full bg-brass-500/10 blur-3xl"></div>
+    <div class="container-x relative">
+      <div data-reveal class="mx-auto max-w-3xl text-center">
+        <p class="eyebrow">{isPt ? "Resultados" : "Results"}</p>
+        <h2 class="section-title mt-4">{t.s2}</h2>
+        <p class="section-lede mx-auto">{t.s2intro}</p>
+      </div>
 
-  <Sec n={4} label={L[3]} id="install" title={t.s4}>
-    <ol class="steps">
-      {t.steps.map((s) => <li><b>{s.b}</b><span set:html={s.t} /></li>)}
-    </ol>
-    <div class="actions">
-      <a class="btn primary" href={RELEASES_URL}>{t.download} <small>{t.downloadSub}</small></a>
-      <a class="btn" href={guide}>{t.guide} →</a>
+      <div class="mt-16 grid gap-5 md:grid-cols-3">
+        {t.stats.map((s, i) => (
+          <article data-reveal style={`--d:${i * 110}ms`} class="card card-hover bars relative flex flex-col overflow-hidden p-7 md:p-8">
+            <div class="flex items-start justify-between gap-3">
+              <h3 class="text-[15px] font-semibold text-ink-100">{s.label}</h3>
+              <span class={isOn(s.plugin) ? "pill-on" : "pill-opt"}>{s.plugin.split(" · ")[0]}</span>
+            </div>
+            {s.to !== undefined ? (
+              <>
+                <p class="mt-8 flex items-baseline gap-2 font-bold tracking-tight text-white">
+                  <span class="text-[clamp(3.25rem,5vw,4.5rem)] leading-none tabular-nums" data-count data-from={s.from} data-to={s.to} data-decimals={s.decimals} data-sep={t.decimal}>{String(s.to).replace(".", t.decimal)}</span>
+                  <span class="text-2xl font-semibold text-ink-300">{s.unit}</span>
+                </p>
+                <p class="mt-2 text-sm text-ink-300">{isPt ? "antes" : "was"} <span class="font-mono text-rust-300 line-through decoration-rust-400/60">{s.before}</span></p>
+                <div class="mt-7 space-y-2.5" aria-hidden="true">
+                  <div class="flex items-center gap-3"><span class="w-16 shrink-0 text-[11px] font-medium tracking-wide text-ink-400 uppercase">{t.figBefore}</span><span class="h-2.5 flex-1 rounded-full bg-white/[0.05]"><span class="bar block h-full rounded-full bg-gradient-to-r from-rust-500 to-rust-400" style="width:100%"></span></span></div>
+                  <div class="flex items-center gap-3"><span class="w-16 shrink-0 text-[11px] font-medium tracking-wide text-ink-400 uppercase">V3X</span><span class="h-2.5 flex-1 rounded-full bg-white/[0.05]"><span class="bar block h-full rounded-full bg-gradient-to-r from-teal-500 to-teal-300" style={`width:${(100 * bars[i].after) / bars[i].before}%;--d:300ms`}></span></span></div>
+                </div>
+              </>
+            ) : (
+              <>
+                <p class="mt-8 text-[clamp(3.25rem,5vw,4.5rem)] leading-none font-bold tracking-tight text-teal-200">{s.after}</p>
+                <p class="mt-2 text-sm text-ink-300">{isPt ? "ligado por padrão" : "on by default"}</p>
+                <div class="mt-7 flex items-center gap-2" aria-hidden="true">
+                  <span class="rounded-lg bg-rust-500/20 px-3 py-1.5 font-mono text-xs text-rust-300 ring-1 ring-rust-400/30">{s.before}</span>
+                  <Icon name="arrow" class="size-4 text-ink-400" />
+                  <span class="rounded-lg bg-teal-500/25 px-3 py-1.5 font-mono text-xs text-teal-100 ring-1 ring-teal-400/40">{s.delta}</span>
+                </div>
+              </>
+            )}
+            <p class="mt-auto pt-7 text-[15px] leading-relaxed text-ink-300">
+              {s.to !== undefined && <span class="mr-1.5 font-semibold text-brass-200">{s.delta}.</span>}{s.desc}
+            </p>
+          </article>
+        ))}
+      </div>
+      <p class="mt-6 text-center text-[13px] text-ink-400">{t.statsFoot}</p>
+
+      <div data-reveal class="card mx-auto mt-14 flex max-w-4xl flex-col gap-5 p-6 sm:flex-row sm:items-center md:p-8">
+        <img src="/assets/icon-speed.svg" alt="" width="52" height="52" class="size-13 shrink-0" loading="lazy" />
+        <div>
+          <p class="eyebrow">{t.methodHead}</p>
+          <p class="mt-2 text-[15px] text-ink-200 md:text-base" set:html={t.method} />
+        </div>
+      </div>
     </div>
-    <p class="note small" set:html={t.preNote} />
-  </Sec>
+  </section>
 
-  <Sec n={5} label={L[4]} id="off" title={t.s5}>
-    <table class="ledger" style="max-width:52rem">
-      <thead><tr><th scope="col">{t.offHead[0]}</th><th scope="col">{t.offHead[1]}</th></tr></thead>
-      <tbody>{t.off.map((r) => <tr><th scope="row">{r[0]}</th><td set:html={r[1]} /></tr>)}</tbody>
-    </table>
-  </Sec>
-
-  <Sec n={6} label={L[5]} id="faq" title={t.s6}>
-    <div class="qa">
-      {t.qa.map((q) => <div><h3>{q.q}</h3><p set:html={q.a} /></div>)}
+  <!-- WHAT IT DOES -->
+  <section id="what" class="section relative">
+    <div class="container-x">
+      <div data-reveal class="grid gap-6 lg:grid-cols-2 lg:items-end">
+        <div>
+          <p class="eyebrow">{isPt ? "Recursos" : "Features"}</p>
+          <h2 class="section-title mt-4">{t.s1}</h2>
+        </div>
+        <p class="rich text-lg text-ink-200" set:html={t.s1intro} />
+      </div>
+      <div class="mt-14 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+        {t.register.map((r, i) => (
+          <article data-reveal style={`--d:${(i % 3) * 80}ms`} class={`card card-hover group p-6 md:p-7 ${i === 0 ? "lg:col-span-2" : ""}`}>
+            <div class="flex items-center justify-between gap-3">
+              <img src={`/assets/icon-${r.icon}.svg`} alt="" width="48" height="48" class="size-12 transition-transform duration-500 group-hover:scale-110 group-hover:-rotate-6" loading="lazy" />
+              <span class={r.on ? "pill-on" : "pill-opt"}>{r.on ? t.stampOn : t.stampOpt}</span>
+            </div>
+            <h3 class={`mt-6 font-semibold tracking-tight text-white ${i === 0 ? "text-2xl" : "text-xl"}`}>{r.head}</h3>
+            <p class="rich mt-2.5 text-[15px] leading-relaxed text-ink-300" set:html={r.body} />
+            {i === 0 && (
+              <svg viewBox="0 0 600 120" class="mt-6 h-auto w-full" aria-hidden="true">
+                <defs><linearGradient id="spark" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#74c6c1" stop-opacity=".35" /><stop offset="1" stop-color="#74c6c1" stop-opacity="0" /></linearGradient></defs>
+                <g stroke="rgb(255 255 255 / .06)">{[20, 50, 80, 110].map((y) => <line x1="0" x2="600" y1={y} y2={y} />)}</g>
+                <path d="M0 100 L40 96 L80 92 L120 94 L160 84 L200 80 L240 72 L280 74 L320 62 L360 58 L400 50 L440 46 L480 36 L520 34 L560 24 L600 18 L600 120 L0 120Z" fill="url(#spark)" />
+                <path d="M0 100 L40 96 L80 92 L120 94 L160 84 L200 80 L240 72 L280 74 L320 62 L360 58 L400 50 L440 46 L480 36 L520 34 L560 24 L600 18" fill="none" stroke="#74c6c1" stroke-width="2.5" stroke-linejoin="round" />
+                <line x1="320" x2="320" y1="8" y2="120" stroke="#cfa45a" stroke-dasharray="4 5" stroke-opacity=".7" />
+                <circle cx="320" cy="62" r="5" fill="#e2c07a" />
+              </svg>
+            )}
+          </article>
+        ))}
+        <a href={guide + (isPt ? "#partes" : "#parts")} data-reveal class="card card-hover group flex flex-col justify-between bg-gradient-to-br from-brass-500/15 to-transparent p-6 sm:col-span-2 md:p-7 lg:col-span-1">
+          <p class="text-xl font-semibold text-white">{isPt ? "Lista completa de partes" : "Every part, on and off"}</p>
+          <span class="mt-6 inline-flex items-center gap-2 font-semibold text-brass-300 group-hover:text-brass-200">{t.guide}<Icon name="arrow" class="size-4 transition-transform group-hover:translate-x-1" /></span>
+        </a>
+      </div>
     </div>
-  </Sec>
+  </section>
 
-  <Sec n={7} label={L[6]} id="modders" title={t.s7}>
-    <p class="measure" set:html={t.modders} />
-    <p><a class="btn" href="/docs/">{t.modLink} →</a></p>
-    <figure class="plate">
-      <img src="/assets/platform.svg" width="1200" height="560" loading="lazy" alt={isPt ? "A plataforma V3X: plugins usam o SDK e a API; o carregador version.dll os carrega no motor de Victoria 3, que continua intacto no disco." : "The V3X platform: plugins use the SDK and the V3X API; the loader version.dll loads them into the Victoria 3 engine, which stays unchanged on disk."} />
-      <figcaption><b>{isPt ? "Prancha II" : "Plate II"}</b>{t.plate2}</figcaption>
-    </figure>
-  </Sec>
+  <!-- HOW IT WORKS -->
+  <section id="mods" class="section relative border-t border-white/[0.06] bg-ink-950/50">
+    <div class="container-x">
+      <div data-reveal class="mx-auto max-w-3xl text-center">
+        <p class="eyebrow">{isPt ? "Como funciona" : "How it works"}</p>
+        <h2 class="section-title mt-4">{t.s3}</h2>
+        <p class="section-lede rich mx-auto" set:html={t.s3intro} />
+      </div>
+      <figure data-reveal="scale" class="mt-14">
+        <div class="plate"><img src="/assets/how-it-works.svg" width="1200" height="330" alt={t.howAlt} class="block w-full rounded-xl" loading="lazy" /></div>
+        <figcaption class="mx-auto mt-4 max-w-3xl text-center text-sm text-ink-400">{t.plate1}</figcaption>
+      </figure>
+
+      <div class="mx-auto mt-16 grid max-w-4xl gap-4 md:grid-cols-2">
+        {[1, 2].map((col) => (
+          <div data-reveal style={`--d:${col * 90}ms`} class={`card p-7 ${col === 2 ? "!border-brass-400/40 bg-gradient-to-b from-brass-500/[0.12] to-transparent" : ""}`}>
+            <p class={`flex items-center gap-3 text-lg font-semibold ${col === 2 ? "text-brass-200" : "text-white"}`}>
+              {col === 2 && <img src="/assets/logo.svg" alt="" width="28" height="28" class="size-7" />}{t.cmpHead[col]}
+            </p>
+            <dl class="mt-5 space-y-4">
+              {t.cmp.map((r) => (
+                <div class="border-t border-white/[0.07] pt-4">
+                  <dt class="font-mono text-[11px] tracking-[0.14em] text-ink-400 uppercase">{r[0]}</dt>
+                  <dd class="mt-1 text-[15px] text-ink-100">{r[col]}</dd>
+                </div>
+              ))}
+            </dl>
+          </div>
+        ))}
+      </div>
+    </div>
+  </section>
+
+  <!-- INSTALL -->
+  <section id="install" class="section relative overflow-hidden">
+    <div aria-hidden="true" class="pointer-events-none absolute top-1/2 left-1/2 -z-10 size-[900px] -translate-x-1/2 -translate-y-1/2 rounded-full bg-[radial-gradient(closest-side,rgb(47_111_115/0.18),transparent)]"></div>
+    <div class="container-x">
+      <div data-reveal class="mx-auto max-w-3xl text-center">
+        <p class="eyebrow">{isPt ? "Instalar" : "Install"}</p>
+        <h2 class="section-title mt-4">{t.s4}</h2>
+        <p class="section-lede mx-auto">{t.s4intro}</p>
+      </div>
+      <div data-reveal class="mx-auto mt-10 max-w-2xl">
+        <CopyCmd lang={lang} class="!py-2.5 sm:!text-[15px]" />
+        <div class="mt-6 flex flex-wrap justify-center gap-3">
+          <a class="btn-primary" href={RELEASES_URL}><Icon name="download" />{t.download}</a>
+          <a class="btn-secondary" href={install}>{t.installPage}<Icon name="arrow" class="size-4" /></a>
+        </div>
+      </div>
+      <ol class="mt-16 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        {t.steps.map((s, i) => (
+          <li data-reveal style={`--d:${i * 90}ms`} class="card card-hover relative p-6">
+            <span class="grid size-10 place-items-center rounded-full bg-gradient-to-b from-brass-300 to-brass-600 font-bold text-ink-950 shadow-[0_6px_20px_-6px_rgb(207_164_90/0.8)]">{i + 1}</span>
+            <h3 class="mt-5 text-lg font-semibold text-white">{s.b}</h3>
+            <p class="rich mt-2 text-[15px] leading-relaxed text-ink-300" set:html={s.t} />
+          </li>
+        ))}
+      </ol>
+      <p class="rich mx-auto mt-8 max-w-3xl text-center text-sm text-ink-400" set:html={t.preNote} />
+    </div>
+  </section>
+
+  <!-- FAQ -->
+  <section id="faq" class="section relative border-t border-white/[0.06] bg-ink-950/50">
+    <div class="container-x grid gap-12 lg:grid-cols-[0.75fr_1.25fr] lg:gap-20">
+      <div data-reveal class="lg:sticky lg:top-28 lg:self-start">
+        <p class="eyebrow">FAQ</p>
+        <h2 class="section-title mt-4">{t.s6}</h2>
+        <p class="mt-5 text-lg text-ink-200">{t.s6intro}</p>
+        <a href={guide} class="mt-7 inline-flex items-center gap-2 font-semibold text-brass-300 hover:text-brass-200">{t.guide}<Icon name="arrow" class="size-4" /></a>
+      </div>
+      <div data-reveal class="faq border-t border-white/[0.08]">
+        {t.qa.map((q, i) => (
+          <details open={i === 0}>
+            <summary>{q.q}<span class="chev" aria-hidden="true"><Icon name="plus" class="size-4" /></span></summary>
+            <p class="answer" set:html={q.a} />
+          </details>
+        ))}
+      </div>
+    </div>
+  </section>
+
+  <!-- MODDERS -->
+  <section id="modders" class="section relative overflow-hidden">
+    <div aria-hidden="true" class="pointer-events-none absolute top-20 right-[-10%] -z-10 size-[600px] rounded-full bg-[radial-gradient(closest-side,rgb(31_53_80/0.9),transparent)]"></div>
+    <div class="container-x">
+      <div data-reveal class="grid gap-8 lg:grid-cols-2 lg:items-end lg:gap-16">
+        <div>
+          <p class="eyebrow">{isPt ? "Para modders" : "For modders"}</p>
+          <h2 class="section-title mt-4">{t.s7}</h2>
+        </div>
+        <div>
+          <p class="text-lg text-ink-200">{t.modders}</p>
+          <div class="mt-5 flex flex-wrap gap-2">
+            <img src="/assets/badge-v3x-api.svg" alt="V3X API v4" width="132" height="20" class="h-5 w-auto" loading="lazy" />
+            <img src="/assets/badge-v3x-plugin.svg" alt="V3X plugin" width="150" height="20" class="h-5 w-auto" loading="lazy" />
+          </div>
+        </div>
+      </div>
+      <figure data-reveal="scale" class="relative mt-14 min-w-0">
+        <div aria-hidden="true" class="absolute -inset-x-10 -inset-y-6 -z-10 rounded-[3rem] bg-[radial-gradient(closest-side,rgb(185_139_62/0.16),transparent)] blur-2xl"></div>
+        <div class="frame">
+          <div class="frame-bar"><i></i><i></i><i></i><span class="ml-3 truncate font-mono text-[11px] text-ink-400">tick_counter.c</span><span class="ml-auto font-mono text-[11px] text-ink-400">C · V3X API v4</span></div>
+          <Code code={code} lang="c" theme="css-variables" class="!m-0 !rounded-none !border-0 !bg-transparent !px-6 !py-6 !text-[12px] md:!text-[14px]" />
+        </div>
+        <figcaption class="mt-5 flex flex-col gap-5 sm:flex-row sm:items-center sm:justify-between">
+          <span class="max-w-xl text-sm text-ink-400">{t.codeCaption}</span>
+          <span class="flex flex-wrap gap-3">
+            <a class="btn-primary" href="/docs/"><Icon name="book" />{t.modLink}</a>
+            <a class="btn-secondary" href="/docs/getting-started/">{t.modStart}<Icon name="arrow" class="size-4" /></a>
+          </span>
+        </figcaption>
+      </figure>
+      <figure data-reveal="scale" class="mt-20">
+        <div class="plate"><img src="/assets/platform.svg" width="1200" height="560" alt={t.platformAlt} class="block w-full rounded-xl" loading="lazy" /></div>
+        <figcaption class="mx-auto mt-4 max-w-3xl text-center text-sm text-ink-400">{t.plate2}</figcaption>
+      </figure>
+    </div>
+  </section>
+
+  <!-- FINAL CTA -->
+  <section class="relative pb-24 md:pb-32">
+    <div class="container-x">
+      <div data-reveal="scale" class="noise relative isolate overflow-hidden rounded-[2rem] border border-brass-400/25 bg-gradient-to-br from-ink-600 via-ink-800 to-ink-900 px-6 py-16 text-center md:px-16 md:py-24">
+        <div aria-hidden="true" class="absolute -top-24 left-1/2 -z-10 h-72 w-[70%] -translate-x-1/2 rounded-full bg-brass-400/25 blur-3xl"></div>
+        <div aria-hidden="true" class="hero-grid absolute inset-0 -z-10 opacity-60"></div>
+        <img src="/assets/logo.svg" alt="" width="88" height="88" class="mx-auto size-22 animate-float drop-shadow-[0_12px_30px_rgb(185_139_62/0.45)]" loading="lazy" />
+        <h2 class="mx-auto mt-8 max-w-3xl text-title font-bold text-white">{t.ctaTitle}</h2>
+        <p class="mx-auto mt-4 max-w-xl text-lg text-ink-200">{t.ctaBody}</p>
+        <div class="mt-10 flex flex-wrap justify-center gap-3">
+          <a class="btn-primary !px-6 !py-3.5 text-[17px]" href={RELEASES_URL}><Icon name="download" />{t.download}</a>
+          <a class="btn-secondary !px-6 !py-3.5 text-[17px]" href={REPO_URL}><Icon name="github" />{t.github}</a>
+        </div>
+        <p class="mt-6 text-sm text-ink-300">{t.promise}</p>
+      </div>
+    </div>
+  </section>
 </Base>

@@ -1,15 +1,20 @@
 ---
 import Base from "../layouts/Base.astro";
+import Icon from "../components/Icon.astro";
 ---
-<Base title="Page not found" description="This page does not exist on the V3X site." sheet="404" noindex>
-  <header class="title" style="margin-top:var(--s8)">
-    <p class="kicker">Error 404 · Erro 404</p>
-    <h1>This page is not in the ledger.</h1>
-    <p class="lede" style="margin:0">It may have moved when the docs were re-synced. <span lang="pt-BR">Esta página não existe.</span></p>
-  </header>
-  <ul class="measure">
-    <li><a href="/">Front page</a> · <a href="/pt-br/" lang="pt-BR">Página inicial</a></li>
-    <li><a href="/guide/">Players' guide</a> · <a href="/pt-br/guia/" lang="pt-BR">Guia do jogador</a></li>
-    <li><a href="/docs/">Documentation</a></li>
-  </ul>
+<Base title="Page not found" description="This page does not exist on the V3X site." noindex>
+  <section class="relative isolate grid min-h-[100svh] place-items-center overflow-hidden px-5 pt-24 text-center">
+    <div aria-hidden="true" class="hero-grid absolute inset-0 -z-10"></div>
+    <div>
+      <img src="/assets/logo.svg" alt="" width="120" height="120" class="mx-auto size-28 animate-spin-slow opacity-90" />
+      <p class="eyebrow mt-10">Error 404 · Erro 404</p>
+      <h1 class="mt-4 text-[clamp(2.5rem,2rem+3vw,4rem)] font-bold tracking-tight text-white">This page is not here.</h1>
+      <p class="mx-auto mt-4 max-w-md text-lg text-ink-200">It may have moved when the docs were re-synced. <span lang="pt-BR">Esta página não existe.</span></p>
+      <div class="mt-10 flex flex-wrap justify-center gap-3">
+        <a class="btn-primary" href="/">Home<Icon name="arrow" class="size-4" /></a>
+        <a class="btn-secondary" href="/pt-br/" lang="pt-BR">Página inicial</a>
+        <a class="btn-secondary" href="/docs/">Docs</a>
+      </div>
+    </div>
+  </section>
 </Base>

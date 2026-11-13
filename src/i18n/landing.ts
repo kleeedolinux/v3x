@@ -3,61 +3,75 @@ import { RELEASES_URL } from "../data/facts";
 
 export interface LandingText {
   title: string; description: string;
-  kicker: string; h1: string; lede: string;
-  download: string; downloadSub: string; guide: string; promise: string;
-  ledgerCaption: string; ledgerHead: [string, string, string];
-  ledgerRows: { what: string; tag: string; before: string; after: string }[];
-  ledgerNote: string;
-  s1: string; register: { head: string; on: boolean; body: string }[]; stampOn: string; stampOpt: string;
+  eyebrow: string; tagline: string; lede: string;
+  download: string; downloadSub: string; github: string; guide: string; orPaste: string; promise: string;
+  trust: { h: string; t: string; icon: string }[];
+  s1: string; s1intro: string; register: { head: string; on: boolean; body: string; icon: string }[]; stampOn: string; stampOpt: string;
+  shotMenuKicker: string; shotMenuTitle: string; shotMenuBody: string; shotMenuAlt: string;
+  shotConsoleKicker: string; shotConsoleTitle: string; shotConsoleBody: string; shotConsoleAlt: string; illustration: string;
   s2: string; s2intro: string;
-  fig1: string; fig2: string; figBefore: string; figAfter: string; figNote: string; decimal: "," | ".";
-  method: string;
-  s3: string; s3intro: string; cmpHead: [string, string, string]; cmp: [string, string, string][]; plate1: string;
-  s4: string; steps: { b: string; t: string }[]; preNote: string;
+  stats: { label: string; plugin: string; before: string; after: string; from?: number; to?: number; decimals?: number; unit?: string; delta: string; desc: string }[];
+  figBefore: string; figAfter: string; decimal: "," | "."; statsFoot: string;
+  methodHead: string; method: string;
+  s3: string; s3intro: string; cmpHead: [string, string, string]; cmp: [string, string, string][]; plate1: string; howAlt: string;
+  s4: string; s4intro: string; steps: { b: string; t: string }[]; preNote: string; installPage: string;
   s5: string; offHead: [string, string]; off: [string, string][];
-  s6: string; qa: { q: string; a: string }[];
-  s7: string; modders: string; modLink: string; plate2: string;
-  labels: [string, string, string, string, string, string, string];
+  s6: string; s6intro: string; qa: { q: string; a: string }[];
+  s7: string; modders: string; modLink: string; modStart: string; plate2: string; platformAlt: string; codeCaption: string;
+  ctaTitle: string; ctaBody: string;
 }
 
 export const en: LandingText = {
-  title: "V3X (Victoria 3 eXtender): script extender with engine fixes and faster loading",
+  title: "V3X — Victoria 3 eXtender: engine fixes, faster loading, fewer crashes",
   description: "V3X is a script extender for Victoria 3: engine bug fixes, faster 3D-model loading, fewer out-of-memory crashes, kept GDP graphs. Works with your mods. Single player, Windows.",
-  kicker: "Victoria 3 eXtender · a script extender for Victoria 3 · it works under the game, not in it",
-  h1: "Victoria 3, with its engine <em>looked after</em>.",
+  eyebrow: "Script extender for Victoria 3 · 1.15.1",
+  tagline: "Faster loading, fewer crashes and engine bug fixes for Victoria 3. It runs underneath the game, so your mods stay exactly as they are.",
   lede: "V3X is an add-on that runs underneath the game. It fixes bugs in the engine, takes work out of loading, keeps your graphs, and writes a clear report when something breaks. Your mods and your playset stay exactly as they are. One installer puts it in; one click takes it out.",
-  download: "Download V3X-Setup.exe", downloadSub: "Windows x64 · for Victoria 3 1.15.1",
+  download: "Download for Windows", downloadSub: "V3X-Setup.exe · Victoria 3 1.15.1", github: "View on GitHub",
   guide: "Read the players' guide",
+  orPaste: "Or paste one line into PowerShell",
   promise: "No admin rights. No game file is changed. Single player only.",
-  ledgerCaption: "The ledger: measured on the author's PC",
-  ledgerHead: ["", "before", "with V3X"],
-  ledgerRows: [
-    { what: "Loading pass over 2,118 kinds of 3D model", tag: "lazy_mesh · optional", before: "37.5 s", after: "6.7 s" },
-    { what: "One autosave in debug mode", tag: "enhance · optional", before: "156 MB", after: "26 MB" },
-    { what: "History graphs after you switch country", tag: "keep_history · on", before: "wiped", after: "kept" },
-    { what: "New Game on a PC short of commit memory", tag: "mem_tuner · on", before: "crashed", after: "loads¹" },
+  trust: [
+    { h: "Works with your mods", t: "Your mod list and playset stay untouched.", icon: "sdk" },
+    { h: "Single player", t: "Made for single-player campaigns.", icon: "history" },
+    { h: "Turn it off anytime", t: "Untick a part, or delete one file.", icon: "toggle" },
+    { h: "No game file changed", t: "One extra file. No admin rights.", icon: "shield" },
   ],
-  ledgerNote: "16 GB RAM, integrated GPU, Victoria 3 1.15.1. Yours will differ. ¹ With a bigger Windows pagefile; the author then played a 4-hour session.",
   s1: "What it does for you",
+  s1intro: "Ten parts, each one a plugin. The ones marked <b>on</b> fix or protect without changing your game; the <b>optional</b> ones are installed switched off, for you to try.",
   stampOn: "on", stampOpt: "optional",
   register: [
-    { head: "Graphs that remember", on: true, body: "When you stop playing a country, the game wipes its GDP, population and other history graphs. V3X keeps them, and records AI countries as often as yours: every 28 days instead of every 120." },
-    { head: "Fewer out-of-memory crashes", on: true, body: "The New Game crash came from Windows running out of commit memory while RAM was still free. V3X makes the game reserve less, returns memory after loads and keeps a 128 MB emergency reserve. If memory still runs out, the log says to enlarge the pagefile." },
-    { head: "A processor that can rest", on: true, body: "The frame cap used to keep one core busy at 100 % just waiting. V3X sleeps instead, and lowers the frame rate while you are paused, idle or in another window." },
-    { head: "The right cores on new Intel CPUs", on: true, body: "On processors with performance and efficiency cores, the game's main thread is kept on the performance cores. On other processors nothing changes." },
-    { head: "A V3X button on the main menu", on: true, body: "Each part of V3X has a checkbox. Untick what you do not want; it applies the next time you start the game." },
-    { head: "A crash report you can send", on: true, body: "If the game crashes, <code>crash.log</code> records where and why, in a form a developer can act on." },
-    { head: "Console in ironman", on: true, body: "The developer console works in ironman. Multiplayer stays blocked. If achievements matter to you, turn this one off." },
-    { head: "3D models loaded when needed", on: false, body: "Instead of loading every kind of 3D model up front, V3X loads the ones your game uses and the rest when first seen. 37.5 s became 6.7 s on the author's PC." },
-    { head: "English text where a mod has none in your language", on: false, body: "Mods without a translation show raw text keys. V3X can fill those lines with the mod's English text." },
-    { head: "Smaller saves in debug mode", on: false, body: "Debug mode writes saves as plain text. V3X keeps the normal compressed format: 156 MB became 26 MB per autosave." },
+    { head: "Graphs that remember", on: true, body: "When you stop playing a country, the game wipes its GDP, population and other history graphs. V3X keeps them, and records AI countries as often as yours: every 28 days instead of every 120.", icon: "history" },
+    { head: "Fewer out-of-memory crashes", on: true, body: "The New Game crash came from Windows running out of commit memory while RAM was still free. V3X makes the game reserve less, returns memory after loads and keeps a 128 MB emergency reserve. If memory still runs out, the log says to enlarge the pagefile.", icon: "shield" },
+    { head: "A processor that can rest", on: true, body: "The frame cap used to keep one core busy at 100 % just waiting. V3X sleeps instead, and lowers the frame rate while you are paused, idle or in another window.", icon: "cpu" },
+    { head: "The right cores on new Intel CPUs", on: true, body: "On processors with performance and efficiency cores, the game's main thread is kept on the performance cores. On other processors nothing changes.", icon: "cpu" },
+    { head: "A V3X button on the main menu", on: true, body: "Each part of V3X has a checkbox. Untick what you do not want; it applies the next time you start the game.", icon: "toggle" },
+    { head: "A crash report you can send", on: true, body: "If the game crashes, <code>crash.log</code> records where and why, in a form a developer can act on.", icon: "console" },
+    { head: "Console in ironman", on: true, body: "The developer console works in ironman. Multiplayer stays blocked. If achievements matter to you, turn this one off.", icon: "console" },
+    { head: "3D models loaded when needed", on: false, body: "Instead of loading every kind of 3D model up front, V3X loads the ones your game uses and the rest when first seen. 37.5 s became 6.7 s.", icon: "speed" },
+    { head: "English text where a mod has none in your language", on: false, body: "Mods without a translation show raw text keys. V3X can fill those lines with the mod's English text.", icon: "sdk" },
+    { head: "Smaller saves in debug mode", on: false, body: "Debug mode writes saves as plain text. V3X keeps the normal compressed format: 156 MB became 26 MB per autosave.", icon: "save" },
   ],
+  shotMenuKicker: "In the game",
+  shotMenuTitle: "A V3X button on the main menu",
+  shotMenuBody: "Each part of V3X has a checkbox. Untick what you do not want; it applies the next time you start the game. Nothing to edit, nothing to reinstall.",
+  shotMenuAlt: "Illustration of the V3X plugin window opened from a V3X button on the main menu, with a checkbox per plugin.",
+  shotConsoleKicker: "Beside the game",
+  shotConsoleTitle: "See what loaded, and why",
+  shotConsoleBody: "A small V3X console window opens next to the game and lists what loaded: loader lines, plugin lines, and any part that refused to load, in red, with the reason. You can hide it later.",
+  shotConsoleAlt: "Illustration of the V3X console window: loader lines in cyan, plugin lines in green, a failed anchor in red.",
+  illustration: "Illustration, not a screenshot",
   s2: "Measured, not promised",
   s2intro: "Every fix went the same way: measure with V3X's own tools, find the cause in the engine, fix it in a plugin, check it against the real game files, then measure again in the game.",
-  fig1: "Fig. 1. The loading pass over all 3D models, in seconds", fig2: "Fig. 2. One autosave with debug mode on, in megabytes",
+  stats: [
+    { label: "3D-model loading", plugin: "lazy_mesh · optional", before: "37.5 s", after: "6.7 s", from: 37.5, to: 6.7, decimals: 1, unit: "s", delta: "5.6× faster", desc: "The loading pass over all 2,118 kinds of 3D model." },
+    { label: "Debug-mode autosave", plugin: "enhance · optional", before: "156 MB", after: "26 MB", from: 156, to: 26, decimals: 0, unit: "MB", delta: "6× smaller", desc: "Saves keep the normal compressed format in debug mode." },
+    { label: "New Game crash", plugin: "mem_tuner · on", before: "Crashed", after: "Fixed", delta: "Loads", desc: "The out-of-memory crash on New Game, with a bigger Windows pagefile." },
+  ],
   figBefore: "Before", figAfter: "With V3X",
-  figNote: "Measured on the author's PC (16 GB RAM, integrated GPU, Victoria 3 1.15.1). Fig. 1 with <code>lazy_mesh</code> in <code>lazy</code> mode during a 4-hour session, Fig. 2 with <code>enhance</code>. Both parts are optional and off after install.",
   decimal: ".",
+  statsFoot: "Results vary by PC.",
+  methodHead: "Next on the bench",
   method: "In one session with 23 mods, the engine made 3.44 million failed file lookups, costing 103.8 s of thread time. A V3X index predicted 94.4 % of them with 0 mismatches. Using it to skip those lookups is the next step, not yet a result.",
   s3: "Is it a mod? Does it replace mine?",
   s3intro: "No. Mods change <em>what is in the game</em>: events, buildings, laws, the interface. V3X changes <em>how the engine runs</em>: loading, memory, saves, crashes. Both work at the same time.",
@@ -68,8 +82,11 @@ export const en: LandingText = {
     ["Your mod list", "is the mod list", "untouched; V3X is not in it"],
     ["Multiplayer", "yes", "no, single player only"],
   ],
+  howAlt: "Diagram: you start Victoria 3, V3X loads with it as one extra file (version.dll), plugins fix the engine, you play. Delete version.dll to return to vanilla.",
   plate1: "You start Victoria 3; V3X loads with it as one extra file (version.dll); its plugins fix the engine; you play. Delete that file and the game is vanilla again. Diagram from the V3X repository.",
   s4: "Install in four steps",
+  s4intro: "One line in PowerShell finds your game, downloads the latest release, checks it and installs it. Or download the setup file and click through.",
+  installPage: "Full install guide",
   steps: [
     { b: "Download", t: `Get <code>V3X-Setup.exe</code> from the <a href="${RELEASES_URL}">Releases page</a>. Windows may warn because the file is new and unsigned: choose <em>More info › Run anyway</em> if you trust the source.` },
     { b: "Close the game, run setup", t: "Setup finds Victoria 3 through Steam. If it cannot, pick the <code>Victoria 3</code> folder (Steam: right-click the game › Manage › Browse local files)." },
@@ -86,6 +103,7 @@ export const en: LandingText = {
     ["Remove it without the setup file", "Delete <code>binaries\\version.dll</code> and the folder <code>binaries\\v3x</code>. That is the whole uninstall."],
   ],
   s6: "Questions players ask",
+  s6intro: "Short answers. The players' guide has the long ones.",
   qa: [
     { q: "Is it safe?", a: "V3X changes no game file. It is one extra file next to the game, so Steam's <em>Verify integrity of game files</em> finds nothing changed and leaves V3X in place. Every part can be turned off on its own. After a game update, a part whose engine code changed switches itself off and writes why in <code>binaries\\v3x\\v3x.log</code>, instead of guessing." },
     { q: "Why does my antivirus or Windows warn me?", a: "V3X loads through a file called <code>version.dll</code> next to the game, a common technique that some antivirus programs flag on principle. The setup file is new and not signed, so SmartScreen may warn too. All the source code is public, and you can build it yourself." },
@@ -94,55 +112,72 @@ export const en: LandingText = {
     { q: "Will my Workshop mods still work?", a: "Yes. V3X does not touch your mod list. A mod that replaces the main menu hides the V3X button, but <code>v3x.ini</code> still works." },
     { q: "Can it break my saves?", a: "Parts that change the simulation are off by default. Back up your saves before you try anything new." },
     { q: "What happens when Victoria 3 updates?", a: "Parts whose engine code changed switch themselves off until V3X is updated. V3X targets 1.15.1; setup tells you if your game version is different and installs only if you insist." },
-    { q: "How do I uninstall it?", a: "Run <code>V3X-Setup.exe</code> and choose <b>Uninstall V3X</b>, or delete <code>binaries\\version.dll</code> and <code>binaries\\v3x</code>. See <a href=\"#off\">Turning it off</a>." },
+    { q: "How do I uninstall it?", a: "Run <code>V3X-Setup.exe</code> and choose <b>Uninstall V3X</b>, or delete <code>binaries\\version.dll</code> and <code>binaries\\v3x</code>. See <a href=\"/install/#off\">Turning it off</a>." },
     { q: "Linux, Proton, Steam Deck?", a: "Untested. It may need the launch option <code>WINEDLLOVERRIDES=\"version=n,b\"</code>." },
     { q: "Who makes it?", a: "An unofficial fan project, not affiliated with or endorsed by Paradox Interactive. The code is on <a href=\"https://github.com/kleeedolinux/v3x\">GitHub</a>." },
   ],
   s7: "For modders: a platform underneath",
   modders: "Every part above is a plugin built on the V3X API: a plain-C interface to find engine code that survives patches, hook it safely, read live data, add console commands and react to loads and saves. The SDK tests your plugin against the real game files before you start the game.",
-  modLink: "Open the modders' documentation",
+  modLink: "Read the docs",
+  modStart: "Getting started in 10 minutes",
+  codeCaption: "A whole plugin: anchor on a log string, find its function, hook it safely. If any step fails, nothing is installed.",
+  platformAlt: "The V3X platform: plugins use the SDK and the V3X API; the loader version.dll loads them into the Victoria 3 engine, which stays unchanged on disk.",
   plate2: "The V3X platform: plugins use the SDK and the V3X API; the loader, version.dll, loads them into the engine, which stays unchanged on disk. Diagram from the V3X repository.",
-  labels: ["What it does", "Measured", "Mods", "Install", "Off switch", "Questions", "Modders"],
+  ctaTitle: "Give your campaign a better engine.",
+  ctaBody: "Free, with all its source code on GitHub, and gone in one click if you change your mind.",
 };
 
 export const pt: LandingText = {
-  title: "V3X (Victoria 3 eXtender): script extender para Victoria 3, com correções no motor e carregamento mais rápido",
+  title: "V3X — Victoria 3 eXtender: correções no motor, carregamento mais rápido, menos travamentos",
   description: "V3X é um script extender para Victoria 3: corrige bugs do motor, carrega modelos 3D mais rápido, evita travamentos por falta de memória. Funciona com seus mods. Um jogador, Windows.",
-  kicker: "Victoria 3 eXtender · um script extender para Victoria 3 · funciona por baixo do jogo, não dentro dele",
-  h1: "Victoria 3, com o motor <em>bem cuidado</em>.",
+  eyebrow: "Script extender para Victoria 3 · 1.15.1",
+  tagline: "Carregamento mais rápido, menos travamentos e bugs do motor corrigidos no Victoria 3. Ele roda por baixo do jogo, então os seus mods continuam exatamente como estão.",
   lede: "V3X é um complemento que roda por baixo do jogo. Corrige bugs do motor, tira trabalho do carregamento, preserva os seus gráficos e escreve um relatório claro quando algo quebra. Os seus mods e a sua playset continuam exatamente como estão. Um instalador coloca; um clique tira.",
-  download: "Baixar V3X-Setup.exe", downloadSub: "Windows x64 · para Victoria 3 1.15.1",
+  download: "Baixar para Windows", downloadSub: "V3X-Setup.exe · Victoria 3 1.15.1", github: "Ver no GitHub",
   guide: "Ler o guia do jogador",
+  orPaste: "Ou cole uma linha no PowerShell",
   promise: "Não precisa de administrador. Nenhum arquivo do jogo é alterado. Só para um jogador.",
-  ledgerCaption: "O livro-caixa: medido no PC do autor",
-  ledgerHead: ["", "antes", "com V3X"],
-  ledgerRows: [
-    { what: "Carregamento dos 2.118 tipos de modelo 3D", tag: "lazy_mesh · opcional", before: "37,5 s", after: "6,7 s" },
-    { what: "Um autosave no modo debug", tag: "enhance · opcional", before: "156 MB", after: "26 MB" },
-    { what: "Gráficos de histórico depois de trocar de país", tag: "keep_history · ligado", before: "apagados", after: "mantidos" },
-    { what: "Novo Jogo num PC sem memória de commit", tag: "mem_tuner · ligado", before: "travava", after: "carrega¹" },
+  trust: [
+    { h: "Funciona com seus mods", t: "Sua lista de mods e playset ficam intactas.", icon: "sdk" },
+    { h: "Um jogador", t: "Feito para campanhas de um jogador.", icon: "history" },
+    { h: "Desligue quando quiser", t: "Desmarque uma parte ou apague um arquivo.", icon: "toggle" },
+    { h: "Nenhum arquivo do jogo alterado", t: "Um arquivo a mais. Sem administrador.", icon: "shield" },
   ],
-  ledgerNote: "16 GB de RAM, GPU integrada, Victoria 3 1.15.1. No seu PC será diferente. ¹ Com um arquivo de paginação maior no Windows; o autor jogou depois uma sessão de 4 horas.",
   s1: "O que ele faz por você",
+  s1intro: "Dez partes, cada uma um plugin. As marcadas como <b>ligado</b> corrigem ou protegem sem mudar o seu jogo; as <b>opcionais</b> são instaladas desligadas, para você experimentar.",
   stampOn: "ligado", stampOpt: "opcional",
   register: [
-    { head: "Gráficos que não se perdem", on: true, body: "Quando você deixa de jogar com um país, o jogo apaga os gráficos de PIB, população e outros. O V3X os mantém e registra os países da IA com a mesma frequência que o seu: a cada 28 dias em vez de 120." },
-    { head: "Menos travamentos por falta de memória", on: true, body: "O travamento no Novo Jogo vinha do Windows ficando sem memória de commit enquanto ainda havia RAM livre. O V3X faz o jogo reservar menos, devolve memória depois dos carregamentos e guarda 128 MB de reserva de emergência. Se ainda faltar memória, o log diz para aumentar o arquivo de paginação." },
-    { head: "Um processador que descansa", on: true, body: "O limite de quadros mantinha um núcleo a 100 % só esperando. O V3X dorme no lugar disso e reduz os quadros quando você pausa, fica parado ou troca de janela." },
-    { head: "Os núcleos certos nos Intel novos", on: true, body: "Em processadores com núcleos de desempenho e de eficiência, a thread principal do jogo fica nos núcleos de desempenho. Nos outros processadores nada muda." },
-    { head: "Um botão V3X no menu principal", on: true, body: "Cada parte do V3X tem uma caixa de seleção. Desmarque o que não quiser; vale na próxima vez que abrir o jogo." },
-    { head: "Um relatório de erro para enviar", on: true, body: "Se o jogo fechar com erro, o <code>crash.log</code> registra onde e por quê, de um jeito que um desenvolvedor consegue usar." },
-    { head: "Console no ironman", on: true, body: "O console de desenvolvedor funciona no ironman. O multijogador continua bloqueado. Se as conquistas importam para você, desligue esta parte." },
-    { head: "Modelos 3D carregados quando precisa", on: false, body: "Em vez de carregar todos os tipos de modelo 3D logo no início, o V3X carrega os que o seu jogo usa e o resto quando aparecem pela primeira vez. 37,5 s viraram 6,7 s no PC do autor." },
-    { head: "Texto em inglês onde o mod não tem o seu idioma", on: false, body: "Mods sem tradução mostram as chaves de texto cruas. O V3X pode preencher essas linhas com o texto em inglês do próprio mod." },
-    { head: "Saves menores no modo debug", on: false, body: "O modo debug grava os saves como texto puro. O V3X mantém o formato comprimido normal: 156 MB viraram 26 MB por autosave." },
+    { head: "Gráficos que não se perdem", on: true, body: "Quando você deixa de jogar com um país, o jogo apaga os gráficos de PIB, população e outros. O V3X os mantém e registra os países da IA com a mesma frequência que o seu: a cada 28 dias em vez de 120.", icon: "history" },
+    { head: "Menos travamentos por falta de memória", on: true, body: "O travamento no Novo Jogo vinha do Windows ficando sem memória de commit enquanto ainda havia RAM livre. O V3X faz o jogo reservar menos, devolve memória depois dos carregamentos e guarda 128 MB de reserva de emergência. Se ainda faltar memória, o log diz para aumentar o arquivo de paginação.", icon: "shield" },
+    { head: "Um processador que descansa", on: true, body: "O limite de quadros mantinha um núcleo a 100 % só esperando. O V3X dorme no lugar disso e reduz os quadros quando você pausa, fica parado ou troca de janela.", icon: "cpu" },
+    { head: "Os núcleos certos nos Intel novos", on: true, body: "Em processadores com núcleos de desempenho e de eficiência, a thread principal do jogo fica nos núcleos de desempenho. Nos outros processadores nada muda.", icon: "cpu" },
+    { head: "Um botão V3X no menu principal", on: true, body: "Cada parte do V3X tem uma caixa de seleção. Desmarque o que não quiser; vale na próxima vez que abrir o jogo.", icon: "toggle" },
+    { head: "Um relatório de erro para enviar", on: true, body: "Se o jogo fechar com erro, o <code>crash.log</code> registra onde e por quê, de um jeito que um desenvolvedor consegue usar.", icon: "console" },
+    { head: "Console no ironman", on: true, body: "O console de desenvolvedor funciona no ironman. O multijogador continua bloqueado. Se as conquistas importam para você, desligue esta parte.", icon: "console" },
+    { head: "Modelos 3D carregados quando precisa", on: false, body: "Em vez de carregar todos os tipos de modelo 3D logo no início, o V3X carrega os que o seu jogo usa e o resto quando aparecem pela primeira vez. 37,5 s viraram 6,7 s.", icon: "speed" },
+    { head: "Texto em inglês onde o mod não tem o seu idioma", on: false, body: "Mods sem tradução mostram as chaves de texto cruas. O V3X pode preencher essas linhas com o texto em inglês do próprio mod.", icon: "sdk" },
+    { head: "Saves menores no modo debug", on: false, body: "O modo debug grava os saves como texto puro. O V3X mantém o formato comprimido normal: 156 MB viraram 26 MB por autosave.", icon: "save" },
   ],
+  shotMenuKicker: "No jogo",
+  shotMenuTitle: "Um botão V3X no menu principal",
+  shotMenuBody: "Cada parte do V3X tem uma caixa de seleção. Desmarque o que não quiser; vale na próxima vez que abrir o jogo. Nada para editar, nada para reinstalar.",
+  shotMenuAlt: "Ilustração da janela de plugins do V3X, aberta por um botão V3X no menu principal, com uma caixa de seleção por plugin.",
+  shotConsoleKicker: "Ao lado do jogo",
+  shotConsoleTitle: "Veja o que carregou, e por quê",
+  shotConsoleBody: "Uma pequena janela V3X console abre ao lado do jogo e lista o que carregou: linhas do carregador, dos plugins e, em vermelho, qualquer parte que se recusou a carregar, com o motivo. Dá para escondê-la depois.",
+  shotConsoleAlt: "Ilustração da janela V3X console: linhas do carregador em ciano, dos plugins em verde, uma âncora que falhou em vermelho.",
+  illustration: "Ilustração, não é captura de tela",
   s2: "Medido, não prometido",
   s2intro: "Toda correção seguiu o mesmo caminho: medir com as ferramentas do próprio V3X, achar a causa no motor, corrigir num plugin, conferir contra os arquivos reais do jogo e medir de novo dentro do jogo.",
-  fig1: "Fig. 1. Carregamento de todos os modelos 3D, em segundos", fig2: "Fig. 2. Um autosave com o modo debug ligado, em megabytes",
+  stats: [
+    { label: "Carregamento de modelos 3D", plugin: "lazy_mesh · opcional", before: "37,5 s", after: "6,7 s", from: 37.5, to: 6.7, decimals: 1, unit: "s", delta: "5,6× mais rápido", desc: "O carregamento de todos os 2.118 tipos de modelo 3D." },
+    { label: "Autosave no modo debug", plugin: "enhance · opcional", before: "156 MB", after: "26 MB", from: 156, to: 26, decimals: 0, unit: "MB", delta: "6× menor", desc: "Os saves mantêm o formato comprimido normal no modo debug." },
+    { label: "Travamento no Novo Jogo", plugin: "mem_tuner · ligado", before: "Travava", after: "Corrigido", delta: "Carrega", desc: "O travamento por falta de memória no Novo Jogo, com um arquivo de paginação maior." },
+  ],
   figBefore: "Antes", figAfter: "Com V3X",
-  figNote: "Medido no PC do autor (16 GB de RAM, GPU integrada, Victoria 3 1.15.1). Fig. 1 com <code>lazy_mesh</code> no modo <code>lazy</code> numa sessão de 4 horas, Fig. 2 com <code>enhance</code>. As duas partes são opcionais e vêm desligadas.",
   decimal: ",",
+  statsFoot: "Resultados variam conforme o PC.",
+  methodHead: "O próximo na bancada",
   method: "Numa sessão com 23 mods, o motor fez 3,44 milhões de buscas de arquivo que falharam, custando 103,8 s de tempo de thread. Um índice do V3X previu 94,4 % delas com 0 erros. Usá-lo para pular essas buscas é o próximo passo, ainda não é um resultado.",
   s3: "É um mod? Ele substitui os meus?",
   s3intro: "Não. Mods mudam <em>o que existe no jogo</em>: eventos, construções, leis, a interface. O V3X muda <em>como o motor funciona</em>: carregamento, memória, saves, travamentos. Os dois funcionam ao mesmo tempo.",
@@ -153,8 +188,11 @@ export const pt: LandingText = {
     ["Sua lista de mods", "é a lista de mods", "intacta; o V3X não está nela"],
     ["Multijogador", "sim", "não, só um jogador"],
   ],
+  howAlt: "Diagrama: você abre Victoria 3, o V3X carrega junto como um arquivo a mais (version.dll), os plugins corrigem o motor, você joga. Apague version.dll para voltar ao jogo original.",
   plate1: "Você abre Victoria 3; o V3X carrega junto como um arquivo a mais (version.dll); os plugins corrigem o motor; você joga. Apague esse arquivo e o jogo volta a ser o original. Diagrama do repositório do V3X (em inglês).",
   s4: "Instale em quatro passos",
+  s4intro: "Uma linha no PowerShell acha o seu jogo, baixa a versão mais recente, confere e instala. Ou baixe o instalador e clique em avançar.",
+  installPage: "Guia de instalação completo",
   steps: [
     { b: "Baixe", t: `Pegue o <code>V3X-Setup.exe</code> na <a href="${RELEASES_URL}">página de Releases</a>. O Windows pode avisar porque o arquivo é novo e não assinado: escolha <em>Mais informações › Executar assim mesmo</em> se confia na origem.` },
     { b: "Feche o jogo, rode o instalador", t: "O instalador acha Victoria 3 pela Steam. Se não achar, escolha a pasta <code>Victoria 3</code> (na Steam: botão direito no jogo › Gerenciar › Ver arquivos locais)." },
@@ -171,6 +209,7 @@ export const pt: LandingText = {
     ["Remover sem o instalador", "Apague <code>binaries\\version.dll</code> e a pasta <code>binaries\\v3x</code>. A desinstalação é só isso."],
   ],
   s6: "Perguntas de jogadores",
+  s6intro: "Respostas curtas. O guia do jogador tem as longas.",
   qa: [
     { q: "É seguro?", a: "O V3X não altera nenhum arquivo do jogo. É um arquivo a mais ao lado do jogo, então a opção da Steam <em>Verificar integridade dos arquivos</em> não encontra nada alterado e deixa o V3X onde está. Cada parte pode ser desligada separadamente. Depois de uma atualização do jogo, a parte cujo código do motor mudou se desliga sozinha e escreve o motivo em <code>binaries\\v3x\\v3x.log</code>, em vez de arriscar." },
     { q: "Por que o antivírus ou o Windows reclamam?", a: "O V3X carrega por um arquivo chamado <code>version.dll</code> ao lado do jogo, uma técnica comum que alguns antivírus marcam por princípio. O instalador é novo e não assinado, então o SmartScreen também pode avisar. Todo o código-fonte é público e você pode compilá-lo você mesmo." },
@@ -179,13 +218,17 @@ export const pt: LandingText = {
     { q: "Meus mods da Oficina continuam funcionando?", a: "Sim. O V3X não mexe na sua lista de mods. Um mod que substitui o menu principal esconde o botão V3X, mas o <code>v3x.ini</code> continua funcionando." },
     { q: "Pode estragar meus saves?", a: "As partes que mudam a simulação vêm desligadas. Faça backup dos saves antes de experimentar algo novo." },
     { q: "E quando Victoria 3 atualizar?", a: "As partes cujo código do motor mudou se desligam sozinhas até o V3X ser atualizado. O V3X é feito para a 1.15.1; o instalador avisa se a sua versão é outra e só instala se você insistir." },
-    { q: "Como desinstalo?", a: "Rode o <code>V3X-Setup.exe</code> e escolha <b>Uninstall V3X</b>, ou apague <code>binaries\\version.dll</code> e <code>binaries\\v3x</code>. Veja <a href=\"#off\">Como desligar</a>." },
+    { q: "Como desinstalo?", a: "Rode o <code>V3X-Setup.exe</code> e escolha <b>Uninstall V3X</b>, ou apague <code>binaries\\version.dll</code> e <code>binaries\\v3x</code>. Veja <a href=\"/pt-br/instalar/#off\">Como desligar</a>." },
     { q: "Linux, Proton, Steam Deck?", a: "Não testado. Pode precisar da opção de inicialização <code>WINEDLLOVERRIDES=\"version=n,b\"</code>." },
     { q: "Quem faz?", a: "Um projeto de fãs, não oficial, sem vínculo nem endosso da Paradox Interactive. O código está no <a href=\"https://github.com/kleeedolinux/v3x\">GitHub</a>." },
   ],
   s7: "Para modders: uma plataforma por baixo",
   modders: "Cada parte acima é um plugin feito com a API do V3X: uma interface em C puro para achar código do motor que sobrevive a patches, interceptá-lo com segurança, ler dados ao vivo, criar comandos de console e reagir a carregamentos e saves. O SDK testa o seu plugin contra os arquivos reais do jogo antes mesmo de abrir o jogo.",
-  modLink: "Abrir a documentação para modders (em inglês)",
+  modLink: "Ler a documentação (em inglês)",
+  modStart: "Primeiros passos em 10 minutos",
+  codeCaption: "Um plugin inteiro: ancora numa string de log, acha a função, intercepta com segurança. Se qualquer passo falhar, nada é instalado.",
+  platformAlt: "A plataforma V3X: plugins usam o SDK e a API; o carregador version.dll os carrega no motor de Victoria 3, que continua intacto no disco.",
   plate2: "A plataforma V3X: os plugins usam o SDK e a API do V3X; o carregador, version.dll, os coloca dentro do motor, que continua intacto no disco. Diagrama do repositório do V3X (em inglês).",
-  labels: ["O que faz", "Medido", "Mods", "Instalar", "Desligar", "Perguntas", "Modders"],
+  ctaTitle: "Dê à sua campanha um motor melhor.",
+  ctaBody: "Grátis, com todo o código no GitHub, e some com um clique se você mudar de ideia.",
 };

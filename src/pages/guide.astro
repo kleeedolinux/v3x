@@ -1,6 +1,7 @@
 ---
 import Base from "../layouts/Base.astro";
-import Sec from "../components/Sec.astro";
+import DocsShell from "../components/DocsShell.astro";
+import CopyCmd from "../components/CopyCmd.astro";
 import PluginTable from "../components/PluginTable.astro";
 import { RELEASES_URL } from "../data/facts";
 
@@ -13,39 +14,41 @@ const ini = `[plugins]
 ironman_console=0
 loc_fallback=1`;
 ---
-<Base title="How to install V3X for Victoria 3: players' guide" ogType="article" crumbs={[{ name: "V3X", href: "/" }, { name: "Players' guide", href: "/guide/" }]} jsonLd={[{ "@type": "TechArticle", headline: "Installing and using V3X", inLanguage: "en", about: "Victoria 3", proficiencyLevel: "Beginner" }]} description="How to install V3X for Victoria 3, use the main-menu V3X button, turn parts on and off, keep achievements, uninstall, and what to do when something goes wrong." section="guide" alternate="/pt-br/guia/" sheet="02 · Players' guide" source="docs/install.md" sourceUrl="/docs/install/">
-  <div class="page">
-    <aside>
-      <nav aria-label="On this page">
-        <h2>Players' guide</h2>
-        <ol>{toc.map(([id, t], i) => <li><a href={`#${id}`}>{i + 1}. {t}</a></li>)}</ol>
-        <h2>Also</h2>
-        <ul>
-          <li><a href="/#faq">Questions players ask</a></li>
-          <li><a href="/docs/troubleshooting/">Troubleshooting (technical)</a></li>
-          <li><a href="/docs/configuration/">Every setting</a></li>
-          <li><a href="/pt-br/guia/" lang="pt-BR">Guia em português</a></li>
+<Base title="How to install V3X for Victoria 3: players' guide" ogType="article" crumbs={[{ name: "V3X", href: "/" }, { name: "Players' guide", href: "/guide/" }]} jsonLd={[{ "@type": "TechArticle", headline: "Installing and using V3X", inLanguage: "en", about: "Victoria 3", proficiencyLevel: "Beginner" }]} description="How to install V3X for Victoria 3, use the main-menu V3X button, turn parts on and off, keep achievements, uninstall, and what to do when something goes wrong." section="guide" alternate="/pt-br/guia/">
+  <DocsShell toc={toc.map(([slug, text]) => ({ depth: 2, slug, text }))} tocLabel="On this page" menuLabel="Guide menu">
+    <Fragment slot="nav">
+      <nav class="space-y-7 text-sm" aria-label="On this page">
+        <p class="mb-2 px-3 font-mono text-[11px] font-medium tracking-[0.16em] text-brass-300/90 uppercase">Players' guide</p>
+        <ol class="space-y-0.5">{toc.map(([id, t], i) => <li><a class="block rounded-lg px-3 py-1.5 text-[14px] text-ink-300 transition-colors hover:bg-white/[0.04] hover:text-white" href={`#${id}`}><span class="mr-2 font-mono text-[12px] text-ink-500">{String(i + 1).padStart(2, "0")}</span>{t}</a></li>)}</ol>
+        <p class="mb-2 px-3 font-mono text-[11px] font-medium tracking-[0.16em] text-brass-300/90 uppercase">Also</p>
+        <ul class="space-y-0.5">
+          <li><a class="block rounded-lg px-3 py-1.5 text-[14px] text-ink-300 transition-colors hover:bg-white/[0.04] hover:text-white" href="/#faq">Questions players ask</a></li>
+          <li><a class="block rounded-lg px-3 py-1.5 text-[14px] text-ink-300 transition-colors hover:bg-white/[0.04] hover:text-white" href="/docs/troubleshooting/">Troubleshooting (technical)</a></li>
+          <li><a class="block rounded-lg px-3 py-1.5 text-[14px] text-ink-300 transition-colors hover:bg-white/[0.04] hover:text-white" href="/docs/configuration/">Every setting</a></li>
+          <li><a class="block rounded-lg px-3 py-1.5 text-[14px] text-ink-300 transition-colors hover:bg-white/[0.04] hover:text-white" href="/pt-br/guia/" lang="pt-BR">Guia em português</a></li>
         </ul>
       </nav>
-    </aside>
-    <article>
-      <header class="title">
-        <p class="kicker">Players' guide</p>
-        <h1>Installing and using V3X</h1>
-        <p class="lede" style="margin:0">Everything a player needs, in the order you need it. No programming involved.</p>
-      </header>
-
-      <Sec n={1} id="before" title="Before you start">
-        <ul class="measure">
+    </Fragment>
+    <header class="border-b border-white/[0.08] pb-10">
+      <p class="eyebrow">Players' guide</p>
+      <h1 class="mt-4 text-[clamp(2.25rem,1.5rem+2.6vw,3.5rem)] leading-[1.06] font-bold tracking-[-0.03em] text-white">Installing and using V3X</h1>
+      <p class="mt-5 max-w-2xl text-lg text-ink-200">Everything a player needs, in the order you need it. No programming involved.</p>
+    </header>
+    <article class="prose-v3x mt-4 max-w-[76ch]">
+      <h2 id="before">Before you start</h2>
+        <ul>
           <li><b>Victoria 3 1.15.1 on Windows.</b> V3X is made for that version. On another version setup warns you first.</li>
           <li><b>Single player only.</b> Do not use V3X in multiplayer (<a href="#achievements">why, and how to switch it off for a session</a>).</li>
           <li><b>Back up your saves</b> before you try anything new. They are in <code>Documents\Paradox Interactive\Victoria 3\save games</code>.</li>
           <li><b>Keep a few GB free on drive C:.</b> An autosave once failed with <code>Failed to write to disk</code> when C: was nearly full.</li>
         </ul>
-      </Sec>
+      
 
-      <Sec n={2} id="install" title="Install">
-        <ol class="measure">
+      <h2 id="install">Install</h2>
+        <p><b>The quickest way:</b> close the game, open PowerShell (Windows key, type <code>powershell</code>, Enter), paste this line and press Enter. It finds the game, downloads the latest release, checks it and runs setup. Run it again to update, repair or uninstall.</p>
+        <div class="not-prose my-6"><CopyCmd lang="en" /></div>
+        <p>Or by hand:</p>
+        <ol>
           <li><b>Download</b> <code>V3X-Setup.exe</code> from the <a href={RELEASES_URL}>Releases page</a>. The release also lists a SHA-256 checksum (<code>SHA256SUMS.txt</code>) if you want to check the file.</li>
           <li>If Windows SmartScreen or your antivirus warns, that is because the file is new and not signed. Choose <em>More info › Run anyway</em> if you trust where it came from.</li>
           <li><b>Close Victoria 3.</b> Setup refuses to run while the game is open.</li>
@@ -53,11 +56,11 @@ loc_fallback=1`;
           <li><b>Check</b> that the window says <code>Game version: release/1.15.1 (supported)</code>, then click <b>Install V3X</b>.</li>
           <li><b>Start the game as usual</b>, from Steam or the Paradox launcher.</li>
         </ol>
-        <p class="note small">If your game is a newer version, setup says so and installs only if you click <b>Install anyway</b>. Parts switch themselves off where the game's code changed, but that combination was never tested: waiting for a V3X update is the safe choice.</p>
+        <p class="callout">If your game is a newer version, setup says so and installs only if you click <b>Install anyway</b>. Parts switch themselves off where the game's code changed, but that combination was never tested: waiting for a V3X update is the safe choice.</p>
 
-        <h3 class="sub">What setup puts on your PC</h3>
-        <p class="measure small">Everything goes into the game's <code>binaries</code> folder. No admin rights, no game file changed. Steam's <em>Verify integrity of game files</em> does not remove V3X.</p>
-        <table class="ledger" style="max-width:52rem">
+        <h3>What setup puts on your PC</h3>
+        <p>Everything goes into the game's <code>binaries</code> folder. No admin rights, no game file changed. Steam's <em>Verify integrity of game files</em> does not remove V3X.</p>
+        <table>
           <thead><tr><th scope="col">File</th><th scope="col">What it is</th></tr></thead>
           <tbody>
             <tr><th scope="row"><code>binaries\version.dll</code></th><td>The V3X loader. Windows loads it with the game; it loads the plugins.</td></tr>
@@ -69,62 +72,62 @@ loc_fallback=1`;
           </tbody>
         </table>
 
-        <h3 class="sub" id="without-setup">Without the installer</h3>
-        <p class="measure small">V3X is pre-release. If the Releases page has no <code>V3X-Setup.exe</code> yet, the only way in today is the developer install: clone the repository into the game folder and run <code>./build.sh install</code>, which puts the same two items (<code>version.dll</code> and the <code>v3x</code> folder) in place. It needs Python and Git Bash; <a href="/docs/getting-started/">Getting started</a> walks through it.</p>
-      </Sec>
+        <h3 id="without-setup">Without the installer</h3>
+        <p>V3X is pre-release. If the Releases page has no <code>V3X-Setup.exe</code> yet, the only way in today is the developer install: clone the repository into the game folder and run <code>./build.sh install</code>, which puts the same two items (<code>version.dll</code> and the <code>v3x</code> folder) in place. It needs Python and Git Bash; <a href="/docs/getting-started/">Getting started</a> walks through it.</p>
+      
 
-      <Sec n={3} id="first-start" title="The first start">
-        <p class="measure">A small <b>V3X console</b> window opens next to the game and lists what loaded. Loader lines, plugin lines, and any part that refused to load, in red, with the reason.</p>
-        <p class="measure">Its close button is removed on purpose: closing a console window would close the game with it. To hide it, add the line <code>console=0</code> at the top of <code>binaries\v3x\v3x.ini</code>.</p>
-        <p class="measure small">If the game seems to freeze while you have clicked into the console window, press <kbd>Esc</kbd>: Windows pauses a console while text in it is selected.</p>
-        <figure class="plate">
-          <img src="/assets/mockup-console.svg" width="960" height="430" loading="lazy" alt="Illustration of the V3X console window: loader lines in cyan, plugin lines in green, a failed anchor in red." />
-          <figcaption><b>Plate I</b>Illustration of the console window, not a screenshot. From the V3X repository.</figcaption>
+      <h2 id="first-start">The first start</h2>
+        <p>A small <b>V3X console</b> window opens next to the game and lists what loaded. Loader lines, plugin lines, and any part that refused to load, in red, with the reason.</p>
+        <p>Its close button is removed on purpose: closing a console window would close the game with it. To hide it, add the line <code>console=0</code> at the top of <code>binaries\v3x\v3x.ini</code>.</p>
+        <p>If the game seems to freeze while you have clicked into the console window, press <kbd>Esc</kbd>: Windows pauses a console while text in it is selected.</p>
+        <figure class="not-prose my-10"><div class="frame">
+          <img class="block w-full" src="/assets/mockup-console.svg" width="960" height="430" loading="lazy" alt="Illustration of the V3X console window: loader lines in cyan, plugin lines in green, a failed anchor in red." /></div>
+          <figcaption class="mt-3 text-center text-sm text-ink-400">Illustration of the console window, not a screenshot. From the V3X repository.</figcaption>
         </figure>
-      </Sec>
+      
 
-      <Sec n={4} id="menu" title="The V3X button on the main menu">
-        <p class="measure">On the main menu there is a <b>V3X</b> button. It opens a window with a checkbox for each part of V3X. Untick a part to switch it off, tick it to switch it on. The change is written to <code>v3x.ini</code> and applies the <b>next time you start the game</b>.</p>
-        <p class="measure small">If a mod of yours replaces the main menu, the button may not show. Everything still works through <code>v3x.ini</code> (<a href="#by-hand">section 6</a>). The menu window is one of the newest parts of V3X; if it misbehaves, use the ini file and report it.</p>
-        <figure class="plate">
-          <img src="/assets/mockup-menu.svg" width="960" height="520" loading="lazy" alt="Illustration of the V3X plugin window opened from a V3X button on the main menu, with a checkbox per plugin." />
-          <figcaption><b>Plate II</b>Illustration of the plugin window, not a screenshot. From the V3X repository.</figcaption>
+      <h2 id="menu">The V3X button on the main menu</h2>
+        <p>On the main menu there is a <b>V3X</b> button. It opens a window with a checkbox for each part of V3X. Untick a part to switch it off, tick it to switch it on. The change is written to <code>v3x.ini</code> and applies the <b>next time you start the game</b>.</p>
+        <p>If a mod of yours replaces the main menu, the button may not show. Everything still works through <code>v3x.ini</code> (<a href="#by-hand">section 6</a>). The menu window is one of the newest parts of V3X; if it misbehaves, use the ini file and report it.</p>
+        <figure class="not-prose my-10"><div class="frame">
+          <img class="block w-full" src="/assets/mockup-menu.svg" width="960" height="520" loading="lazy" alt="Illustration of the V3X plugin window opened from a V3X button on the main menu, with a checkbox per plugin." /></div>
+          <figcaption class="mt-3 text-center text-sm text-ink-400">Illustration of the plugin window, not a screenshot. From the V3X repository.</figcaption>
         </figure>
-      </Sec>
+      
 
-      <Sec n={5} id="parts" title="What is on, what is off">
-        <p class="measure">V3X is a set of parts (plugins). Setup switches on the ones that fix or protect without changing your game, and installs the rest switched off, for you to try.</p>
+      <h2 id="parts">What is on, what is off</h2>
+        <p>V3X is a set of parts (plugins). Setup switches on the ones that fix or protect without changing your game, and installs the rest switched off, for you to try.</p>
         <PluginTable lang="en" />
-      </Sec>
+      
 
-      <Sec n={6} id="by-hand" title="Changing parts by hand">
-        <p class="measure">Open <code>binaries\v3x\v3x.ini</code> in Notepad. Under <code>[plugins]</code>, write a part's name with <code>=0</code> to switch it off or <code>=1</code> to switch it on:</p>
+      <h2 id="by-hand">Changing parts by hand</h2>
+        <p>Open <code>binaries\v3x\v3x.ini</code> in Notepad. Under <code>[plugins]</code>, write a part's name with <code>=0</code> to switch it off or <code>=1</code> to switch it on:</p>
         <pre class="astro-code"><code>{ini}</code></pre>
-        <ul class="measure small">
+        <ul>
           <li>A part that is not listed is loaded. <code>0</code> means "do not load".</li>
           <li>Changes apply at the next start of the game.</li>
           <li>Comments go on their own line, starting with <code>;</code>. A comment after a value becomes part of the value, so <code>lazy_mesh = 0 ; test</code> does <em>not</em> switch lazy_mesh off.</li>
           <li>Each part can have its own settings file, <code>binaries\v3x\&lt;part&gt;.ini</code>. They are optional; <a href="/docs/configuration/">every setting is listed here</a>.</li>
         </ul>
-      </Sec>
+      
 
-      <Sec n={7} id="achievements" title="Achievements, ironman, multiplayer">
-        <p class="measure"><b>Achievements.</b> V3X does not touch achievement code or DLC ownership and unlocks nothing. One part that is on by default, <code>ironman_console</code>, lets the console work in ironman. If achievements matter to you, set <code>ironman_console=0</code>, and leave the parts that change the simulation (<code>sim_opt</code>'s throttle) off.</p>
-        <p class="measure"><b>Multiplayer.</b> Do not use V3X online: other players would run different code, and parts that change the simulation would put you out of sync. Before a multiplayer session, rename <code>binaries\version.dll</code> to <code>version.dll.off</code>, and rename it back afterwards. Or uninstall.</p>
-      </Sec>
+      <h2 id="achievements">Achievements, ironman, multiplayer</h2>
+        <p><b>Achievements.</b> V3X does not touch achievement code or DLC ownership and unlocks nothing. One part that is on by default, <code>ironman_console</code>, lets the console work in ironman. If achievements matter to you, set <code>ironman_console=0</code>, and leave the parts that change the simulation (<code>sim_opt</code>'s throttle) off.</p>
+        <p><b>Multiplayer.</b> Do not use V3X online: other players would run different code, and parts that change the simulation would put you out of sync. Before a multiplayer session, rename <code>binaries\version.dll</code> to <code>version.dll.off</code>, and rename it back afterwards. Or uninstall.</p>
+      
 
-      <Sec n={8} id="update" title="Update, repair, uninstall">
-        <p class="measure">Run <code>V3X-Setup.exe</code> again (a newer one to update):</p>
-        <ul class="measure">
+      <h2 id="update">Update, repair, uninstall</h2>
+        <p>Run <code>V3X-Setup.exe</code> again (a newer one to update):</p>
+        <ul>
           <li><b>Repair / update V3X</b> copies back any V3X file that is missing or damaged, or replaces them with the newer version. Your settings are kept.</li>
           <li><b>Uninstall V3X</b> removes exactly the files setup installed and puts back a <code>version.dll</code> that was there before. Logs, reports and settings you changed stay in <code>binaries\v3x\</code>; tick <em>Also delete logs, reports and settings</em> to remove that folder too.</li>
         </ul>
-        <p class="measure">Lost the setup file? Delete <code>binaries\version.dll</code> and the folder <code>binaries\v3x</code>. That is the whole uninstall.</p>
-        <p class="measure small">When Victoria 3 itself updates, parts whose engine code changed switch themselves off until V3X is updated. They say so in <code>binaries\v3x\v3x.log</code>.</p>
-      </Sec>
+        <p>Lost the setup file? Delete <code>binaries\version.dll</code> and the folder <code>binaries\v3x</code>. That is the whole uninstall.</p>
+        <p>When Victoria 3 itself updates, parts whose engine code changed switch themselves off until V3X is updated. They say so in <code>binaries\v3x\v3x.log</code>.</p>
+      
 
-      <Sec n={9} id="trouble" title="When something goes wrong">
-        <table class="ledger">
+      <h2 id="trouble">When something goes wrong</h2>
+        <table>
           <thead><tr><th scope="col">Problem</th><th scope="col">What to do</th></tr></thead>
           <tbody>
             <tr><th scope="row">Setup says "Victoria 3 is running"</th><td>Close the game (check Task Manager for <code>victoria3.exe</code>), then run setup again.</td></tr>
@@ -137,14 +140,14 @@ loc_fallback=1`;
             <tr><th scope="row">A part does nothing after a game update</th><td>Expected: it switched itself off because the game's code changed. Wait for a V3X update.</td></tr>
           </tbody>
         </table>
-        <h3 class="sub">Reporting a problem</h3>
-        <p class="measure">Before you start the game again, copy these files somewhere, because the next start overwrites them:</p>
-        <ul class="measure small">
+        <h3>Reporting a problem</h3>
+        <p>Before you start the game again, copy these files somewhere, because the next start overwrites them:</p>
+        <ul>
           <li><code>binaries\v3x\v3x.log</code>, <code>crash.log</code>, <code>crash.prev.log</code> and <code>install.log</code>. If you find <code>v3x.&lt;number&gt;.log</code> instead, the game's crash reporter was holding <code>v3x.log</code> open: send that one.</li>
           <li>The game's own logs: <code>Documents\Paradox Interactive\Victoria 3\logs\</code>.</li>
         </ul>
-        <p class="small">Technical detail, for whoever reads your report: <a href="/docs/troubleshooting/">Troubleshooting</a>.</p>
-      </Sec>
+        <p>Technical detail, for whoever reads your report: <a href="/docs/troubleshooting/">Troubleshooting</a>.</p>
+      
     </article>
-  </div>
+  </DocsShell>
 </Base>

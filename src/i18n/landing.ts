@@ -21,9 +21,9 @@ export interface LandingText {
 }
 
 export const en: LandingText = {
-  title: "V3X: Victoria 3 script extender with engine fixes and faster loading",
+  title: "V3X (Victoria 3 eXtender): script extender with engine fixes and faster loading",
   description: "V3X is a script extender for Victoria 3: engine bug fixes, faster 3D-model loading, fewer out-of-memory crashes, kept GDP graphs. Works with your mods. Single player, Windows.",
-  kicker: "A script extender for Victoria 3 · it works under the game, not in it",
+  kicker: "Victoria 3 eXtender · a script extender for Victoria 3 · it works under the game, not in it",
   h1: "Victoria 3, with its engine <em>looked after</em>.",
   lede: "V3X is an add-on that runs underneath the game. It fixes bugs in the engine, takes work out of loading, keeps your graphs, and writes a clear report when something breaks. Your mods and your playset stay exactly as they are. One installer puts it in; one click takes it out.",
   download: "Download V3X-Setup.exe", downloadSub: "Windows x64 · for Victoria 3 1.15.1",
@@ -106,9 +106,9 @@ export const en: LandingText = {
 };
 
 export const pt: LandingText = {
-  title: "V3X: script extender para Victoria 3, com correções no motor e carregamento mais rápido",
+  title: "V3X (Victoria 3 eXtender): script extender para Victoria 3, com correções no motor e carregamento mais rápido",
   description: "V3X é um script extender para Victoria 3: corrige bugs do motor, carrega modelos 3D mais rápido, evita travamentos por falta de memória. Funciona com seus mods. Um jogador, Windows.",
-  kicker: "Um script extender para Victoria 3 · funciona por baixo do jogo, não dentro dele",
+  kicker: "Victoria 3 eXtender · um script extender para Victoria 3 · funciona por baixo do jogo, não dentro dele",
   h1: "Victoria 3, com o motor <em>bem cuidado</em>.",
   lede: "V3X é um complemento que roda por baixo do jogo. Corrige bugs do motor, tira trabalho do carregamento, preserva os seus gráficos e escreve um relatório claro quando algo quebra. Os seus mods e a sua playset continuam exatamente como estão. Um instalador coloca; um clique tira.",
   download: "Baixar V3X-Setup.exe", downloadSub: "Windows x64 · para Victoria 3 1.15.1",

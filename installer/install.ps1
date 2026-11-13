@@ -1,6 +1,6 @@
 # V3X one-line installer for Victoria 3 (Windows PowerShell 5.1 and PowerShell 7). No admin needed.
 #
-#   irm https://v3x.pages.dev/install.ps1 | iex
+#   irm https://v3extender.pages.dev/install.ps1 | iex
 #   irm https://github.com/kleeedolinux/v3x/releases/latest/download/install.ps1 | iex
 #
 # What it does: finds Victoria 3 (Steam registry + libraryfolders.vdf, appid 529340, or asks),
@@ -10,7 +10,8 @@
 # Run it again to update, repair or uninstall.
 #
 # iex cannot pass parameters, so options are environment variables:
-#   V3X_ACTION   install | repair | uninstall | status   (default: install; asks when V3X is installed)
+#   V3X_ACTION   install | repair | uninstall | status | doctor   (default: install; asks when V3X is installed)
+#                doctor = V3X-Setup.exe --doctor (offline checks), then offers Repair when it helps
 #   V3X_LANG     en | pt                                  (default: from the Windows display language)
 #   V3X_GAME_DIR the "Victoria 3" folder (or its binaries folder); skips the search
 #   V3X_SOURCE   where to download from: a local folder or a base URL holding V3X-Setup.exe and
@@ -31,7 +32,7 @@ $v3xInstallRc = & {
     $ProgressPreference = 'SilentlyContinue'   # Invoke-WebRequest is many times slower with the progress bar
 
     $Repo = 'kleeedolinux/v3x'
-    $OneLiner = 'irm https://v3x.pages.dev/install.ps1 | iex'
+    $OneLiner = 'irm https://v3extender.pages.dev/install.ps1 | iex'
 
     # ------------------------------------------------------------------ language
     $lang = 'en'
@@ -64,7 +65,16 @@ $v3xInstallRc = & {
             menu1        = '  1  Update or repair V3X'
             menu2        = '  2  Uninstall V3X'
             menu3        = '  3  Stop, change nothing'
-            choose       = 'Type 1, 2 or 3 [1]'
+            menu4        = '  4  Check my install (finds missing files, conflicts, problems)'
+            choose       = 'Type 1, 2, 3 or 4 [1]'
+            checking2    = 'Checking your install...'
+            drOK         = 'OK'
+            drWARN       = 'WARNING'
+            drPROBLEM    = 'PROBLEM'
+            drTodo       = '    What to do: '
+            drNone       = 'No problems found.'
+            drSome       = '{0} problem(s), {1} warning(s).'
+            askRepair    = 'Repair now? (copies missing or damaged V3X files back) [Y/n]'
             downloading  = 'Downloading V3X...'
             checking     = 'Checking the download...'
             dlFail       = 'The download failed: {0}'
@@ -117,7 +127,16 @@ $v3xInstallRc = & {
             menu1        = '  1  Atualizar ou reparar o V3X'
             menu2        = '  2  Desinstalar o V3X'
             menu3        = '  3  Parar, n\u00e3o mudar nada'
-            choose       = 'Digite 1, 2 ou 3 [1]'
+            menu4        = '  4  Verificar instala\u00e7\u00e3o (acha arquivos faltando, conflitos, problemas)'
+            choose       = 'Digite 1, 2, 3 ou 4 [1]'
+            checking2    = 'Verificando sua instala\u00e7\u00e3o...'
+            drOK         = 'OK'
+            drWARN       = 'AVISO'
+            drPROBLEM    = 'PROBLEMA'
+            drTodo       = '    O que fazer: '
+            drNone       = 'Nenhum problema encontrado.'
+            drSome       = '{0} problema(s), {1} aviso(s).'
+            askRepair    = 'Reparar agora? (copia de volta os arquivos do V3X que faltam ou est\u00e3o danificados) [S/n]'
             downloading  = 'Baixando o V3X...'
             checking     = 'Conferindo o download...'
             dlFail       = 'O download falhou: {0}'
@@ -149,6 +168,19 @@ $v3xInstallRc = & {
             yes          = '^(s|sim|y|yes)$'
             no           = '^(n|nao|n\u00e3o|no)$'
         }
+    }
+
+    # pt-BR text per doctor check id: title, what to do. English uses V3X-Setup's own lines.
+    $DrPt = @{
+        D001 = @('Vers\u00e3o do jogo', 'Espere uma atualiza\u00e7\u00e3o do V3X para esta vers\u00e3o do jogo, ou desinstale o V3X at\u00e9 l\u00e1.')
+        D002 = @('Arquivos do V3X', 'Escolha Reparar: ele copia de volta os arquivos que faltam ou est\u00e3o danificados.')
+        D003 = @('Outros carregadores de mods', 'Se o jogo travar, tire esses arquivos da pasta binaries e teste de novo. Um version.dll de outra ferramenta: escolha Reparar.')
+        D009 = @('Mem\u00f3ria do Windows (arquivo de pagina\u00e7\u00e3o)', 'Deixe o Windows gerenciar o arquivo de pagina\u00e7\u00e3o (Sistema > Configura\u00e7\u00f5es avan\u00e7adas > Desempenho > Mem\u00f3ria virtual).')
+        D010 = @('Espa\u00e7o livre em disco', 'Libere espa\u00e7o (pelo menos 5 GB).')
+        D012 = @('\u00daltima abertura do jogo', 'Desligue esse plugin (menu principal > V3X, ou <plugin>=0 no v3x.ini) e mande o binaries\v3x\v3x.log para quem faz o V3X.')
+        D013 = @('\u00daltimo travamento', 'Mande o binaries\v3x\crash.log para quem faz o V3X. Se o m\u00f3dulo for um plugin do V3X, desligue esse plugin.')
+        D014 = @('Arquivo v3x.ini', 'Escolha Reparar, ou corrija o binaries\v3x\v3x.ini em [plugins] (uma linha por plugin, como keep_history=1).')
+        D015 = @('Jogo aberto', 'Feche o jogo antes de Reparar, Atualizar ou Desinstalar.')
     }
 
     function Dec([string]$s) {
@@ -321,6 +353,38 @@ $v3xInstallRc = & {
         return @{ rc = $p.ExitCode; out = $out }
     }
 
+    # V3X-Setup --doctor output -> plain lines; returns @{ problems; warnings; repair }
+    function Show-Doctor([string]$out) {
+        $res = @{ problems = 0; warnings = 0; repair = $false }
+        $lines = @($out -split "`r?`n")
+        if ($lang -eq 'en') {
+            foreach ($l in $lines) {
+                if ($l -match '^(OK|WARN|PROBLEM)\s+(.*?)(\s+What to do: (.*))?$') {
+                    $w = $Matches[1]; $c = @{ OK = 'Green'; WARN = 'Yellow'; PROBLEM = 'Red' }[$w]
+                    Say ('[' + (S ('dr' + $w)) + '] ' + $Matches[2]) $c
+                    if ($Matches[4]) { Say ((S 'drTodo') + $Matches[4]) }
+                }
+            }
+        }
+        foreach ($l in $lines) {
+            if ($l -match '^doctor: (D\d+) (\S+) (OK|WARN|PROBLEM) ?(.*)$') {
+                $id = $Matches[1]; $w = $Matches[3]; $det = $Matches[4]
+                if ($w -eq 'PROBLEM') { $res.problems++ } elseif ($w -eq 'WARN') { $res.warnings++ }
+                if ($lang -ne 'en') {
+                    $c = @{ OK = 'Green'; WARN = 'Yellow'; PROBLEM = 'Red' }[$w]
+                    $title = $id; $todo = ''
+                    if ($DrPt.ContainsKey($id)) { $title = Dec $DrPt[$id][0]; $todo = Dec $DrPt[$id][1] }
+                    Say ('[' + (S ('dr' + $w)) + '] ' + $title + ': ' + $det) $c
+                    if ($w -ne 'OK' -and $todo) { Say ((S 'drTodo') + $todo) }
+                }
+            } elseif ($l -match '^doctor: result .*repair=1') { $res.repair = $true }
+        }
+        Say ''
+        if ($res.problems -or $res.warnings) { Say (S 'drSome' $res.problems $res.warnings) $(if ($res.problems) { 'Red' } else { 'Yellow' }) }
+        else { Say (S 'drNone') 'Green' }
+        return $res
+    }
+
     function Show-Details([string]$out) {
         foreach ($l in ($out -split "`r?`n")) { if ($l.Trim()) { Say ('    ' + $l) 'DarkGray' } }
     }
@@ -334,7 +398,7 @@ $v3xInstallRc = & {
         Say ''
 
         $action = ("$env:V3X_ACTION").Trim().ToLowerInvariant()
-        if ($action -and $action -notin @('install', 'repair', 'uninstall', 'status')) { Say (S 'error' "V3X_ACTION=$action (install, repair, uninstall, status)") 'Red'; return 1 }
+        if ($action -and $action -notin @('install', 'repair', 'uninstall', 'status', 'doctor')) { Say (S 'error' "V3X_ACTION=$action (install, repair, uninstall, status, doctor)") 'Red'; return 1 }
 
         # 1. the game folder
         $game = $null
@@ -359,7 +423,7 @@ $v3xInstallRc = & {
         $isInstalled = Test-Path -LiteralPath (Join-Path $bin 'v3x\install_manifest.txt') -PathType Leaf
 
         # 2. the game must be closed
-        if ($action -ne 'status') {
+        if ($action -ne 'status' -and $action -ne 'doctor') {
             $tries = 0
             while (Test-GameRunning $game) {
                 $tries++
@@ -377,9 +441,10 @@ $v3xInstallRc = & {
             if ($isInstalled) {
                 Say ''
                 Say (S 'installed')
-                Say (S 'menu1'); Say (S 'menu2'); Say (S 'menu3')
+                Say (S 'menu1'); Say (S 'menu2'); Say (S 'menu3'); Say (S 'menu4')
                 $c = Ask (S 'choose')
                 if ($c -eq '2') { $action = 'uninstall' }
+                elseif ($c -eq '4') { $action = 'doctor' }
                 elseif ($c -eq '3' -or $c -eq 'q') { Say (S 'stopped'); return 10 }
                 else { $action = 'repair' }
             }
@@ -416,13 +481,26 @@ $v3xInstallRc = & {
             # 5. run the tested installer
             $gd = '--game-dir "' + $game + '"'
             if ($action -eq 'status') { $argline = '--status ' + $gd }
+            elseif ($action -eq 'doctor') { $argline = '--doctor ' + $gd }
             elseif ($action -eq 'uninstall') { $argline = '--silent --uninstall ' + $gd; if ($purge) { $argline += ' --purge' } }
             elseif ($action -eq 'repair') { $argline = '--silent --repair ' + $gd }
             else { $argline = '--silent ' + $gd }
-            Say $(if ($action -eq 'uninstall') { S 'uninstalling' } else { S 'installing' })
+            Say $(if ($action -eq 'uninstall') { S 'uninstalling' } elseif ($action -eq 'doctor') { S 'checking2' } else { S 'installing' })
             try { $r = Invoke-Setup $exe $argline } catch { Say (S 'cantRun' $_.Exception.Message) 'Red'; Say (S 'cantRun2'); return 1 }
 
             if ($action -eq 'status') { Show-Details $r.out; return $r.rc }
+            if ($action -eq 'doctor') {
+                Say ''
+                $d = Show-Doctor $r.out
+                if (-not $d.repair) { return $r.rc }
+                Say ''
+                if (-not (AskYes 'askRepair' $true)) { return $r.rc }
+                if (Test-GameRunning $game) { Say (S 'stillRunning') 'Yellow'; return 3 }
+                $action = 'repair'
+                $argline = '--silent --repair ' + $gd
+                Say (S 'installing')
+                $r = Invoke-Setup $exe $argline
+            }
             if ($r.rc -eq 2) {
                 Say ''
                 Say (S 'unsupported') 'Yellow'

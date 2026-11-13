@@ -13,7 +13,7 @@ rights and changes no game file. Em português: [mais abaixo](#português-pt-br)
 3. Copy this line, paste it into that window (right-click pastes), press **Enter**:
 
    ```powershell
-   irm https://v3x.pages.dev/install.ps1 | iex
+   irm https://v3extender.pages.dev/install.ps1 | iex
    ```
 
    (Same thing from GitHub: `irm https://github.com/kleeedolinux/v3x/releases/latest/download/install.ps1 | iex`.)
@@ -29,7 +29,14 @@ It speaks English or Portuguese, following your Windows language (`$env:V3X_LANG
 before the line overrides it).
 
 **Update, repair or uninstall:** run the same line again. When V3X is already installed it asks:
-`1 Update or repair`, `2 Uninstall`, `3 Stop`.
+`1 Update or repair`, `2 Uninstall`, `3 Stop`, `4 Check my install`.
+
+**Something wrong? Check my install:** choose `4` there, or the **Check my install** button in
+`V3X-Setup.exe`. It changes nothing. It looks for missing or damaged V3X files, other mod loaders
+next to the game (`dxgi.dll`, `dinput8.dll`, ...), a game version V3X does not know, low disk space
+(also on C:), a too small Windows page file, mistakes in `v3x.ini`, a plugin that stopped the last
+start, and the last crash. Each line says OK, WARNING or PROBLEM plus what to do; if files are
+missing it offers **Repair**. The result is also saved in `binaries\v3x\doctor_offline.txt`.
 
 ## 2. The other way: V3X-Setup.exe
 
@@ -152,10 +159,20 @@ More: [troubleshooting.md](troubleshooting.md), [faq.md](faq.md).
 prints to stdout (always English) and returns 0 ok, 1 error, 2 unsupported game build, 3 game
 running, 4 game not found, 5 not installed, 6 damaged setup file, 7 bad arguments.
 
+* `--doctor` runs the offline checks (ids `D001`... shared with the in-game doctor plugin): one
+  English line per check plus a machine line `doctor: <id> <name> OK|WARN|PROBLEM <detail>` and
+  `doctor: result problems=N warnings=N repair=0|1`. Exit code = number of PROBLEMs.
+* `--update [--wait-pid <pid>]` is what the in-game updater runs: wait (up to 10 minutes) for the
+  game process to exit, then a silent repair / upgrade that keeps every ini; never forced onto an
+  unsupported game build. Exit 0 ok, 1 anything else; the last line of `binaries\v3x\install.log` is
+  `update-result: ok version=<ver>` or `update-result: failed code=<n> <reason>`.
+* Each release also has `compat.json` (version, loader API, supported game builds from
+  `installer/builds.txt`, asset sizes and SHA-256) for the updater.
+
 `install.ps1` takes environment variables instead of parameters (`iex` cannot pass any):
-`V3X_ACTION=install|repair|uninstall|status`, `V3X_GAME_DIR`, `V3X_LANG=en|pt`, `V3X_PURGE=1`,
+`V3X_ACTION=install|repair|uninstall|status|doctor`, `V3X_GAME_DIR`, `V3X_LANG=en|pt`, `V3X_PURGE=1`,
 `V3X_YES=1` (never ask), `V3X_SOURCE=<folder or URL>` (where to download from), `V3X_VERSION=v0.5.0`
-(a specific release). Example: `$env:V3X_ACTION="uninstall"; irm https://v3x.pages.dev/install.ps1 | iex`.
+(a specific release). Example: `$env:V3X_ACTION="uninstall"; irm https://v3extender.pages.dev/install.ps1 | iex`.
 Details: [installer/README.md](../installer/README.md).
 
 ---
@@ -175,7 +192,7 @@ administrador e não altera nenhum arquivo do jogo.
 3. Copie esta linha, cole nessa janela (botão direito cola) e aperte **Enter**:
 
    ```powershell
-   irm https://v3x.pages.dev/install.ps1 | iex
+   irm https://v3extender.pages.dev/install.ps1 | iex
    ```
 
 4. Ele diz `Achei seu jogo em ... Está certo? [S/n]`. Aperte **Enter** se a pasta estiver certa.
@@ -190,6 +207,13 @@ português quando o Windows está em português.
 **Atualizar, reparar ou desinstalar:** rode a mesma linha de novo e escolha `1 Atualizar ou
 reparar` ou `2 Desinstalar`. Outra forma: rode o `V3X-Setup.exe` (a janela também fica em
 português).
+
+**Algo errado? Verificar instalação:** escolha `4` nesse menu, ou o botão **Verificar instalação**
+no `V3X-Setup.exe`. Não muda nada. Procura arquivos do V3X faltando ou danificados, outros
+carregadores de mods ao lado do jogo, versão do jogo desconhecida, pouco espaço em disco (também no
+C:), arquivo de paginação pequeno, erros no `v3x.ini`, um plugin que parou a última abertura e o
+último travamento. Cada linha diz OK, AVISO ou PROBLEMA e o que fazer; se faltar arquivo, oferece
+**Reparar**.
 
 ### Tudo vem instalado, quase tudo desligado
 

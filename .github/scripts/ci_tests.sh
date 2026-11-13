@@ -10,7 +10,7 @@ set -uo pipefail
 cd "$(dirname "$0")/../.."
 
 # tests that cannot pass without the real victoria3.exe (measured on a copy of the repo without ../binaries)
-NEEDS_EXE=" ai_par "   # run_all.sh passes $T/ as its exe argument when there is no exe
+NEEDS_EXE=" "   # none today; run_all.sh skips keep_history and ai_par without the exe
 
 tmp=${V3X_TMP:-${RUNNER_TEMP:-${TEMP:-/tmp}}/v3x}
 command -v cygpath > /dev/null && tmp=$(cygpath -m "$tmp")

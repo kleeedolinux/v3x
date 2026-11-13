@@ -70,10 +70,22 @@ def main():
     check("install.ps1 is pure ASCII (irm | iex on PowerShell 5.1 may decode as Latin-1)",
           all(b < 128 for b in open(ps1, "rb").read()))
     sums = open(os.path.join(dist, "SHA256SUMS.txt")).read()
-    check("SHA256SUMS.txt lists V3X-Setup.exe, the zip and install.ps1 with the right hashes",
+    check("SHA256SUMS.txt lists V3X-Setup.exe, the zip, install.ps1 and compat.json with the right hashes",
           all(("%s  %s" % (ti.sha(os.path.join(dist, n)), n)) in sums
-              for n in ["V3X-Setup.exe", "install.ps1"] + [f for f in os.listdir(dist) if f.startswith("v3x-") and f.endswith(".zip")])
+              for n in ["V3X-Setup.exe", "install.ps1", "compat.json"] + [f for f in os.listdir(dist) if f.startswith("v3x-") and f.endswith(".zip")])
           and any(f.startswith("v3x-") and f.endswith(".zip") for f in os.listdir(dist)), sums)
+
+    # compat.json (in-game updater, format of mem chat #4420/#4425): builds from builds.txt, asset hashes
+    import json
+    cj = json.loads(open(os.path.join(dist, "compat.json"), "rb").read().decode("utf-8"))   # no BOM allowed
+    builds = [l.split() for l in open(os.path.join(HERE, "builds.txt")) if l.strip() and not l.startswith("#")]
+    check("compat.json: schema 1, api_version, game_builds = installer/builds.txt",
+          cj.get("schema") == 1 and isinstance(cj.get("api_version"), int)
+          and [(b["build_id"], b["branch"]) for b in cj["game_builds"]] == [(b[0], b[1]) for b in builds], str(cj))
+    check("compat.json: every asset's size and sha256 match the file",
+          {x["name"] for x in cj["assets"]} >= {"V3X-Setup.exe", "install.ps1"} and all(
+              os.path.getsize(os.path.join(dist, x["name"])) == x["size"] and ti.sha(os.path.join(dist, x["name"])) == x["sha256"]
+              for x in cj["assets"]), str(cj["assets"]))
 
     shells = [s for s in a.shell.split(",") if shutil.which(s)]
     check("at least one PowerShell found (%s)" % ",".join(shells), shells)
@@ -130,7 +142,7 @@ def main():
         rc, out = run(sh, {"V3X_STEAM_PATH": steam, "V3X_ANSWERS": "y"})
         check("[%s] steam: found via libraryfolders.vdf, confirmed, installed rc=0" % sh,
               rc == 0 and "Found your game at:" in out and g in out and "Done! V3X" in out and os.path.isfile(V(g)), out)
-        check("[%s] steam: tells how to uninstall" % sh, "choose Uninstall" in out and "irm https://v3x.pages.dev/install.ps1 | iex" in out, out)
+        check("[%s] steam: tells how to uninstall" % sh, "choose Uninstall" in out and "irm https://v3extender.pages.dev/install.ps1 | iex" in out, out)
         check("[%s] install: installed file equals the payload's version.dll" % sh,
               ti.sha(V(g)) == dict((r, h) for k, r, h, _ in ti.payload(os.path.join(dist, "V3X-Setup.exe")) if k == "bin")["version.dll"])
         check("[%s] install: temp download folder removed" % sh, not [d for d in os.listdir(tmp) if d.startswith("v3x-install-")])
@@ -146,6 +158,22 @@ def main():
         rc, out = run(sh, {"V3X_GAME_DIR": g, "V3X_ACTION": "repair", "V3X_LANG": "pt"})
         check("[%s] pt-BR: text in Portuguese with accents decoded" % sh,
               rc == 0 and "Pronto! O V3X" in out and "est\u00e1 instalado" in out and "\\u00" not in out, out)
+
+        # 4b. menu 4 = check my install (V3X-Setup --doctor): a deleted plugin is a PROBLEM, Repair offered and done
+        os.remove(os.path.join(g, "binaries", "v3x", "plugins", "keep_history.dll"))
+        rc, out = run(sh, {"V3X_STEAM_PATH": steam, "V3X_ANSWERS": "y;4;y"})
+        check("[%s] menu 4: doctor shows a PROBLEM with 'What to do', offers Repair, 'y' repairs" % sh,
+              "[PROBLEM]" in out and "What to do:" in out and "Repair now?" in out and "Done! V3X" in out
+              and os.path.isfile(os.path.join(g, "binaries", "v3x", "plugins", "keep_history.dll")), out)
+        rc, out = run(sh, {"V3X_GAME_DIR": g, "V3X_ACTION": "doctor", "V3X_YES": "1"})
+        check("[%s] V3X_ACTION=doctor after repair: files OK, no Repair question" % sh,
+              "[OK] All " in out and "Repair now?" not in out and ("problem(s)" in out or "No problems found." in out), out)
+        os.remove(os.path.join(g, "binaries", "v3x", "plugins", "log_filter.dll"))
+        rc, out = run(sh, {"V3X_GAME_DIR": g, "V3X_ACTION": "doctor", "V3X_LANG": "pt", "V3X_ANSWERS": "n"})
+        check("[%s] doctor pt-BR: Portuguese titles + 'O que fazer', 'n' keeps the file missing" % sh,
+              "[PROBLEMA] Arquivos do V3X" in out and "O que fazer:" in out and "Reparar agora?" in out
+              and not os.path.exists(os.path.join(g, "binaries", "v3x", "plugins", "log_filter.dll")) and rc >= 1, out)
+        run(sh, {"V3X_GAME_DIR": g, "V3X_ACTION": "repair"})
 
         # 5. game running: refused (scripted), and 'q' stops
         if have_sleeper:

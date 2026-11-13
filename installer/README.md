@@ -10,7 +10,7 @@ admin rights. Player guide: [docs/install.md](../docs/install.md).
 | `profile.txt` | which plugins ship on (1), ship off (0) or are not shipped (-), with the reason. Edit this to change the player set |
 | `builds.txt` | supported game builds (`game_build_id` + `caligula_branch.txt`); setup refuses (CLI) or warns (GUI) on others |
 | `make_dist.py` | builds `build/dist/V3X-Setup.exe`, `v3x-<version>.zip` (manual install), a copy of `install.ps1` and `SHA256SUMS.txt` (all three) |
-| `install.ps1` | the one-line installer `irm https://v3x.pages.dev/install.ps1 \| iex`: finds the game, downloads + checks `V3X-Setup.exe`, runs it `--silent`. Options and exit codes: its header |
+| `install.ps1` | the one-line installer `irm https://v3extender.pages.dev/install.ps1 \| iex`: finds the game, downloads + checks `V3X-Setup.exe`, runs it `--silent`. Options and exit codes: its header |
 | `test_installer.py` | end-to-end test of `V3X-Setup.exe` against fake game folders |
 | `test_install_ps1.py` | end-to-end test of `install.ps1` (Windows PowerShell 5.1 and pwsh 7) against fake games, a fake Steam and a local release |
 
@@ -19,9 +19,17 @@ Language: the GUI of `V3X-Setup.exe` and all of `install.ps1` are English or Bra
 be parsed. `install.ps1` is kept pure ASCII (accents as `\u00XX`, decoded at run time) because
 `irm | iex` on PowerShell 5.1 can decode a download as Latin-1.
 
-Releases: `.github/workflows/release.yml` builds, tests and publishes these four files on a `v*`
+Other modes of `V3X-Setup.exe` (details: header of `setup.c`, player view: docs/install.md):
+`--doctor` (offline checks D001-D015, ids shared with the in-game `plugins/doctor`; exit = number
+of PROBLEMs; GUI button "Check my install"; writes `binaries/v3x/doctor_offline.txt`),
+`--update [--wait-pid <pid>]` (for `plugins/updater`: wait for the game to exit, silent repair,
+exit 0/1, last `install.log` line `update-result: ...`; `V3X_WAIT_TIMEOUT_SEC` shortens the
+10-minute wait for tests). `make_dist.py` also writes `compat.json` (schema 1: v3x_version,
+loader_semver, api_version, game_builds from `builds.txt`, assets with size + sha256).
+
+Releases: `.github/workflows/release.yml` builds, tests and publishes these files (+ compat.json) on a `v*`
 tag; `ci.yml` does the same on every push / pull request and uploads them as an artifact. The site
-(v3x.pages.dev) serves a copy of `install.ps1`.
+(v3extender.pages.dev) serves a copy of `install.ps1`.
 
 ## Build
 

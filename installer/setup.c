@@ -25,6 +25,8 @@
  *   --purge             with --uninstall: also delete binaries/v3x/ (logs, reports, settings)
  *   --force             install even if the game build is not supported
  *   --status            print what is installed, change nothing
+ *   --doctor            offline checks (files, conflicts, game build, disk, page file, v3x.ini, last
+ *                       crash); exit code = number of PROBLEMs (see do_doctor_checks)
  *   --wait-pid <pid>    first wait (up to 10 min) for that process to exit; still running = exit 3
  *   --update            for the in-game updater (plugins/updater): implies --silent, install/repair
  *                       keeping every ini, never --force; exit code 0 = ok, 1 = anything else. The
@@ -66,6 +68,17 @@ enum { RC_OK = 0, RC_ERR = 1, RC_UNSUPPORTED = 2, RC_RUNNING = 3, RC_NOGAME = 4,
 static wchar_t *g_out; static size_t g_out_n, g_out_cap;
 static int g_silent;
 static int g_defer_log;   /* --update: main() writes install.log once, with the update-result line */
+
+/* GUI language: 1 = Portuguese (pt-BR wording), 0 = English */
+static int g_pt;
+#define TR(en, pt) (g_pt ? (pt) : (en))
+
+static void pick_language(void)
+{
+    char v[16]; DWORD n = GetEnvironmentVariableA("V3X_LANG", v, sizeof v);
+    if (n && n < sizeof v) { g_pt = !_strnicmp(v, "pt", 2); return; }
+    g_pt = PRIMARYLANGID(GetUserDefaultUILanguage()) == LANG_PORTUGUESE;
+}
 
 static void say(const wchar_t *fmt, ...)
 {
@@ -857,21 +870,327 @@ static void do_status(State *s)
     say(L"this setup:  V3X %hs, supports %hs", g_version, supported_list());
 }
 
+
+/* ------------------------------------------------------------------ doctor (offline checks)
+ * --doctor: read-only checks of one game folder; ids shared with the in-game plugins/doctor
+ * (mem chat #4423/#4426). Each check: level OK / WARN / PROBLEM, one plain sentence and one
+ * "what to do" sentence (English + Portuguese; --doctor stdout is English), plus a machine line
+ *   doctor: <id> <name> <OK|WARN|PROBLEM> <detail>
+ * Exit code = number of PROBLEMs. Also writes binaries/v3x/doctor_offline.txt when binaries/v3x
+ * exists (the only file it writes). */
+
+enum { DR_OK = 0, DR_WARN = 1, DR_PROBLEM = 2 };
+typedef struct {
+    const char *id, *name; int level;
+    wchar_t msg_en[400], msg_pt[400];
+    const wchar_t *todo_en, *todo_pt;
+    char detail[400];
+} DrCheck;
+static DrCheck g_dr[16]; static int g_ndr;
+static int g_dr_repair;   /* 1 = a Repair would fix something (missing / damaged V3X files) */
+
+static DrCheck *dr_add(const char *id, const char *name, int level, const wchar_t *todo_en, const wchar_t *todo_pt)
+{
+    DrCheck *c = &g_dr[g_ndr < 15 ? g_ndr++ : 15];
+    memset(c, 0, sizeof *c);
+    c->id = id; c->name = name; c->level = level; c->todo_en = todo_en; c->todo_pt = todo_pt;
+    return c;
+}
+
+static const char *PROXY_DLLS[] = {"dinput8.dll", "winmm.dll", "dxgi.dll", "d3d11.dll", "d3d12.dll", "d3d9.dll",
+                                   "dsound.dll", "winhttp.dll", "wininet.dll", "xinput1_3.dll", "xinput1_4.dll"};
+
+static int plugin_known(const char *name)
+{
+    for (int i = 0; i < g_nprof; i++) if (!_stricmp(g_prof[i].name, name)) return 1;
+    return 0;
+}
+
+static void do_doctor_checks(State *s)
+{
+    g_ndr = 0; g_dr_repair = 0;
+    wchar_t p[MAX_PATH * 2];
+    DrCheck *c;
+    int running = game_running(s->game);
+
+    /* D001 game build */
+    if (s->supported) {
+        c = dr_add("D001", "game_build", DR_OK, NULL, NULL);
+        _snwprintf(c->msg_en, 400, L"Game version %hs is supported.", s->branch);
+        _snwprintf(c->msg_pt, 400, L"A versão do jogo %hs é compatível.", s->branch);
+    } else {
+        c = dr_add("D001", "game_build", s->branch_ok ? DR_WARN : DR_PROBLEM,
+                   L"Wait for a V3X update for this game version, or uninstall V3X until then.",
+                   L"Espere uma atualização do V3X para esta versão do jogo, ou desinstale o V3X até lá.");
+        _snwprintf(c->msg_en, 400, L"Game version %hs (build %hs) is not one this V3X was made for (%hs).", s->branch, s->build, supported_list());
+        _snwprintf(c->msg_pt, 400, L"A versão do jogo %hs (build %hs) não é a que este V3X conhece (%hs).", s->branch, s->build, supported_list());
+    }
+    snprintf(c->detail, 400, "build=%s branch=%s", s->build, s->branch);
+
+    /* D002 V3X files */
+    join(p, s->bin, L"version.dll");
+    int have_dll = file_exists(p), dll_v3x = have_dll && is_v3x_dll(p);
+    if (s->installed) {
+        int missing = 0, bad = 0, n = 0; char list[300] = ""; size_t ln = 0;
+        for (int i = 0; i < s->mf.n; i++) {
+            MFile *f = &s->mf.f[i];
+            if (strcmp(f->kind, "bin")) continue;
+            n++;
+            wchar_t fp[MAX_PATH * 2]; rel_to_path(s->bin, f->rel, fp);
+            char h[65] = "";
+            int st = !file_exists(fp) ? 1 : (!hash_file(fp, h) || strcmp(h, f->sha)) ? 2 : 0;
+            if (st == 2 && !_stricmp(f->rel, "version.dll") && is_v3x_dll(fp)) st = 0;  /* a self-built loader */
+            if (!st) continue;
+            if (st == 1) missing++; else bad++;
+            const char *b = strrchr(f->rel, '/'); b = b ? b + 1 : f->rel;
+            if (ln < sizeof list - 40) ln += (size_t)snprintf(list + ln, sizeof list - ln, "%s%s(%s)", ln ? "," : "", b, st == 1 ? "missing" : "changed");
+        }
+        if (missing || bad) {
+            g_dr_repair = 1;
+            c = dr_add("D002", "loader_files", DR_PROBLEM, L"Choose Repair: it copies the missing or damaged V3X files back.",
+                       L"Escolha Reparar: ele copia de volta os arquivos do V3X que faltam ou estão danificados.");
+            _snwprintf(c->msg_en, 400, L"%d V3X file(s) missing and %d damaged or changed: %hs", missing, bad, list);
+            _snwprintf(c->msg_pt, 400, L"%d arquivo(s) do V3X faltando e %d danificado(s) ou alterado(s): %hs", missing, bad, list);
+        } else {
+            c = dr_add("D002", "loader_files", DR_OK, NULL, NULL);
+            _snwprintf(c->msg_en, 400, L"All %d V3X files are present and intact (V3X %hs).", n, s->mf.version);
+            _snwprintf(c->msg_pt, 400, L"Os %d arquivos do V3X estão presentes e intactos (V3X %hs).", n, s->mf.version);
+        }
+        snprintf(c->detail, 400, "files=%d missing=%d changed=%d%s%s", n, missing, bad, ln ? " list=" : "", list);
+    } else if (dll_v3x) {
+        c = dr_add("D002", "loader_files", DR_WARN, L"Run Install once: V3X then keeps a list of its files and can check and repair them.",
+                   L"Rode Instalar uma vez: assim o V3X guarda a lista dos arquivos e consegue conferir e reparar.");
+        wcscpy(c->msg_en, L"V3X was copied in by hand (no install list), so its files cannot be checked.");
+        wcscpy(c->msg_pt, L"O V3X foi copiado à mão (sem lista de instalação), então os arquivos não podem ser conferidos.");
+        snprintf(c->detail, 400, "manifest=no version_dll=v3x");
+    } else {
+        c = dr_add("D002", "loader_files", DR_PROBLEM, L"Choose Install to install V3X.", L"Escolha Instalar para instalar o V3X.");
+        wcscpy(c->msg_en, L"V3X is not installed in this game folder.");
+        wcscpy(c->msg_pt, L"O V3X não está instalado nesta pasta do jogo.");
+        snprintf(c->detail, 400, "manifest=no version_dll=%s", have_dll ? "foreign" : "none");
+    }
+
+    /* D003 other proxy DLLs / a foreign version.dll */
+    {
+        char found[300] = ""; size_t fn = 0; int nf = 0;
+        if (have_dll && !dll_v3x) { fn += (size_t)snprintf(found + fn, sizeof found - fn, "version.dll(not V3X)"); nf++; }
+        for (size_t i = 0; i < sizeof PROXY_DLLS / sizeof *PROXY_DLLS; i++) {
+            wchar_t w[64]; utf8_to_w(PROXY_DLLS[i], w, 64);
+            join(p, s->bin, w);
+            if (file_exists(p)) { fn += (size_t)snprintf(found + fn, sizeof found - fn, "%s%s", fn ? "," : "", PROXY_DLLS[i]); nf++; }
+        }
+        if (nf) {
+            int foreign = have_dll && !dll_v3x;
+            c = dr_add("D003", "foreign_proxy", foreign ? DR_PROBLEM : DR_WARN,
+                       foreign ? L"Another tool replaced V3X's version.dll: choose Repair (the other file is backed up), or remove that tool."
+                               : L"If the game crashes or V3X misbehaves, move these files out of the binaries folder and test again.",
+                       foreign ? L"Outra ferramenta trocou o version.dll do V3X: escolha Reparar (o outro arquivo vai para o backup) ou remova essa ferramenta."
+                               : L"Se o jogo travar ou o V3X falhar, tire esses arquivos da pasta binaries e teste de novo.");
+            if (foreign) g_dr_repair = 1;
+            _snwprintf(c->msg_en, 400, L"Other mod loaders or overlays next to the game: %hs", found);
+            _snwprintf(c->msg_pt, 400, L"Outros carregadores de mods ou overlays ao lado do jogo: %hs", found);
+        } else {
+            c = dr_add("D003", "foreign_proxy", DR_OK, NULL, NULL);
+            wcscpy(c->msg_en, L"No other mod loader DLL next to the game.");
+            wcscpy(c->msg_pt, L"Nenhuma outra DLL de carregador de mods ao lado do jogo.");
+        }
+        snprintf(c->detail, 400, "found=%s", nf ? found : "none");
+    }
+
+    /* D009 commit limit (page file) */
+    {
+        MEMORYSTATUSEX ms = {sizeof ms};
+        GlobalMemoryStatusEx(&ms);
+        double ram = (double)ms.ullTotalPhys / (1 << 30), lim = (double)ms.ullTotalPageFile / (1 << 30);
+        int low = ms.ullTotalPageFile < ms.ullTotalPhys + ms.ullTotalPhys / 2;
+        c = dr_add("D009", "pagefile", low ? DR_WARN : DR_OK,
+                   low ? L"Let Windows manage the page file: Settings > System > About > Advanced system settings > Performance > Advanced > Virtual memory." : NULL,
+                   low ? L"Deixe o Windows gerenciar o arquivo de paginação: Configurações > Sistema > Sobre > Configurações avançadas do sistema > Desempenho > Avançado > Memória virtual." : NULL);
+        if (low) {
+            _snwprintf(c->msg_en, 400, L"Windows memory limit is %.1f GB with %.1f GB RAM: the page file is small or off, the game can run out of memory.", lim, ram);
+            _snwprintf(c->msg_pt, 400, L"O limite de memória do Windows é %.1f GB com %.1f GB de RAM: o arquivo de paginação é pequeno ou está desligado, o jogo pode ficar sem memória.", lim, ram);
+        } else {
+            _snwprintf(c->msg_en, 400, L"Windows memory limit %.1f GB for %.1f GB RAM is fine.", lim, ram);
+            _snwprintf(c->msg_pt, 400, L"Limite de memória do Windows de %.1f GB para %.1f GB de RAM está bom.", lim, ram);
+        }
+        snprintf(c->detail, 400, "commit_limit_gb=%.1f ram_gb=%.1f", lim, ram);
+    }
+
+    /* D010 free disk space: game drive and C: */
+    {
+        wchar_t drives[2][MAX_PATH * 2]; int nd = 0;
+        if (!GetVolumePathNameW(s->game, drives[0], MAX_PATH * 2)) wcscpy(drives[0], L"C:\\");
+        nd = 1;
+        if (_wcsnicmp(drives[0], L"C:\\", 3)) { wcscpy(drives[1], L"C:\\"); nd = 2; }
+        int worst = DR_OK; char det[200] = ""; size_t dn = 0; wchar_t lst[200] = L""; size_t wn = 0;
+        for (int i = 0; i < nd; i++) {
+            ULARGE_INTEGER fr; double gb = -1;
+            if (GetDiskFreeSpaceExW(drives[i], &fr, NULL, NULL)) gb = (double)fr.QuadPart / (1 << 30);
+            int lv = gb < 0 ? DR_OK : gb < 1 ? DR_PROBLEM : gb < 5 ? DR_WARN : DR_OK;
+            if (lv > worst) worst = lv;
+            dn += (size_t)snprintf(det + dn, sizeof det - dn, "%s%c=%.1fGB", dn ? " " : "", (char)drives[i][0], gb);
+            wn += (size_t)_snwprintf(lst + wn, 200 - wn, L"%s%c: %.1f GB", wn ? L", " : L"", drives[i][0], gb);
+        }
+        c = dr_add("D010", "disk_free", worst,
+                   worst ? L"Free some space (at least 5 GB): Windows and the game need it for saves, logs and memory." : NULL,
+                   worst ? L"Libere espaço (pelo menos 5 GB): o Windows e o jogo precisam dele para saves, logs e memória." : NULL);
+        _snwprintf(c->msg_en, 400, L"Free disk space: %s%s", lst, worst ? L" - low" : L"");
+        _snwprintf(c->msg_pt, 400, L"Espaço livre em disco: %s%s", lst, worst ? L" - pouco" : L"");
+        snprintf(c->detail, 400, "%s", det);
+    }
+
+    /* D012 crash during the last start (loading.marker) */
+    {
+        uint8_t *b; size_t n; char stem[64] = "";
+        join(p, s->bin, L"v3x\\loading.marker");
+        if (!running && read_all(p, &b, &n)) { snprintf(stem, sizeof stem, "%s", (char *)b); free(b); trim(stem); if (!stem[0]) strcpy(stem, "?"); }
+        if (stem[0]) {
+            c = dr_add("D012", "crash_loop", DR_PROBLEM,
+                       L"Turn that plugin off (main menu > V3X, or <plugin>=0 under [plugins] in binaries\\v3x\\v3x.ini) and send binaries\\v3x\\v3x.log to the V3X developers.",
+                       L"Desligue esse plugin (menu principal > V3X, ou <plugin>=0 em [plugins] no binaries\\v3x\\v3x.ini) e mande o binaries\\v3x\\v3x.log para quem faz o V3X.");
+            _snwprintf(c->msg_en, 400, L"The game stopped while V3X was loading the plugin \"%hs\" at the last start.", stem);
+            _snwprintf(c->msg_pt, 400, L"O jogo parou enquanto o V3X carregava o plugin \"%hs\" na última vez.", stem);
+            snprintf(c->detail, 400, "plugin=%s", stem);
+        } else {
+            c = dr_add("D012", "crash_loop", DR_OK, NULL, NULL);
+            wcscpy(c->msg_en, running ? L"The game is running, the last-start check is skipped." : L"The last start loaded every plugin.");
+            wcscpy(c->msg_pt, running ? L"O jogo está aberto, a checagem da última abertura foi pulada." : L"A última abertura carregou todos os plugins.");
+            snprintf(c->detail, 400, "marker=%s", running ? "skipped" : "none");
+        }
+    }
+
+    /* D013 last crash (crash_logger's crash.log) */
+    {
+        uint8_t *b; size_t n; char line[200] = "", mod[100] = "";
+        join(p, s->bin, L"v3x\\crash.log");
+        if (read_all(p, &b, &n)) {
+            char *hit = NULL, *q = (char *)b;
+            while ((q = strstr(q, "UNHANDLED EXCEPTION")) != NULL) { hit = q; q++; }
+            if (hit) {
+                size_t k = 0;
+                while (hit[k] && hit[k] != '\r' && hit[k] != '\n' && k < sizeof line - 1) k++;
+                memcpy(line, hit, k); line[k] = 0;
+                char *at = strstr(line, " at ");
+                if (at) { at += 4; size_t m = 0; while (at[m] && at[m] != ' ' && at[m] != '+' && m < sizeof mod - 1) m++; memcpy(mod, at, m); mod[m] = 0; }
+            }
+            free(b);
+        }
+        if (line[0]) {
+            c = dr_add("D013", "last_crash", DR_WARN,
+                       L"Send binaries\\v3x\\crash.log to the V3X developers. If the module is a V3X plugin, turn that plugin off.",
+                       L"Mande o binaries\\v3x\\crash.log para quem faz o V3X. Se o módulo for um plugin do V3X, desligue esse plugin.");
+            _snwprintf(c->msg_en, 400, L"The game crashed last time, in %hs.", mod[0] ? mod : "?");
+            _snwprintf(c->msg_pt, 400, L"O jogo travou na última vez, em %hs.", mod[0] ? mod : "?");
+            snprintf(c->detail, 400, "module=%s line=%s", mod[0] ? mod : "?", line);
+        } else {
+            c = dr_add("D013", "last_crash", DR_OK, NULL, NULL);
+            wcscpy(c->msg_en, L"No crash recorded in crash.log.");
+            wcscpy(c->msg_pt, L"Nenhum travamento registrado no crash.log.");
+            snprintf(c->detail, 400, "crash=none");
+        }
+    }
+
+    /* D014 v3x.ini [plugins] */
+    {
+        uint8_t *b; size_t n;
+        join(p, s->bin, L"v3x\\v3x.ini");
+        if (!read_all(p, &b, &n)) {
+            int inst = s->installed || dll_v3x;
+            c = dr_add("D014", "ini_syntax", inst ? DR_WARN : DR_OK,
+                       inst ? L"Choose Repair to create it again (every plugin's default applies until then)." : NULL,
+                       inst ? L"Escolha Reparar para criar de novo (até lá vale o padrão de cada plugin)." : NULL);
+            wcscpy(c->msg_en, inst ? L"binaries\\v3x\\v3x.ini is missing: every plugin found is loaded." : L"No v3x.ini (V3X is not installed).");
+            wcscpy(c->msg_pt, inst ? L"Falta o binaries\\v3x\\v3x.ini: todo plugin encontrado é carregado." : L"Sem v3x.ini (o V3X não está instalado).");
+            snprintf(c->detail, 400, "ini=missing");
+            if (inst) g_dr_repair = 1;
+        } else {
+            char unk[200] = "", miss[200] = "", bad[120] = ""; size_t un = 0, mn = 0, bn = 0; int nu = 0, nm = 0, nb = 0, in = 0;
+            for (char *line = strtok((char *)b, "\n"); line; line = strtok(NULL, "\n")) {
+                trim(line);
+                if (!line[0] || line[0] == '#' || line[0] == ';') continue;
+                if (line[0] == '[') { char *c2 = line + 1; while (*c2 == ' ') c2++; in = !_strnicmp(c2, "plugins", 7) && (c2[7] == ']' || c2[7] == ' '); continue; }
+                if (!in) continue;
+                char *eq = strchr(line, '=');
+                if (!eq) { if (bn < sizeof bad - 30) bn += (size_t)snprintf(bad + bn, sizeof bad - bn, "%s%.24s", bn ? "," : "", line); nb++; continue; }
+                char key[64]; size_t kl = (size_t)(eq - line); while (kl && (line[kl - 1] == ' ' || line[kl - 1] == '\t')) kl--;
+                if (kl >= sizeof key) kl = sizeof key - 1;
+                memcpy(key, line, kl); key[kl] = 0;
+                char *v = eq + 1; while (*v == ' ' || *v == '\t') v++;
+                int on = !(!_stricmp(v, "0") || !_stricmp(v, "off") || !_stricmp(v, "no") || !_stricmp(v, "false"));
+                wchar_t wk[64], dp[MAX_PATH * 2]; utf8_to_w(key, wk, 64);
+                _snwprintf(dp, MAX_PATH * 2, L"%s\\v3x\\plugins\\%s.dll", s->bin, wk);
+                int has = file_exists(dp);
+                if (!has && !plugin_known(key)) { if (un < sizeof unk - 40) un += (size_t)snprintf(unk + un, sizeof unk - un, "%s%s", un ? "," : "", key); nu++; }
+                else if (!has && on) { if (mn < sizeof miss - 40) mn += (size_t)snprintf(miss + mn, sizeof miss - mn, "%s%s", mn ? "," : "", key); nm++; }
+            }
+            free(b);
+            int lv = nm ? DR_PROBLEM : (nu || nb) ? DR_WARN : DR_OK;
+            c = dr_add("D014", "ini_syntax", lv,
+                       nm ? L"Choose Repair to bring the plugin files back, or set those plugins to 0 in binaries\\v3x\\v3x.ini."
+                          : lv ? L"Check the spelling in binaries\\v3x\\v3x.ini under [plugins]: one line per plugin, like keep_history=1." : NULL,
+                       nm ? L"Escolha Reparar para trazer os arquivos dos plugins de volta, ou ponha esses plugins em 0 no binaries\\v3x\\v3x.ini."
+                          : lv ? L"Confira a escrita no binaries\\v3x\\v3x.ini em [plugins]: uma linha por plugin, como keep_history=1." : NULL);
+            if (nm) g_dr_repair = 1;
+            if (lv == DR_OK) { wcscpy(c->msg_en, L"v3x.ini looks fine."); wcscpy(c->msg_pt, L"O v3x.ini parece certo."); }
+            else {
+                _snwprintf(c->msg_en, 400, L"v3x.ini: %d plugin(s) turned on but their file is missing (%hs), %d unknown name(s) (%hs), %d line(s) without '=' (%hs).",
+                           nm, nm ? miss : "-", nu, nu ? unk : "-", nb, nb ? bad : "-");
+                _snwprintf(c->msg_pt, 400, L"v3x.ini: %d plugin(s) ligado(s) sem o arquivo (%hs), %d nome(s) desconhecido(s) (%hs), %d linha(s) sem '=' (%hs).",
+                           nm, nm ? miss : "-", nu, nu ? unk : "-", nb, nb ? bad : "-");
+            }
+            snprintf(c->detail, 400, "enabled_missing=%s unknown=%s no_equals=%d", nm ? miss : "none", nu ? unk : "none", nb);
+        }
+    }
+
+    /* D015 game running (offline only) */
+    c = dr_add("D015", "game_running", running ? DR_WARN : DR_OK,
+               running ? L"Close the game before Repair, Update or Uninstall." : NULL,
+               running ? L"Feche o jogo antes de Reparar, Atualizar ou Desinstalar." : NULL);
+    wcscpy(c->msg_en, running ? L"Victoria 3 is running from this folder." : L"Victoria 3 is not running.");
+    wcscpy(c->msg_pt, running ? L"O Victoria 3 está aberto a partir desta pasta." : L"O Victoria 3 não está aberto.");
+    snprintf(c->detail, 400, "running=%d", running);
+}
+
+static const wchar_t *dr_word(int lv) { return lv == DR_OK ? L"OK" : lv == DR_WARN ? L"WARN" : L"PROBLEM"; }
+static const wchar_t *dr_word_tr(int lv) { return lv == DR_OK ? L"OK" : lv == DR_WARN ? TR(L"WARN", L"AVISO") : TR(L"PROBLEM", L"PROBLEMA"); }
+
+static int dr_problems(void)
+{
+    int n = 0;
+    for (int i = 0; i < g_ndr; i++) n += g_dr[i].level == DR_PROBLEM;
+    return n;
+}
+
+/* --doctor: English human lines + machine lines on stdout, doctor_offline.txt; returns #PROBLEMs */
+static int do_doctor(State *s)
+{
+    do_doctor_checks(s);
+    say(L"V3X doctor (offline), V3X-Setup %hs, game folder %s", g_version, s->game);
+    for (int i = 0; i < g_ndr; i++) {
+        DrCheck *c = &g_dr[i];
+        say(L"%-7s %s%s%s", dr_word(c->level), c->msg_en, c->todo_en ? L"  What to do: " : L"", c->todo_en ? c->todo_en : L"");
+    }
+    for (int i = 0; i < g_ndr; i++)
+        say(L"doctor: %hs %hs %s %hs", g_dr[i].id, g_dr[i].name, dr_word(g_dr[i].level), g_dr[i].detail);
+    int np = dr_problems();
+    int nw = 0;
+    for (int i = 0; i < g_ndr; i++) nw += g_dr[i].level == DR_WARN;
+    say(L"doctor: result problems=%d warnings=%d repair=%d", np, nw, g_dr_repair);
+    wchar_t dir[MAX_PATH * 2], rp[MAX_PATH * 2];
+    join(dir, s->bin, L"v3x");
+    if (dir_exists(dir) && g_out) {
+        join(rp, dir, L"doctor_offline.txt");
+        int n = WideCharToMultiByte(CP_UTF8, 0, g_out, (int)g_out_n, NULL, 0, NULL, NULL);
+        char *u = malloc((size_t)n + 1);
+        if (u) { WideCharToMultiByte(CP_UTF8, 0, g_out, (int)g_out_n, u, n, NULL, NULL); write_all(rp, u, (size_t)n); free(u); }
+    }
+    return np;
+}
+
 /* ------------------------------------------------------------------ GUI */
 
 static const wchar_t *TITLE = L"V3X Setup";
 static wchar_t g_title_ver[128];
-
-/* GUI language: 1 = Portuguese (pt-BR wording), 0 = English */
-static int g_pt;
-#define TR(en, pt) (g_pt ? (pt) : (en))
-
-static void pick_language(void)
-{
-    char v[16]; DWORD n = GetEnvironmentVariableA("V3X_LANG", v, sizeof v);
-    if (n && n < sizeof v) { g_pt = !_strnicmp(v, "pt", 2); return; }
-    g_pt = PRIMARYLANGID(GetUserDefaultUILanguage()) == LANG_PORTUGUESE;
-}
 
 static int pick_folder(HWND owner, wchar_t *out)
 {
@@ -969,13 +1288,16 @@ static int gui(const wchar_t *game_arg)
                    en + dis, en, dis);
         _snwprintf(rep, 256, L"%s", TR(L"Repair / update V3X\nRe-copies missing or changed V3X files. Your settings stay as they are.",
                                        L"Reparar / atualizar o V3X\nCopia de novo os arquivos do V3X que faltam ou mudaram. Suas configurações ficam como estão."));
-        TASKDIALOG_BUTTON b[4]; int nb = 0;
+        TASKDIALOG_BUTTON b[5]; int nb = 0;
         b[nb].nButtonID = 100; b[nb++].pszButtonText = s.installed ? rep : inst;
         if (s.installed) {
             b[nb].nButtonID = 102;
             b[nb++].pszButtonText = TR(L"Uninstall V3X\nRemoves V3X's files and restores what was there before.",
                                        L"Desinstalar o V3X\nRemove os arquivos do V3X e põe de volta o que havia antes.");
         }
+        b[nb].nButtonID = 104;
+        b[nb++].pszButtonText = TR(L"Check my install\nLooks for missing files, conflicts and other problems. Changes nothing.",
+                                   L"Verificar instalação\nProcura arquivos faltando, conflitos e outros problemas. Não muda nada.");
         b[nb].nButtonID = 103; b[nb++].pszButtonText = TR(L"Choose another game folder...", L"Escolher outra pasta do jogo...");
         int btn = task(NULL, s.supported ? TD_INFORMATION_ICON : TD_WARNING_ICON,
                        s.installed ? TR(L"V3X is installed", L"O V3X está instalado")
@@ -983,6 +1305,27 @@ static int gui(const wchar_t *game_arg)
                        content, b, nb, 100, NULL, NULL,
                        NULL, SP_NOTE, TDCBF_CLOSE_BUTTON);
         if (btn == 103) { wchar_t g2[MAX_PATH * 2]; if (pick_folder(NULL, g2)) wcscpy(game, g2); continue; }
+        if (btn == 104) {
+            g_out_n = 0; if (g_out) g_out[0] = 0;
+            int np = do_doctor(&s);   /* fills g_dr, writes doctor_offline.txt */
+            static wchar_t body[8192]; size_t k = 0; body[0] = 0;
+            for (int i = 0; i < g_ndr && k < 8000; i++) {
+                DrCheck *c = &g_dr[i];
+                const wchar_t *todo = g_pt ? c->todo_pt : c->todo_en;
+                k += (size_t)_snwprintf(body + k, 8192 - k, L"%s%s: %s%s%s", k ? L"\n\n" : L"", dr_word_tr(c->level),
+                                        g_pt ? c->msg_pt : c->msg_en, todo ? TR(L"\n    What to do: ", L"\n    O que fazer: ") : L"",
+                                        todo ? todo : L"");
+            }
+            wchar_t head[128];
+            if (np) _snwprintf(head, 128, TR(L"%d problem(s) found", L"%d problema(s) encontrado(s)"), np);
+            else _snwprintf(head, 128, L"%s", TR(L"No problems found", L"Nenhum problema encontrado"));
+            TASKDIALOG_BUTTON rb[] = {{105, TR(L"Repair now\nCopies missing or damaged V3X files back.",
+                                               L"Reparar agora\nCopia de volta os arquivos do V3X que faltam ou estão danificados.")}};
+            int r = task(NULL, np ? TD_WARNING_ICON : TD_INFORMATION_ICON, head, body, rb, g_dr_repair ? 1 : 0, 0,
+                         NULL, NULL, NULL, NULL, TDCBF_CLOSE_BUTTON);
+            if (r != 105) continue;
+            btn = 100;   /* Repair */
+        }
         if (btn != 100 && btn != 102) return RC_OK;
         if (game_running(game)) {
             task(NULL, TD_WARNING_ICON, TR(L"Victoria 3 is running", L"O Victoria 3 está aberto"),
@@ -1057,7 +1400,7 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE prev, PWSTR cmdline, int show)
     wchar_t **argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     pick_language();
     const wchar_t *game_arg = NULL;
-    int uninstall = 0, purge = 0, force = 0, status = 0, update = 0;
+    int uninstall = 0, purge = 0, force = 0, status = 0, update = 0, doctor = 0;
     DWORD wait_pid = 0;
     for (int i = 1; i < argc; i++) {
         if (!wcscmp(argv[i], L"--silent")) g_silent = 1;
@@ -1068,16 +1411,17 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE prev, PWSTR cmdline, int show)
         else if (!wcscmp(argv[i], L"--status")) { status = 1; g_silent = 1; }
         else if (!wcscmp(argv[i], L"--game-dir") && i + 1 < argc) game_arg = argv[++i];
         else if (!wcscmp(argv[i], L"--update")) { update = 1; g_silent = 1; }
+        else if (!wcscmp(argv[i], L"--doctor")) { doctor = 1; g_silent = 1; }
         else if (!wcscmp(argv[i], L"--wait-pid") && i + 1 < argc && (wait_pid = wcstoul(argv[i + 1], NULL, 10)) != 0) i++;
         else {
             g_silent = 1;
             say(L"usage: V3X-Setup.exe [--silent] [--game-dir <Victoria 3 folder>] [--install|--repair|--uninstall [--purge]] [--force] [--status]"
-                L" [--wait-pid <pid>] [--update]");
+                L" [--wait-pid <pid>] [--update] [--doctor]");
             flush_stdout();
             return RC_USAGE;
         }
     }
-    if (update) { uninstall = 0; force = 0; status = 0; g_defer_log = 1; }
+    if (update) { uninstall = 0; force = 0; status = 0; doctor = 0; g_defer_log = 1; }
     if (!load_payload()) {
         if (update) {   /* still leave a result line where the updater looks for it */
             wchar_t game[MAX_PATH * 2], bin[MAX_PATH * 2];
@@ -1098,7 +1442,10 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE prev, PWSTR cmdline, int show)
         /* the updater starts us and then the game exits: wait for it (version.dll is locked while it runs) */
         HANDLE ph = OpenProcess(SYNCHRONIZE, FALSE, wait_pid);
         if (ph) {
-            DWORD w = WaitForSingleObject(ph, 600000);
+            DWORD ms = 600000;   /* 10 min; env V3X_WAIT_TIMEOUT_SEC shortens it (tests) */
+            char tv[16]; DWORD tn = GetEnvironmentVariableA("V3X_WAIT_TIMEOUT_SEC", tv, sizeof tv);
+            if (tn && tn < sizeof tv && atoi(tv) > 0) ms = (DWORD)atoi(tv) * 1000;
+            DWORD w = WaitForSingleObject(ph, ms);
             CloseHandle(ph);
             if (w != WAIT_OBJECT_0) {
                 if (!g_silent) {
@@ -1106,7 +1453,7 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE prev, PWSTR cmdline, int show)
                                          L"O Victoria 3 não fechou em 10 minutos. Nada foi alterado."), TITLE, MB_OK | MB_ICONWARNING);
                     return RC_RUNNING;
                 }
-                say(L"process %lu did not exit within 600 s. Nothing was changed.", (unsigned long)wait_pid);
+                say(L"process %lu did not exit within %lu s. Nothing was changed.", (unsigned long)wait_pid, (unsigned long)(ms / 1000));
                 wchar_t game[MAX_PATH * 2], bin[MAX_PATH * 2];
                 if (update) {
                     say(L"update-result: failed code=%d timeout", RC_RUNNING);
@@ -1133,6 +1480,7 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE prev, PWSTR cmdline, int show)
     State s; state_read(&s, game);
     int rc = RC_OK;
     if (status) do_status(&s);
+    else if (doctor) rc = do_doctor(&s);
     else {
         say(L"V3X-Setup %hs: %s %s (game %hs, build %hs)", g_version, uninstall ? L"uninstall from" : L"install into",
             s.game, s.branch, s.build);

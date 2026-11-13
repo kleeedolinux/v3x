@@ -44,3 +44,7 @@ devconsole       -  reverse-engineering commands (disassembly, memory scans)
 devbridge        -  named pipe for the developer MCP server (local tool access to the console)
 tick_profiler    -  per-tick-task timing for developers
 alloc_tracker    -  allocation tracker, heavy overhead (periodic report = ~0.55 s frame stalls)
+
+# --- not shipped yet: in progress (ship / on-off decision pending with the CTO; test_installer.py PENDING)
+updater          -  in-game auto-update (worker updater, in progress); needs a release with compat.json first
+doctor           -  in-game doctor (worker doctor, in progress); same check ids as V3X-Setup --doctor

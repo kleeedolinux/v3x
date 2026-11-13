@@ -1,5 +1,6 @@
 # On a tag v* (for example v0.5.0): the same build and tests as ci.yml, then a GitHub Release with
-# V3X-Setup.exe, v3x-<version>.zip, install.ps1 and SHA256SUMS.txt.
+# V3X-Setup.exe, v3x-<version>.zip, install.ps1, compat.json (read by the in-game updater:
+# releases/latest/download/compat.json) and SHA256SUMS.txt.
 # "irm https://github.com/kleeedolinux/v3x/releases/latest/download/install.ps1 | iex" and install.ps1's
 # own download use the latest release, so a tag with a '-' (v0.6.0-rc1) is published as a prerelease
 # and does not become "latest".
@@ -67,7 +68,8 @@ jobs:
       - name: Check release files
         working-directory: build/dist
         run: |
-          ls -l V3X-Setup.exe "v3x-${{ steps.ver.outputs.version }}.zip" install.ps1 SHA256SUMS.txt
+          ls -l V3X-Setup.exe "v3x-${{ steps.ver.outputs.version }}.zip" install.ps1 compat.json SHA256SUMS.txt
+          python -c "import json; d=json.load(open('compat.json', encoding='utf-8')); print(d); assert d['schema'] == 1 and d['v3x_version'] == '${{ steps.ver.outputs.version }}' and d['game_builds']"
           sha256sum -c SHA256SUMS.txt
           cat SHA256SUMS.txt
 
@@ -79,12 +81,12 @@ jobs:
           PRE: ${{ steps.ver.outputs.prerelease }}
         working-directory: build/dist
         run: |
-          files=(V3X-Setup.exe "v3x-${VER}.zip" install.ps1 SHA256SUMS.txt)
+          files=(V3X-Setup.exe "v3x-${VER}.zip" install.ps1 compat.json SHA256SUMS.txt)
           if gh release view "$TAG" > /dev/null 2>&1; then
             gh release upload "$TAG" "${files[@]}" --clobber
           else
             notes="Install (Windows, no admin): close Victoria 3, open PowerShell and run
-          \`irm https://v3x.pages.dev/install.ps1 | iex\`
+          \`irm https://v3extender.pages.dev/install.ps1 | iex\`
           or download and run V3X-Setup.exe. Player guide: https://github.com/${GITHUB_REPOSITORY}/blob/${TAG}/docs/install.md
           Check the files with SHA256SUMS.txt. Single player only."
             gh release create "$TAG" "${files[@]}" --verify-tag --title "V3X ${VER}" --notes "$notes" --generate-notes $PRE

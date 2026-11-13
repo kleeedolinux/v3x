@@ -125,7 +125,8 @@ t par_load "$CC -Isdk -o $T/plt.exe test/par_load_test.c && $T/plt.exe $EXE"
 t mod_loader "$CC -o $T/mlt.exe test/mod_loader_test.c && $T/mlt.exe $EXE"
 t loc_fallback "rm -rf $T/lf && mkdir -p $T/lf && $CC -Isdk -o $T/lft2.exe test/loc_fallback_test.c && $T/lft2.exe $T/lf"
 [[ -f test/script_ext_test.c ]] && t script_ext "rm -rf $T/sx && mkdir -p $T/sx && $CC -Isdk -o $T/sxt.exe test/script_ext_test.c && $T/sxt.exe $T/sx $EXE"
-[[ -f test/ai_par_test.c && -f plugins/ai_par/ai_par.c ]] && t ai_par "$CC -Isdk -o $T/aipar.exe test/ai_par_test.c && $T/aipar.exe ${EXE:-} $T/"
+[[ -n $EXE && -f test/ai_par_test.c && -f plugins/ai_par/ai_par.c ]] && t ai_par "$CC -Isdk -o $T/aipar.exe test/ai_par_test.c && $T/aipar.exe ${EXE:-} $T/"
+t updater "D=$T/upd; rm -rf \$D; mkdir -p \$D/binaries/v3x/plugins && cp build/version.dll \$D/binaries/ && cp build/plugins/updater.dll \$D/binaries/v3x/plugins/ && $CC -DUPDATER_CHILD -o \$D/binaries/upd_child.exe test/updater_test.c -Lbuild -l:version.dll && $CC -o $T/updt.exe test/updater_test.c -lshell32 && $T/updt.exe \$D"
 
 # ---- end-to-end (link build/version.dll like victoria3.exe)
 t harness "e2e harness test/harness.c ironman_console && cd $T/harness && V3X_NO_CONSOLE=1 ./harness.exe"

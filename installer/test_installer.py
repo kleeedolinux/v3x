@@ -16,6 +16,7 @@ import shutil
 import struct
 import subprocess
 import sys
+import threading
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -62,6 +63,8 @@ def make_game(root, case, header, branch="release/1.15.1"):
 # tools; only these are on. Keep in sync with profile.txt.
 EXPECT_ON = {"crash_logger", "content_packs", "mod_menu", "script_ext"}
 EXPECT_UNSHIPPED = {"devtools", "devbridge", "devconsole", "tick_profiler", "hello", "alloc_tracker"}
+# plugins still being built (profile line "-" or 0 until the CTO decides): allowed either way
+PENDING = {"updater", "doctor"}
 
 
 def synthetic_header():
@@ -119,14 +122,15 @@ def main():
     # profile policy: every plugin in plugins/ except the developer tools is shipped; only EXPECT_ON is on
     all_plugins = {d for d in os.listdir(os.path.join(REPO, "plugins")) if os.path.isdir(os.path.join(REPO, "plugins", d))}
     shipped = {os.path.basename(r)[:-4] for r, _ in bins if r.startswith("v3x/plugins/")}
-    check("profile: shipped = every plugin except the developer tools", shipped == all_plugins - EXPECT_UNSHIPPED,
-          "extra %s missing %s" % (sorted(shipped - (all_plugins - EXPECT_UNSHIPPED)), sorted((all_plugins - EXPECT_UNSHIPPED) - shipped)))
+    want = all_plugins - EXPECT_UNSHIPPED - PENDING
+    check("profile: shipped = every plugin except the developer tools", want <= shipped <= want | PENDING,
+          "extra %s missing %s" % (sorted(shipped - want - PENDING), sorted(want - shipped)))
     check("profile: no developer tool shipped", not (shipped & EXPECT_UNSHIPPED), str(sorted(shipped & EXPECT_UNSHIPPED)))
     kv = dict(l.strip().split("=", 1) for l in v3xini.splitlines() if "=" in l and not l.startswith("#") and l.split("=")[0] in shipped)
     check("profile: v3x.ini has a line for every shipped plugin", set(kv) == shipped, str(sorted(shipped - set(kv))))
     check("profile: on = exactly crash_logger content_packs mod_menu script_ext",
-          {n for n, v in kv.items() if v == "1"} == EXPECT_ON, str(sorted(n for n, v in kv.items() if v == "1")))
-    check("profile: every other shipped plugin is off (=0)", all(kv[n] == "0" for n in shipped - EXPECT_ON))
+          {n for n, v in kv.items() if v == "1"} - PENDING == EXPECT_ON, str(sorted(n for n, v in kv.items() if v == "1")))
+    check("profile: every other shipped plugin is off (=0)", all(kv[n] == "0" for n in shipped - EXPECT_ON - PENDING))
     check("profile: keep_history and fast_load ship off", kv.get("keep_history") == "0" and kv.get("fast_load") == "0")
     check("fresh install: no backup (no previous version.dll)", "backup " not in mtxt)
     rc, out = run(exe, "--status", "--game-dir", g)
@@ -269,6 +273,110 @@ def main():
     check("bad usage: rc=7", rc == 7, out)
     rc, out = run(exe, "--status", "--game-dir", os.path.join(g, "binaries"))
     check("game dir given as binaries folder is accepted", rc == 0 and "game folder:" in out, out)
+
+    # 11. --update (in-game updater) + --wait-pid
+    def lastlog(gd):
+        lp = os.path.join(gd, "binaries", "v3x", "install.log")
+        return open(lp, encoding="utf-8").read().strip().splitlines()[-1] if os.path.isfile(lp) else ""
+    g7 = make_game(root, "update", header)
+    B7 = os.path.join(g7, "binaries")
+    rc, out = run(exe, "--game-dir", g7)
+    fp7 = os.path.join(B7, "v3x", "frame_pacer.ini")
+    open(fp7, "a").write("\nidle_fps=9\n")
+    user7 = open(fp7, "rb").read()
+    os.remove(os.path.join(B7, "v3x", "plugins", "keep_history.dll"))
+    waiter = subprocess.Popen([sl_exe])        # the "game" that the updater waits for (any exe works)
+    killer = threading.Timer(2.0, waiter.kill)
+    killer.start()
+    t0 = time.time()
+    try:
+        p = subprocess.run([exe, "--update", "--silent", "--game-dir", B7, "--wait-pid", str(waiter.pid)],
+                           capture_output=True, timeout=120)
+    finally:
+        killer.cancel(); waiter.kill(); waiter.wait()
+    took = time.time() - t0
+    out = p.stdout.decode("utf-8", "replace")
+    check("update: --wait-pid waited for the process to exit (>= 1.5 s)", took >= 1.5, "%.2f s" % took)
+    check("update: rc=0, deleted plugin restored, user ini kept", p.returncode == 0 and os.path.isfile(os.path.join(B7, "v3x", "plugins", "keep_history.dll"))
+          and open(fp7, "rb").read() == user7, out)
+    check("update: install.log last line 'update-result: ok version=...'", lastlog(g7).startswith("update-result: ok version="), lastlog(g7))
+    rc = subprocess.run([exe, "--update", "--game-dir", g7, "--wait-pid", "4000000000"], capture_output=True, timeout=120).returncode
+    check("update: --wait-pid of a process that is gone does not wait, rc=0", rc == 0)
+    waiter = subprocess.Popen([sl_exe])
+    try:
+        env = dict(os.environ, V3X_WAIT_TIMEOUT_SEC="1")
+        p = subprocess.run([exe, "--update", "--game-dir", g7, "--wait-pid", str(waiter.pid)], capture_output=True, timeout=120, env=env)
+    finally:
+        waiter.kill(); waiter.wait()
+    check("update: wait timeout -> rc=1, 'update-result: failed code=3 timeout'", p.returncode == 1 and lastlog(g7) == "update-result: failed code=3 timeout",
+          lastlog(g7) + p.stdout.decode("utf-8", "replace"))
+    rc = subprocess.run([exe, "--update", "--game-dir", g4], capture_output=True, timeout=120).returncode   # g4: --force installed, unsupported
+    check("update: unsupported build -> rc=1, never forced, 'failed code=2 unsupported'", rc == 1 and lastlog(g4) == "update-result: failed code=2 unsupported", lastlog(g4))
+    proc = subprocess.Popen([os.path.join(g5, "binaries", "victoria3.exe")])
+    time.sleep(0.5)
+    try:
+        p = subprocess.run([exe, "--update", "--game-dir", g5], capture_output=True, timeout=120)
+    finally:
+        proc.kill(); proc.wait()
+    check("update: game running -> rc=1", p.returncode == 1 and "update-result: failed code=3 running" in p.stdout.decode("utf-8", "replace"))
+
+    # 12. --doctor (offline checks; ids shared with plugins/doctor)
+    def doctor(gd):
+        p = subprocess.run([exe, "--doctor", "--game-dir", gd], capture_output=True, timeout=120)
+        o = p.stdout.decode("utf-8", "replace")
+        m = {}
+        for l in o.splitlines():
+            q = l.split(None, 4)
+            if len(q) >= 4 and q[0] == "doctor:" and q[1].startswith("D"):
+                m[q[1]] = (q[3], q[4] if len(q) > 4 else "")
+        return p.returncode, o, m
+    g8 = make_game(root, "doctor", header)
+    B8 = os.path.join(g8, "binaries")
+    rc, out, m = doctor(g8)
+    check("doctor: not installed -> D002 PROBLEM, rc = number of PROBLEMs", m.get("D002", ("",))[0] == "PROBLEM"
+          and rc == sum(v[0] == "PROBLEM" for v in m.values()), out)
+    run(exe, "--game-dir", g8)
+    rc, out, m = doctor(g8)
+    ids = ["D001", "D002", "D003", "D009", "D010", "D012", "D013", "D014", "D015"]
+    check("doctor: every offline check reports (D001 D002 D003 D009 D010 D012 D013 D014 D015)", all(i in m for i in ids), out)
+    check("doctor: clean install -> D001/D002/D003/D012/D013/D014/D015 OK", all(m[i][0] == "OK" for i in ["D001", "D002", "D003", "D012", "D013", "D014", "D015"]), out)
+    check("doctor: rc = number of PROBLEMs (disk/pagefile may vary)", rc == sum(v[0] == "PROBLEM" for v in m.values()), out)
+    check("doctor: human lines have 'What to do' for non-OK and a result line",
+          "doctor: result problems=" in out and all(("What to do:" in l) for l in out.splitlines() if l.startswith(("WARN", "PROBLEM"))), out)
+    check("doctor: writes binaries\\v3x\\doctor_offline.txt", os.path.isfile(os.path.join(B8, "v3x", "doctor_offline.txt")))
+    pl8 = os.path.join(B8, "v3x", "plugins")
+    os.remove(os.path.join(pl8, "log_filter.dll"))
+    open(os.path.join(pl8, "frame_pacer.dll"), "wb").write(b"junk")
+    open(os.path.join(B8, "dxgi.dll"), "wb").write(b"MZ overlay")
+    open(os.path.join(B8, "v3x", "loading.marker"), "w").write("keep_history")
+    open(os.path.join(B8, "v3x", "crash.log"), "w").write("crash_logger started\nUNHANDLED EXCEPTION 0xc0000005 at fake_mod.dll+0x1234 - process is going down\n")
+    vi8 = os.path.join(B8, "v3x", "v3x.ini")
+    open(vi8, "a").write("bogus_plugin=1\nthis line is wrong\nlog_filter=1\n")
+    rc, out, m = doctor(g8)
+    check("doctor: missing + damaged plugin -> D002 PROBLEM naming both, repair=1",
+          m["D002"][0] == "PROBLEM" and "missing=1" in m["D002"][1] and "changed=1" in m["D002"][1] and "repair=1" in out, out)
+    check("doctor: dxgi.dll next to the exe -> D003 WARN", m["D003"][0] == "WARN" and "dxgi.dll" in m["D003"][1], out)
+    check("doctor: loading.marker -> D012 PROBLEM plugin=keep_history", m["D012"] == ("PROBLEM", "plugin=keep_history"), str(m.get("D012")))
+    check("doctor: crash.log -> D013 WARN module=fake_mod.dll", m["D013"][0] == "WARN" and "module=fake_mod.dll" in m["D013"][1], str(m.get("D013")))
+    check("doctor: v3x.ini log_filter=1 without DLL -> D014 PROBLEM; unknown name + line without '=' reported",
+          m["D014"][0] == "PROBLEM" and "enabled_missing=log_filter" in m["D014"][1] and "unknown=bogus_plugin" in m["D014"][1]
+          and "no_equals=1" in m["D014"][1], str(m.get("D014")))
+    check("doctor: rc = 3 PROBLEMs here (+ disk/pagefile if any)", rc == sum(v[0] == "PROBLEM" for v in m.values()) and rc >= 3, out)
+    check("doctor: changes nothing (marker still there, plugin still missing)",
+          os.path.isfile(os.path.join(B8, "v3x", "loading.marker")) and not os.path.exists(os.path.join(pl8, "log_filter.dll")))
+    run(exe, "--repair", "--game-dir", g8)
+    rc, out, m = doctor(g8)
+    check("doctor: after Repair D002 OK and D014 has no missing DLL", m["D002"][0] == "OK" and "enabled_missing=none" in m["D014"][1], out)
+    open(os.path.join(B8, "version.dll"), "wb").write(b"MZ another proxy")
+    rc, out, m = doctor(g8)
+    check("doctor: foreign version.dll -> D003 PROBLEM", m["D003"][0] == "PROBLEM" and "version.dll(not V3X)" in m["D003"][1], out)
+    proc = subprocess.Popen([os.path.join(g5, "binaries", "victoria3.exe")])
+    time.sleep(0.5)
+    try:
+        rc, out, m = doctor(g5)
+    finally:
+        proc.kill(); proc.wait()
+    check("doctor: game running -> D015 WARN", m.get("D015", ("",))[0] == "WARN", out)
 
     fails = [n for n, ok in RESULTS if not ok]
     print("\n%d/%d passed%s" % (len(RESULTS) - len(fails), len(RESULTS), "" if not fails else "; FAILED: " + "; ".join(fails)))

@@ -66,6 +66,7 @@ jobs:
             build/dist/V3X-Setup.exe
             build/dist/v3x-*.zip
             build/dist/install.ps1
+            build/dist/compat.json
             build/dist/SHA256SUMS.txt
           if-no-files-found: error
           retention-days: 30

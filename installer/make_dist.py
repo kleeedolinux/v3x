@@ -9,7 +9,9 @@
 
 Outputs in --out: V3X-Setup.exe, v3x-<version>.zip (the same files for a manual install: copy into
 the game's binaries folder; + install.ps1 + README.txt), install.ps1 (the one-line installer) and
-SHA256SUMS.txt (all three). install.ps1 checks V3X-Setup.exe against SHA256SUMS.txt.
+SHA256SUMS.txt (all four), and compat.json (version, loader API, supported game builds from
+installer/builds.txt, asset names + SHA-256) for the in-game updater. install.ps1 checks
+V3X-Setup.exe against SHA256SUMS.txt.
 
 Steps: ./build.sh (loader + every plugin into build/), compile installer/setup.c with zig into a
 stub exe, then append the payload: build/version.dll, the plugins marked 1 or 0 in
@@ -21,6 +23,7 @@ Exit code 0 = built, 1 = error.
 import argparse
 import datetime
 import hashlib
+import json
 import os
 import shlex
 import shutil
@@ -77,6 +80,35 @@ def v3x_ini(prof):
     return ("\r\n".join(lines) + "\r\n").encode("utf-8")
 
 
+def read_define(rel, name):
+    """value of '#define <name> <value>' in a repo source file (quotes stripped)"""
+    for line in open(os.path.join(REPO, rel), encoding="utf-8"):
+        p = line.split()
+        if len(p) >= 3 and p[0] == "#define" and p[1] == name:
+            return p[2].strip('"')
+    die("%s: #define %s not found" % (rel, name))
+
+
+def compat_json(version, builds, out_dir, names):
+    """compat.json release asset for the in-game updater (plugins/updater; format agreed in mem chat
+    #4420/#4425): what this release supports. game_builds come from installer/builds.txt (the single
+    source of truth, also used by V3X-Setup.exe); build_id is the same string as the loader's
+    api->game_build_id(). UTF-8, no BOM."""
+    assets = []
+    for n in names:
+        data = open(os.path.join(out_dir, n), "rb").read()
+        assets.append({"name": n, "size": len(data), "sha256": hashlib.sha256(data).hexdigest()})
+    doc = {
+        "schema": 1,
+        "v3x_version": version,
+        "loader_semver": read_define("src/core.c", "V3X_LOADER_SEMVER"),
+        "api_version": int(read_define("include/v3x.h", "V3X_API_VERSION")),
+        "game_builds": [{"branch": br, "build_id": bid} for bid, br in builds],
+        "assets": assets,
+    }
+    return json.dumps(doc, indent=2) + "\n"
+
+
 def zip_readme(version, prof):
     on = " ".join(n for n, e, _ in prof if e == "1")
     off = " ".join(n for n, e, _ in prof if e == "0")
@@ -84,7 +116,7 @@ def zip_readme(version, prof):
         "V3X %s for Victoria 3 1.15.1 - manual install" % version,
         "",
         "Easiest: use V3X-Setup.exe or the one-line installer instead (PowerShell):",
-        "    irm https://v3x.pages.dev/install.ps1 | iex",
+        "    irm https://v3extender.pages.dev/install.ps1 | iex",
         "",
         "Manual install: close Victoria 3, then copy version.dll and the v3x folder from this zip into",
         "    <Steam>\\steamapps\\common\\Victoria 3\\binaries",
@@ -203,12 +235,16 @@ def main():
     sums = [(digest, "V3X-Setup.exe")]
     for n in (zname, "install.ps1"):
         sums.append((hashlib.sha256(open(os.path.join(a.out, n), "rb").read()).hexdigest(), n))
+    compat = compat_json(a.version, builds, a.out, ["V3X-Setup.exe", zname, "install.ps1"])
+    with open(os.path.join(a.out, "compat.json"), "w", encoding="utf-8", newline="\n") as f:
+        f.write(compat)
+    sums.append((hashlib.sha256(compat.encode("utf-8")).hexdigest(), "compat.json"))
     with open(os.path.join(a.out, "SHA256SUMS.txt"), "w", newline="\n") as f:
         f.write("".join("%s  %s\n" % x for x in sums))
     on = [n for n, e, _ in prof if e == "1"]
     off = [n for n, e, _ in prof if e == "0"]
     print("make_dist: %s (%d bytes, version %s, sha256 %s)" % (out, len(blob), a.version, digest))
-    print("make_dist: %s, install.ps1, SHA256SUMS.txt" % os.path.join(a.out, zname))
+    print("make_dist: %s, install.ps1, compat.json, SHA256SUMS.txt" % os.path.join(a.out, zname))
     print("make_dist: on : " + " ".join(on))
     print("make_dist: off: " + " ".join(off))
     return 0

@@ -7,6 +7,10 @@
     --version VER  version shown by the installer (default: dev-YYYYMMDD)
     --cc "CMD"     compiler (default: env V3X_CC, else "<python> -m ziglang cc")
 
+Outputs in --out: V3X-Setup.exe, v3x-<version>.zip (the same files for a manual install: copy into
+the game's binaries folder; + install.ps1 + README.txt), install.ps1 (the one-line installer) and
+SHA256SUMS.txt (all three). install.ps1 checks V3X-Setup.exe against SHA256SUMS.txt.
+
 Steps: ./build.sh (loader + every plugin into build/), compile installer/setup.c with zig into a
 stub exe, then append the payload: build/version.dll, the plugins marked 1 or 0 in
 installer/profile.txt, their plugins/<p>/<p>.ini.example as v3x/<p>.ini, a generated v3x/v3x.ini
@@ -23,6 +27,7 @@ import shutil
 import struct
 import subprocess
 import sys
+import zipfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
@@ -70,6 +75,26 @@ def v3x_ini(prof):
     ]
     lines += ["%s=%s" % (n, e) for n, e, _ in prof if e in ("0", "1")]
     return ("\r\n".join(lines) + "\r\n").encode("utf-8")
+
+
+def zip_readme(version, prof):
+    on = " ".join(n for n, e, _ in prof if e == "1")
+    off = " ".join(n for n, e, _ in prof if e == "0")
+    return "\r\n".join([
+        "V3X %s for Victoria 3 1.15.1 - manual install" % version,
+        "",
+        "Easiest: use V3X-Setup.exe or the one-line installer instead (PowerShell):",
+        "    irm https://v3x.pages.dev/install.ps1 | iex",
+        "",
+        "Manual install: close Victoria 3, then copy version.dll and the v3x folder from this zip into",
+        "    <Steam>\\steamapps\\common\\Victoria 3\\binaries",
+        "Do not overwrite your own v3x\\*.ini files if you already have them.",
+        "Manual uninstall: delete binaries\\version.dll and the binaries\\v3x folder.",
+        "",
+        "On by default: " + on,
+        "Installed but off (turn on in the main menu > V3X button): " + off,
+        "Single player only. Help: https://github.com/kleeedolinux/v3x/blob/main/docs/install.md",
+        ""])
 
 
 def main():
@@ -155,11 +180,35 @@ def main():
     with open(out, "wb") as f:
         f.write(blob)
     digest = hashlib.sha256(blob).hexdigest()
+
+    # manual-install zip: the payload's files at their binaries/-relative paths + install.ps1 + README
+    ps1 = open(os.path.join(HERE, "install.ps1"), "rb").read()
+    for f in os.listdir(a.out):
+        if f.startswith("v3x-") and f.endswith(".zip"):
+            os.remove(os.path.join(a.out, f))
+    zname = "v3x-%s.zip" % a.version
+    with zipfile.ZipFile(os.path.join(a.out, zname), "w", zipfile.ZIP_DEFLATED) as z:
+        def add(rel, data):
+            zi = zipfile.ZipInfo(rel, date_time=(2020, 1, 1, 0, 0, 0))  # fixed time: same input, same zip
+            zi.compress_type = zipfile.ZIP_DEFLATED
+            zi.external_attr = 0o644 << 16
+            z.writestr(zi, data)
+        for kind, rel, data in files:
+            if kind != "meta":
+                add(rel, data)
+        add("install.ps1", ps1)
+        add("README.txt", zip_readme(a.version, prof).encode("utf-8"))
+    with open(os.path.join(a.out, "install.ps1"), "wb") as f:
+        f.write(ps1)
+    sums = [(digest, "V3X-Setup.exe")]
+    for n in (zname, "install.ps1"):
+        sums.append((hashlib.sha256(open(os.path.join(a.out, n), "rb").read()).hexdigest(), n))
     with open(os.path.join(a.out, "SHA256SUMS.txt"), "w", newline="\n") as f:
-        f.write("%s  V3X-Setup.exe\n" % digest)
+        f.write("".join("%s  %s\n" % x for x in sums))
     on = [n for n, e, _ in prof if e == "1"]
     off = [n for n, e, _ in prof if e == "0"]
     print("make_dist: %s (%d bytes, version %s, sha256 %s)" % (out, len(blob), a.version, digest))
+    print("make_dist: %s, install.ps1, SHA256SUMS.txt" % os.path.join(a.out, zname))
     print("make_dist: on : " + " ".join(on))
     print("make_dist: off: " + " ".join(off))
     return 0

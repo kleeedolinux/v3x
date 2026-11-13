@@ -1,11 +1,12 @@
 """End-to-end test of V3X-Setup.exe against fake game folders (never the real game).
 
     python installer/test_installer.py [--exe build/dist/V3X-Setup.exe] [--root D:/v3x_installer_test/run]
-                                       [--real-exe <game>/binaries/victoria3.exe] [--keep]
+                                       [--real-exe <game>/binaries/victoria3.exe] [--synthetic] [--keep]
 
 A fake game = <root>/<case>/Victoria 3/{caligula_branch.txt, binaries/victoria3.exe}, where the exe is
 the first 4 KB (PE headers only) of the real victoria3.exe, so its build id is the real one; the
-real exe is only read. The "game running" case compiles a sleeper with zig and starts it as the
+real exe is only read. Without the real exe (CI) a synthetic 4 KB PE header carrying the first build
+id of installer/builds.txt is used instead (--synthetic forces that). The "game running" case compiles a sleeper with zig and starts it as the
 fake folder's victoria3.exe. <root> is deleted at the end unless --keep. Exit 0 = all passed.
 """
 import argparse
@@ -57,11 +58,33 @@ def make_game(root, case, header, branch="release/1.15.1"):
     return g
 
 
+# installer/profile.txt policy (lead, 2026-11-13): everything is preinstalled except pure developer
+# tools; only these are on. Keep in sync with profile.txt.
+EXPECT_ON = {"crash_logger", "content_packs", "mod_menu", "script_ext"}
+EXPECT_UNSHIPPED = {"devtools", "devbridge", "devconsole", "tick_profiler", "hello", "alloc_tracker"}
+
+
+def synthetic_header():
+    """4 KB PE header whose TimeDateStamp-SizeOfImage is the first id in builds.txt (setup.c pe_build_id)"""
+    bid = next(l.split()[0] for l in open(os.path.join(HERE, "builds.txt")) if l.strip() and not l.startswith("#"))
+    ts, soi = (int(x, 16) for x in bid.split("-"))
+    h = bytearray(4096)
+    h[0:2] = b"MZ"
+    struct.pack_into("<I", h, 0x3c, 0x80)
+    h[0x80:0x84] = b"PE\0\0"
+    struct.pack_into("<HH", h, 0x84, 0x8664, 0)
+    struct.pack_into("<I", h, 0x88, ts)
+    struct.pack_into("<H", h, 0x80 + 24, 0x20b)
+    struct.pack_into("<I", h, 0x80 + 24 + 56, soi)
+    return bytes(h)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--exe", default=os.path.join(REPO, "build", "dist", "V3X-Setup.exe"))
     ap.add_argument("--root", default="D:/v3x_installer_test/run")
     ap.add_argument("--real-exe", default=os.path.join(os.path.dirname(REPO), "binaries", "victoria3.exe"))
+    ap.add_argument("--synthetic", action="store_true", help="use a synthetic PE header even if the real exe exists")
     ap.add_argument("--keep", action="store_true")
     a = ap.parse_args()
     exe = os.path.abspath(a.exe)
@@ -70,7 +93,11 @@ def main():
         sys.exit("refusing: --root must not be inside the game folder")
     shutil.rmtree(root, ignore_errors=True)
     os.makedirs(root)
-    header = open(a.real_exe, "rb").read(4096)
+    if a.synthetic or not os.path.isfile(a.real_exe):
+        print("note: using a synthetic victoria3.exe header (%s)" % ("--synthetic" if a.synthetic else "no " + a.real_exe))
+        header = synthetic_header()
+    else:
+        header = open(a.real_exe, "rb").read(4096)
     ents = payload(exe)
     bins = [(rel, h) for k, rel, h, _ in ents if k == "bin"]
     inis = [(rel, h) for k, rel, h, _ in ents if k in ("ini", "v3xini")]
@@ -89,6 +116,18 @@ def main():
     v3xini = open(os.path.join(B, "v3x", "v3x.ini")).read()
     check("fresh install: v3x.ini has console_plus=0 and crash_logger=1", "console_plus=0" in v3xini and "crash_logger=1" in v3xini)
     check("fresh install: no dev plugin shipped", not os.path.exists(os.path.join(B, "v3x", "plugins", "devtools.dll")))
+    # profile policy: every plugin in plugins/ except the developer tools is shipped; only EXPECT_ON is on
+    all_plugins = {d for d in os.listdir(os.path.join(REPO, "plugins")) if os.path.isdir(os.path.join(REPO, "plugins", d))}
+    shipped = {os.path.basename(r)[:-4] for r, _ in bins if r.startswith("v3x/plugins/")}
+    check("profile: shipped = every plugin except the developer tools", shipped == all_plugins - EXPECT_UNSHIPPED,
+          "extra %s missing %s" % (sorted(shipped - (all_plugins - EXPECT_UNSHIPPED)), sorted((all_plugins - EXPECT_UNSHIPPED) - shipped)))
+    check("profile: no developer tool shipped", not (shipped & EXPECT_UNSHIPPED), str(sorted(shipped & EXPECT_UNSHIPPED)))
+    kv = dict(l.strip().split("=", 1) for l in v3xini.splitlines() if "=" in l and not l.startswith("#") and l.split("=")[0] in shipped)
+    check("profile: v3x.ini has a line for every shipped plugin", set(kv) == shipped, str(sorted(shipped - set(kv))))
+    check("profile: on = exactly crash_logger content_packs mod_menu script_ext",
+          {n for n, v in kv.items() if v == "1"} == EXPECT_ON, str(sorted(n for n, v in kv.items() if v == "1")))
+    check("profile: every other shipped plugin is off (=0)", all(kv[n] == "0" for n in shipped - EXPECT_ON))
+    check("profile: keep_history and fast_load ship off", kv.get("keep_history") == "0" and kv.get("fast_load") == "0")
     check("fresh install: no backup (no previous version.dll)", "backup " not in mtxt)
     rc, out = run(exe, "--status", "--game-dir", g)
     check("status rc=0 and says installed + supported", rc == 0 and "installed:   V3X" in out and "- supported" in out, out)

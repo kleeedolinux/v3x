@@ -25,6 +25,14 @@
  *   --purge             with --uninstall: also delete binaries/v3x/ (logs, reports, settings)
  *   --force             install even if the game build is not supported
  *   --status            print what is installed, change nothing
+ *   --wait-pid <pid>    first wait (up to 10 min) for that process to exit; still running = exit 3
+ *   --update            for the in-game updater (plugins/updater): implies --silent, install/repair
+ *                       keeping every ini, never --force; exit code 0 = ok, 1 = anything else. The
+ *                       last line appended to binaries/v3x/install.log is
+ *                       "update-result: ok version=<ver>" or "update-result: failed code=<n> <reason>"
+ *                       (n = the exit codes below, reason = error|unsupported|running|timeout|nogame|payload)
+ * Language: the GUI is English or Brazilian Portuguese (GetUserDefaultUILanguage; env V3X_LANG=en|pt
+ *   overrides). --silent / --status output stays English so scripts and tests can parse it.
  * Exit codes: 0 ok, 1 error, 2 unsupported game build, 3 game running, 4 game not found,
  *   5 not installed (uninstall without manifest), 6 damaged payload, 7 usage. */
 #define WIN32_LEAN_AND_MEAN
@@ -57,6 +65,7 @@ enum { RC_OK = 0, RC_ERR = 1, RC_UNSUPPORTED = 2, RC_RUNNING = 3, RC_NOGAME = 4,
 
 static wchar_t *g_out; static size_t g_out_n, g_out_cap;
 static int g_silent;
+static int g_defer_log;   /* --update: main() writes install.log once, with the update-result line */
 
 static void say(const wchar_t *fmt, ...)
 {
@@ -627,6 +636,7 @@ static const char *supported_list(void)
 
 static void append_log(const wchar_t *bin)
 {
+    if (g_defer_log) return;
     wchar_t p[MAX_PATH * 2];
     join(p, bin, L"v3x\\install.log");
     HANDLE f = CreateFileW(p, FILE_APPEND_DATA, FILE_SHARE_READ, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
@@ -852,13 +862,26 @@ static void do_status(State *s)
 static const wchar_t *TITLE = L"V3X Setup";
 static wchar_t g_title_ver[128];
 
+/* GUI language: 1 = Portuguese (pt-BR wording), 0 = English */
+static int g_pt;
+#define TR(en, pt) (g_pt ? (pt) : (en))
+
+static void pick_language(void)
+{
+    char v[16]; DWORD n = GetEnvironmentVariableA("V3X_LANG", v, sizeof v);
+    if (n && n < sizeof v) { g_pt = !_strnicmp(v, "pt", 2); return; }
+    g_pt = PRIMARYLANGID(GetUserDefaultUILanguage()) == LANG_PORTUGUESE;
+}
+
 static int pick_folder(HWND owner, wchar_t *out)
 {
     for (;;) {
         BROWSEINFOW bi = {0};
         bi.hwndOwner = owner;
-        bi.lpszTitle = L"Select your \"Victoria 3\" game folder (the one that contains the \"binaries\" folder).\n"
-                       L"Steam: right-click Victoria 3 > Manage > Browse local files.";
+        bi.lpszTitle = TR(L"Select your \"Victoria 3\" game folder (the one that contains the \"binaries\" folder).\n"
+                          L"Steam: right-click Victoria 3 > Manage > Browse local files.",
+                          L"Escolha a pasta do jogo \"Victoria 3\" (a que tem a pasta \"binaries\").\n"
+                          L"Steam: clique com o botão direito em Victoria 3 > Gerenciar > Ver arquivos locais.");
         bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE | BIF_NONEWFOLDERBUTTON;
         PIDLIST_ABSOLUTE id = SHBrowseForFolderW(&bi);
         if (!id) return 0;
@@ -866,7 +889,8 @@ static int pick_folder(HWND owner, wchar_t *out)
         BOOL ok = SHGetPathFromIDListW(id, p);
         CoTaskMemFree(id);
         if (ok && normalize_game_dir(p, out)) return 1;
-        MessageBoxW(owner, L"That folder does not contain binaries\\victoria3.exe. Please choose the \"Victoria 3\" folder.",
+        MessageBoxW(owner, TR(L"That folder does not contain binaries\\victoria3.exe. Please choose the \"Victoria 3\" folder.",
+                              L"Essa pasta não tem binaries\\victoria3.exe. Escolha a pasta \"Victoria 3\"."),
                     TITLE, MB_OK | MB_ICONWARNING);
     }
 }
@@ -888,7 +912,8 @@ static int task(HWND owner, PCWSTR icon, const wchar_t *main, const wchar_t *con
     c.dwCommonButtons = common;
     c.pszVerificationText = verify;
     c.pszExpandedInformation = expanded;
-    c.pszExpandedControlText = L"Hide details"; c.pszCollapsedControlText = L"Show details";
+    c.pszExpandedControlText = TR(L"Hide details", L"Ocultar detalhes");
+    c.pszCollapsedControlText = TR(L"Show details", L"Mostrar detalhes");
     c.pszFooter = footer; c.pszFooterIcon = footer ? TD_INFORMATION_ICON : NULL;
     int btn = IDCANCEL;
     if (FAILED(TaskDialogIndirect(&c, &btn, NULL, verified))) {
@@ -899,9 +924,13 @@ static int task(HWND owner, PCWSTR icon, const wchar_t *main, const wchar_t *con
     return btn;
 }
 
-static const wchar_t *SP_NOTE =
+static const wchar_t *SP_NOTE_EN =
     L"V3X is for single player only. Do not use it in multiplayer: uninstall it first, or rename "
     L"binaries\\version.dll (for example to version.dll.off) to start the game without V3X.";
+static const wchar_t *SP_NOTE_PT =
+    L"O V3X é só para um jogador. Não use no multijogador: desinstale antes, ou renomeie "
+    L"binaries\\version.dll (por exemplo para version.dll.off) para abrir o jogo sem o V3X.";
+#define SP_NOTE TR(SP_NOTE_EN, SP_NOTE_PT)
 
 static int gui(const wchar_t *game_arg)
 {
@@ -912,9 +941,11 @@ static int gui(const wchar_t *game_arg)
     wchar_t game[MAX_PATH * 2] = L"";
     if (game_arg && !normalize_game_dir(game_arg, game)) game[0] = 0;
     if (!game[0] && !find_game(game)) {
-        TASKDIALOG_BUTTON b[] = {{100, L"Choose the game folder...\nUsually ...\\steamapps\\common\\Victoria 3"}};
-        if (task(NULL, TD_INFORMATION_ICON, L"Victoria 3 was not found automatically",
-                 L"Setup looked in your Steam libraries. Please show it where Victoria 3 is installed.", b, 1, 100,
+        TASKDIALOG_BUTTON b[] = {{100, TR(L"Choose the game folder...\nUsually ...\\steamapps\\common\\Victoria 3",
+                                          L"Escolher a pasta do jogo...\nNormalmente ...\\steamapps\\common\\Victoria 3")}};
+        if (task(NULL, TD_INFORMATION_ICON, TR(L"Victoria 3 was not found automatically", L"Não achei o Victoria 3 sozinho"),
+                 TR(L"Setup looked in your Steam libraries. Please show it where Victoria 3 is installed.",
+                    L"Procurei nas suas bibliotecas da Steam. Mostre onde o Victoria 3 está instalado."), b, 1, 100,
                  NULL, NULL, NULL, NULL, TDCBF_CANCEL_BUTTON) != 100 || !pick_folder(NULL, game))
             return RC_NOGAME;
     }
@@ -922,48 +953,70 @@ static int gui(const wchar_t *game_arg)
         State s; state_read(&s, game);
         wchar_t content[4096];
         _snwprintf(content, 4096,
-                   L"Game folder:\n%s\n\nGame version: %hs  (%s)\nV3X: %s%hs",
-                   s.game, s.branch, s.supported ? L"supported" : (s.branch_ok ? L"different build: not tested" : L"NOT supported"),
-                   s.installed ? L"installed, version " : L"not installed", s.installed ? s.mf.version : "");
+                   TR(L"Game folder:\n%s\n\nGame version: %hs  (%s)\nV3X: %s%hs",
+                      L"Pasta do jogo:\n%s\n\nVersão do jogo: %hs  (%s)\nV3X: %s%hs"),
+                   s.game, s.branch,
+                   s.supported ? TR(L"supported", L"compatível")
+                               : (s.branch_ok ? TR(L"different build: not tested", L"build diferente: não testado")
+                                              : TR(L"NOT supported", L"NÃO compatível")),
+                   s.installed ? TR(L"installed, version ", L"instalado, versão ") : TR(L"not installed", L"não instalado"),
+                   s.installed ? s.mf.version : "");
         int en = 0, dis = 0;
         for (int i = 0; i < g_nprof; i++) { if (g_prof[i].enabled) en++; else dis++; }
         wchar_t inst[256], rep[256];
-        _snwprintf(inst, 256, L"Install V3X\nAdds version.dll and %d plugins (%d on, %d off). No game file is changed.", en + dis, en, dis);
-        _snwprintf(rep, 256, L"Repair / update V3X\nRe-copies missing or changed V3X files. Your settings stay as they are.");
+        _snwprintf(inst, 256, TR(L"Install V3X\nAdds version.dll and %d plugins (%d on, %d off). No game file is changed.",
+                                 L"Instalar o V3X\nAdiciona version.dll e %d plugins (%d ligados, %d desligados). Nenhum arquivo do jogo é alterado."),
+                   en + dis, en, dis);
+        _snwprintf(rep, 256, L"%s", TR(L"Repair / update V3X\nRe-copies missing or changed V3X files. Your settings stay as they are.",
+                                       L"Reparar / atualizar o V3X\nCopia de novo os arquivos do V3X que faltam ou mudaram. Suas configurações ficam como estão."));
         TASKDIALOG_BUTTON b[4]; int nb = 0;
         b[nb].nButtonID = 100; b[nb++].pszButtonText = s.installed ? rep : inst;
-        if (s.installed) { b[nb].nButtonID = 102; b[nb++].pszButtonText = L"Uninstall V3X\nRemoves V3X's files and restores what was there before."; }
-        b[nb].nButtonID = 103; b[nb++].pszButtonText = L"Choose another game folder...";
+        if (s.installed) {
+            b[nb].nButtonID = 102;
+            b[nb++].pszButtonText = TR(L"Uninstall V3X\nRemoves V3X's files and restores what was there before.",
+                                       L"Desinstalar o V3X\nRemove os arquivos do V3X e põe de volta o que havia antes.");
+        }
+        b[nb].nButtonID = 103; b[nb++].pszButtonText = TR(L"Choose another game folder...", L"Escolher outra pasta do jogo...");
         int btn = task(NULL, s.supported ? TD_INFORMATION_ICON : TD_WARNING_ICON,
-                       s.installed ? L"V3X is installed" : L"Install V3X for Victoria 3", content, b, nb, 100, NULL, NULL,
+                       s.installed ? TR(L"V3X is installed", L"O V3X está instalado")
+                                   : TR(L"Install V3X for Victoria 3", L"Instalar o V3X no Victoria 3"),
+                       content, b, nb, 100, NULL, NULL,
                        NULL, SP_NOTE, TDCBF_CLOSE_BUTTON);
         if (btn == 103) { wchar_t g2[MAX_PATH * 2]; if (pick_folder(NULL, g2)) wcscpy(game, g2); continue; }
         if (btn != 100 && btn != 102) return RC_OK;
         if (game_running(game)) {
-            task(NULL, TD_WARNING_ICON, L"Victoria 3 is running",
-                 L"Close the game first (the Paradox launcher may stay open), then try again.", NULL, 0, 0,
+            task(NULL, TD_WARNING_ICON, TR(L"Victoria 3 is running", L"O Victoria 3 está aberto"),
+                 TR(L"Close the game first (the Paradox launcher may stay open), then try again.",
+                    L"Feche o jogo primeiro (o launcher da Paradox pode ficar aberto) e tente de novo."), NULL, 0, 0,
                  NULL, NULL, NULL, NULL, TDCBF_OK_BUTTON);
             continue;
         }
         int rc, force = 0, purge = 0;
         if (btn == 100 && !s.supported) {
             wchar_t w[1024];
-            _snwprintf(w, 1024, L"Your game is %hs (build %hs). This V3X was made and tested for %hs.\n\n"
-                       L"Plugins check the engine code and switch themselves off where it changed, but this "
-                       L"combination was never tested. The usual fix is to wait for a V3X update.",
+            _snwprintf(w, 1024, TR(L"Your game is %hs (build %hs). This V3X was made and tested for %hs.\n\n"
+                                   L"Plugins check the engine code and switch themselves off where it changed, but this "
+                                   L"combination was never tested. The usual fix is to wait for a V3X update.",
+                                   L"Seu jogo é %hs (build %hs). Este V3X foi feito e testado para %hs.\n\n"
+                                   L"Os plugins conferem o código do jogo e se desligam onde ele mudou, mas esta "
+                                   L"combinação nunca foi testada. O normal é esperar uma atualização do V3X."),
                        s.branch, s.build, supported_list());
-            TASKDIALOG_BUTTON fb[] = {{200, L"Install anyway"}};
-            if (task(NULL, TD_WARNING_ICON, L"This game version is not supported", w, fb, 1, 0, NULL, NULL, NULL,
+            TASKDIALOG_BUTTON fb[] = {{200, TR(L"Install anyway", L"Instalar mesmo assim")}};
+            if (task(NULL, TD_WARNING_ICON, TR(L"This game version is not supported", L"Esta versão do jogo não é compatível"),
+                     w, fb, 1, 0, NULL, NULL, NULL,
                      NULL, TDCBF_CANCEL_BUTTON) != 200) continue;
             force = 1;
         }
         if (btn == 102) {
             BOOL v = FALSE;
-            TASKDIALOG_BUTTON ub[] = {{201, L"Uninstall"}};
-            if (task(NULL, TD_WARNING_ICON, L"Uninstall V3X?",
-                     L"Removes version.dll and the V3X plugins and restores a version.dll that was there before. "
-                     L"Your logs and changed settings in binaries\\v3x are kept unless you tick the box.",
-                     ub, 1, 0, L"Also delete logs, reports and settings (the whole binaries\\v3x folder)", &v, NULL,
+            TASKDIALOG_BUTTON ub[] = {{201, TR(L"Uninstall", L"Desinstalar")}};
+            if (task(NULL, TD_WARNING_ICON, TR(L"Uninstall V3X?", L"Desinstalar o V3X?"),
+                     TR(L"Removes version.dll and the V3X plugins and restores a version.dll that was there before. "
+                        L"Your logs and changed settings in binaries\\v3x are kept unless you tick the box.",
+                        L"Remove o version.dll e os plugins do V3X e põe de volta um version.dll que havia antes. "
+                        L"Seus logs e configurações alteradas em binaries\\v3x ficam, a não ser que marque a caixa."),
+                     ub, 1, 0, TR(L"Also delete logs, reports and settings (the whole binaries\\v3x folder)",
+                                  L"Apagar também logs, relatórios e configurações (a pasta binaries\\v3x inteira)"), &v, NULL,
                      NULL, TDCBF_CANCEL_BUTTON) != 201) continue;
             purge = v;
         }
@@ -972,15 +1025,21 @@ static int gui(const wchar_t *game_arg)
         const wchar_t *head;
         wchar_t body[1024];
         if (rc == RC_OK && btn == 100) {
-            head = L"V3X is installed";
-            _snwprintf(body, 1024, L"Start Victoria 3 as usual (Steam or the Paradox launcher). A small \"V3X console\" "
-                       L"window opens next to the game and lists what loaded.\n\nTurn plugins on or off: main menu > V3X "
-                       L"button, or binaries\\v3x\\v3x.ini. Run this setup again to repair or uninstall.");
+            head = TR(L"V3X is installed", L"O V3X está instalado");
+            _snwprintf(body, 1024, L"%s", TR(
+                       L"Start Victoria 3 as usual (Steam or the Paradox launcher). A small \"V3X console\" "
+                       L"window opens next to the game and lists what loaded.\n\nMost plugins are installed but off. "
+                       L"Turn them on or off: main menu > V3X button, or binaries\\v3x\\v3x.ini. "
+                       L"Run this setup again to repair or uninstall.",
+                       L"Abra o Victoria 3 como sempre (Steam ou launcher da Paradox). Uma pequena janela \"V3X console\" "
+                       L"abre ao lado do jogo e mostra o que carregou.\n\nA maioria dos plugins vem instalada, mas desligada. "
+                       L"Para ligar ou desligar: menu principal > botão V3X, ou binaries\\v3x\\v3x.ini. "
+                       L"Rode este instalador de novo para reparar ou desinstalar."));
         } else if (rc == RC_OK) {
-            head = L"V3X is uninstalled";
-            _snwprintf(body, 1024, L"The game starts without V3X now.");
+            head = TR(L"V3X is uninstalled", L"O V3X foi desinstalado");
+            _snwprintf(body, 1024, L"%s", TR(L"The game starts without V3X now.", L"Agora o jogo abre sem o V3X."));
         } else {
-            head = L"Setup did not finish";
+            head = TR(L"Setup did not finish", L"A instalação não terminou");
             _snwprintf(body, 1024, L"%s", g_out ? g_out : L"");
         }
         task(NULL, rc == RC_OK ? TD_INFORMATION_ICON : TD_ERROR_ICON, head, body, NULL, 0, 0, NULL, NULL,
@@ -996,8 +1055,10 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE prev, PWSTR cmdline, int show)
     (void)hi; (void)prev; (void)cmdline; (void)show;
     int argc = 0;
     wchar_t **argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    pick_language();
     const wchar_t *game_arg = NULL;
-    int uninstall = 0, purge = 0, force = 0, status = 0;
+    int uninstall = 0, purge = 0, force = 0, status = 0, update = 0;
+    DWORD wait_pid = 0;
     for (int i = 1; i < argc; i++) {
         if (!wcscmp(argv[i], L"--silent")) g_silent = 1;
         else if (!wcscmp(argv[i], L"--uninstall")) uninstall = 1;
@@ -1006,17 +1067,57 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE prev, PWSTR cmdline, int show)
         else if (!wcscmp(argv[i], L"--force")) force = 1;
         else if (!wcscmp(argv[i], L"--status")) { status = 1; g_silent = 1; }
         else if (!wcscmp(argv[i], L"--game-dir") && i + 1 < argc) game_arg = argv[++i];
+        else if (!wcscmp(argv[i], L"--update")) { update = 1; g_silent = 1; }
+        else if (!wcscmp(argv[i], L"--wait-pid") && i + 1 < argc && (wait_pid = wcstoul(argv[i + 1], NULL, 10)) != 0) i++;
         else {
             g_silent = 1;
-            say(L"usage: V3X-Setup.exe [--silent] [--game-dir <Victoria 3 folder>] [--install|--repair|--uninstall [--purge]] [--force] [--status]");
+            say(L"usage: V3X-Setup.exe [--silent] [--game-dir <Victoria 3 folder>] [--install|--repair|--uninstall [--purge]] [--force] [--status]"
+                L" [--wait-pid <pid>] [--update]");
             flush_stdout();
             return RC_USAGE;
         }
     }
+    if (update) { uninstall = 0; force = 0; status = 0; g_defer_log = 1; }
     if (!load_payload()) {
+        if (update) {   /* still leave a result line where the updater looks for it */
+            wchar_t game[MAX_PATH * 2], bin[MAX_PATH * 2];
+            say(L"ERROR: the setup file is damaged or incomplete (payload check failed). Download it again.");
+            say(L"update-result: failed code=%d payload", RC_PAYLOAD);
+            if (game_arg ? normalize_game_dir(game_arg, game) : find_game(game)) {
+                join(bin, game, L"binaries"); g_defer_log = 0; append_log(bin);
+            }
+            flush_stdout();
+            return 1;
+        }
         if (g_silent) { say(L"ERROR: the setup file is damaged or incomplete (payload check failed). Download it again."); flush_stdout(); }
-        else MessageBoxW(NULL, L"This setup file is damaged or incomplete. Please download it again.", TITLE, MB_OK | MB_ICONERROR);
+        else MessageBoxW(NULL, TR(L"This setup file is damaged or incomplete. Please download it again.",
+                                  L"Este instalador está danificado ou incompleto. Baixe de novo."), TITLE, MB_OK | MB_ICONERROR);
         return RC_PAYLOAD;
+    }
+    if (wait_pid) {
+        /* the updater starts us and then the game exits: wait for it (version.dll is locked while it runs) */
+        HANDLE ph = OpenProcess(SYNCHRONIZE, FALSE, wait_pid);
+        if (ph) {
+            DWORD w = WaitForSingleObject(ph, 600000);
+            CloseHandle(ph);
+            if (w != WAIT_OBJECT_0) {
+                if (!g_silent) {
+                    MessageBoxW(NULL, TR(L"Victoria 3 did not close within 10 minutes. Nothing was changed.",
+                                         L"O Victoria 3 não fechou em 10 minutos. Nada foi alterado."), TITLE, MB_OK | MB_ICONWARNING);
+                    return RC_RUNNING;
+                }
+                say(L"process %lu did not exit within 600 s. Nothing was changed.", (unsigned long)wait_pid);
+                wchar_t game[MAX_PATH * 2], bin[MAX_PATH * 2];
+                if (update) {
+                    say(L"update-result: failed code=%d timeout", RC_RUNNING);
+                    if (game_arg ? normalize_game_dir(game_arg, game) : find_game(game)) {
+                        join(bin, game, L"binaries"); g_defer_log = 0; append_log(bin);
+                    }
+                }
+                flush_stdout();
+                return update ? 1 : RC_RUNNING;
+            }
+        }
     }
     if (!g_silent) return gui(game_arg);
 
@@ -1025,8 +1126,9 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE prev, PWSTR cmdline, int show)
     if (!found) {
         say(L"Victoria 3 not found%s%s. Pass --game-dir \"<...>\\steamapps\\common\\Victoria 3\".",
             game_arg ? L" in " : L"", game_arg ? game_arg : L"");
+        if (update) say(L"update-result: failed code=%d nogame", RC_NOGAME);
         flush_stdout();
-        return RC_NOGAME;
+        return update ? 1 : RC_NOGAME;
     }
     State s; state_read(&s, game);
     int rc = RC_OK;
@@ -1035,6 +1137,15 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE prev, PWSTR cmdline, int show)
         say(L"V3X-Setup %hs: %s %s (game %hs, build %hs)", g_version, uninstall ? L"uninstall from" : L"install into",
             s.game, s.branch, s.build);
         rc = uninstall ? do_uninstall(&s, purge) : do_install(&s, force);
+    }
+    if (update) {
+        static const wchar_t *why[] = {L"ok", L"error", L"unsupported", L"running", L"nogame", L"notinstalled", L"payload", L"usage"};
+        if (rc == RC_OK) say(L"update-result: ok version=%hs", g_version);
+        else say(L"update-result: failed code=%d %s", rc, (rc > 0 && rc <= RC_USAGE) ? why[rc] : L"error");
+        g_defer_log = 0;
+        append_log(s.bin);
+        flush_stdout();
+        return rc == RC_OK ? 0 : 1;
     }
     flush_stdout();
     return rc;

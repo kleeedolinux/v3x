@@ -9,8 +9,19 @@ admin rights. Player guide: [docs/install.md](../docs/install.md).
 | `setup.rc`, `setup.manifest` | embedded manifest: asInvoker (no UAC prompt), Common Controls v6 (TaskDialog), per-monitor DPI |
 | `profile.txt` | which plugins ship on (1), ship off (0) or are not shipped (-), with the reason. Edit this to change the player set |
 | `builds.txt` | supported game builds (`game_build_id` + `caligula_branch.txt`); setup refuses (CLI) or warns (GUI) on others |
-| `make_dist.py` | builds `build/dist/V3X-Setup.exe` + `SHA256SUMS.txt` |
-| `test_installer.py` | end-to-end test against fake game folders |
+| `make_dist.py` | builds `build/dist/V3X-Setup.exe`, `v3x-<version>.zip` (manual install), a copy of `install.ps1` and `SHA256SUMS.txt` (all three) |
+| `install.ps1` | the one-line installer `irm https://v3x.pages.dev/install.ps1 \| iex`: finds the game, downloads + checks `V3X-Setup.exe`, runs it `--silent`. Options and exit codes: its header |
+| `test_installer.py` | end-to-end test of `V3X-Setup.exe` against fake game folders |
+| `test_install_ps1.py` | end-to-end test of `install.ps1` (Windows PowerShell 5.1 and pwsh 7) against fake games, a fake Steam and a local release |
+
+Language: the GUI of `V3X-Setup.exe` and all of `install.ps1` are English or Brazilian Portuguese
+(Windows display language; `V3X_LANG=en|pt` overrides). `--silent` output stays English, so it can
+be parsed. `install.ps1` is kept pure ASCII (accents as `\u00XX`, decoded at run time) because
+`irm | iex` on PowerShell 5.1 can decode a download as Latin-1.
+
+Releases: `.github/workflows/release.yml` builds, tests and publishes these four files on a `v*`
+tag; `ci.yml` does the same on every push / pull request and uploads them as an artifact. The site
+(v3x.pages.dev) serves a copy of `install.ps1`.
 
 ## Build
 
@@ -63,7 +74,13 @@ nothing. Contents: `version.dll`, `v3x/plugins/<p>.dll` for every plugin marked 
 
 ```sh
 python installer/test_installer.py            # uses build/dist/V3X-Setup.exe, fake games in D:/v3x_installer_test/run
+python installer/test_install_ps1.py          # uses build/dist (install.ps1 + V3X-Setup.exe), fake games in D:/v3x_tmp/install_ps1
 ```
+
+Without `../binaries/victoria3.exe` (CI) both tests use a synthetic 4 KB PE header carrying the
+first build id of `builds.txt` (`--synthetic` forces it in `test_installer.py`). `test_installer.py`
+also checks the profile policy: every plugin except the developer tools is shipped and only
+`crash_logger`, `content_packs`, `mod_menu`, `script_ext` are on (`EXPECT_ON` / `EXPECT_UNSHIPPED`).
 
 Builds fake game folders (only the 4 KB PE header of the real `victoria3.exe` is copied, the real
 exe is only read), then checks: fresh install, re-install keeps user inis byte for byte, `v3x.ini`

@@ -1,0 +1,79 @@
+# Build + offline tests + installer on every push / pull request to main.
+# The runner has no Victoria 3: tests that need ../binaries/victoria3.exe are allowed to fail
+# (list in .github/scripts/ci_tests.sh); the installer tests use a synthetic exe header.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    env:
+      ZIGLANG_VERSION: "0.17.1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # test compat_old_loader builds the loader of commit 317e574
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install zig (ziglang from PyPI)
+        run: |
+          python -m pip install --disable-pip-version-check "ziglang==${ZIGLANG_VERSION}"
+          python -m ziglang version
+
+      - name: Version
+        id: ver
+        run: echo "version=ci-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - name: Build
+        run: bash build.sh
+
+      - name: Offline tests (test/run_all.sh)
+        run: bash .github/scripts/ci_tests.sh
+
+      - name: Installer (make_dist.py)
+        run: python installer/make_dist.py --no-build --version "${{ steps.ver.outputs.version }}"
+
+      - name: Installer test (V3X-Setup.exe)
+        run: python installer/test_installer.py --root "$RUNNER_TEMP/inst"
+
+      - name: Installer test (install.ps1, PowerShell 5.1 + 7)
+        run: python installer/test_install_ps1.py --root "$RUNNER_TEMP/install_ps1" --shell powershell,pwsh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v3x-${{ steps.ver.outputs.version }}
+          path: |
+            build/dist/V3X-Setup.exe
+            build/dist/v3x-*.zip
+            build/dist/install.ps1
+            build/dist/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Test logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-logs
+          path: ${{ runner.temp }}/v3x/t/run_all_logs
+          if-no-files-found: ignore

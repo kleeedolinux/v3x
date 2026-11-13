@@ -1,0 +1,41 @@
+# V3X player profile: which bundled plugins V3X-Setup.exe installs, and which are on by default.
+# One line per plugin:  <name>  <enabled>  <reason>
+#   1 = shipped and loaded            0 = shipped but off (v3x.ini [plugins] <name>=0; the player can
+#   turn it on from the main-menu V3X button or v3x.ini)      - = not shipped (developer / measuring tools)
+# Sources: docs/plugins.md (catalog, in-game status) and each plugin's header comment.
+# make_dist.py fails if a plugin in plugins/ is missing here, so a new plugin is never shipped by accident.
+
+# --- on: played in the real game (4h runs), fail closed, no simulation change
+crash_logger     1  writes v3x/crash.log on a crash: the evidence a player sends with a bug report; read-only
+content_packs    1  file overrides from v3x/content_packs/; inert without packs; needed by mod_menu and loc_fallback
+mod_menu         1  the main-menu "V3X" button: the player's on/off switch for plugins; fails closed to the vanilla menu (catalog: not run in game yet - check)
+keep_history     1  country graphs are no longer wiped when switching country; played 4h
+ironman_console  1  developer console usable in ironman (multiplayer stays blocked); project default on; set 0 if the player cares about achievements
+log_filter       1  drops noisy engine log lines; played 4h
+frame_pacer      1  timer sleep instead of a busy-wait frame cap, lower fps when idle/background; played 4h
+cpu_sched        1  P-/E-core placement on hybrid CPUs, nothing on other CPUs; played 4h
+gfx_driver       1  fewer D3D11 driver threads; retries without the flag on failure; played 4h
+mem_tuner        1  lower memory commit, one out-of-memory rescue; played 4h
+fast_load        1  load timeline + load_transition events other plugins use; optional speedups stay off; played 4h
+
+# --- off: shipped, opt-in (the player turns them on knowingly)
+console_plus     0  Tab completion of console arguments; catalog says not run in game and it had a crash fixed recently (crash6)
+loc_fallback     0  English text for keys a mod did not translate; useful for non-English players; not in the catalog's in-game status
+enhance          0  only acts in debug mode (binary saves) or with opt-in speed/lean options; catalog: smoke test only
+asset_stream     0  forces the texture streamer on; opt-in (its own default is off too)
+lazy_mesh        0  faster 3D model loading needs mode=lazy in lazy_mesh.ini; opt-in
+sim_opt          0  simulation changes (throttle) are opt-in; single player only; back up saves first
+
+# --- not shipped: developer, reverse-engineering or measure-only tools
+hello            -  SDK example plugin, logs only
+devtools         -  CPU/memory profiler for developers
+devconsole       -  reverse-engineering commands (disassembly, memory scans)
+devbridge        -  named pipe for the developer MCP server (local tool access to the console)
+tick_profiler    -  per-tick-task timing for developers
+tick_par         -  read-only tick parallelism analysis
+alloc_tracker    -  allocation tracker, heavy overhead
+map_cache        -  default mode=measure (reports only)
+mod_loader       -  default mode=measure (reports only); mode=on not yet run in game
+par_load         -  default mode=measure (reports only)
+lazy_gfx         -  default mode=measure (reports only); not run in game
+fast_lookup      -  default mode=measure; caused crash5 (fixed offline, not run in game since)

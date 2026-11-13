@@ -1,0 +1,4 @@
+# Game builds this V3X supports. One line: <game_build_id> <caligula_branch.txt>
+# game_build_id = "<PE TimeDateStamp hex>-<SizeOfImage hex>" of binaries/victoria3.exe, exactly as
+# src/core.c computes it (api->game_build_id()); it changes with every patch, also hotfixes.
+6af3094f-60fb000 release/1.15.1

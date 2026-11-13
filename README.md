@@ -29,14 +29,38 @@ estimates. Your PC will give different numbers. Sources: [lazy_mesh](docs/re/laz
 
 ## A normal mod vs. V3X
 
-You probably know mods from the Steam Workshop. Those are **text and data files**: new events,
-buildings, laws, interface screens, scripts. The game reads them and runs them by its own rules,
-so they can change *what is in the game*. They cannot change *how the game program works*: how fast
-it loads, how it uses memory, why it crashes, or bugs in the engine.
+Think of Victoria 3 as a theatre. **Normal mods write new plays**: new events, buildings, laws,
+interface screens, balance. The stage crew (the engine) performs whatever the script says, but
+always with the same machinery. A mod can never touch that machinery.
 
-V3X is a different kind of add-on. It is a small program file (`version.dll`) that Windows loads
-into the game when it starts. Because it runs *inside* the game's program, its plugins can repair
-and speed up the engine directly. It does not replace your mods: keep your playset as it is.
+**V3X works on the machinery itself.** It is a small program file (`version.dll`) that Windows loads
+*into* the game's own process when it starts. From there its plugins can change how the engine
+behaves, which no text file, script or Workshop mod can reach. It does not replace your mods: your
+playset stays exactly as it is, and runs on a better engine.
+
+### What V3X can do that a normal mod never can
+
+Every row below is something V3X already does in the game, and something a script mod has no way to touch:
+
+| The problem | Why a normal mod can't fix it | What V3X does |
+|---|---|---|
+| Loading takes minutes | Mods can't decide *how* or *when* the engine loads files | Loads 3D models only when they are first needed (model loading **37.5 s → 6.7 s** measured), and answers millions of "is this file in that mod folder?" lookups instantly from an index instead of asking the disk 40 times per file (new; gain being measured) |
+| "New Game" crashes on a 16 GB PC | Memory is managed by the engine's allocator, invisible to scripts | Tunes the engine's memory allocator, returns unused memory, and adds an out-of-memory safety net that frees a reserve instead of crashing |
+| Your old country's GDP graph is wiped when you switch countries | The wipe is hard-coded in the engine | Removes exactly those 11 engine "clear history" calls, and records history for every country |
+| Autosaves in debug mode are huge | The save format is chosen by engine code | Keeps saves compressed (**156 MB → 26 MB** measured) |
+| A crash tells you nothing | Mods can't see inside the program | Writes its own crash log: what failed, where in the engine, how much memory was left |
+| Your CPU is half idle while loading | Threads and cores are engine internals | Puts the main thread on performance cores, stops idle worker threads from burning power in busy loops |
+| You can't see what slows your game | No script can time engine code | Built-in profiler: which of the 272 simulation tasks and which engine functions take the time |
+| The console is locked in ironman and has no help | Console rules are engine code | Console in ironman, Tab completion for countries, states and events, and an in-game V3X menu to switch plugins on and off |
+
+### What stays the job of normal mods
+
+New content (events, decisions, buildings, laws, maps, art, balance) is still best done with normal
+mods. V3X doesn't add content by itself; it makes the engine run that content faster and more reliably.
+
+**For modders:** V3X is also an SDK. You can write your own engine plugins in C: hook an engine
+function safely, add console commands, react when the game loads or saves, and read live game
+data. See [For modders](#for-modders).
 
 <p align="center">
   <img src="docs/assets/compare.svg" alt="Side by side: a normal mod is text and data the game runs by its own rules and changes content; V3X is a native add-on running inside the game's program that can fix and speed up the engine. They work together." width="100%">

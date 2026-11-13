@@ -6,7 +6,7 @@ Offline anchor check: `test/enhance_test.c` (36 checks, most against the real ex
 Debug-flag reader list: `tools/re_enh_debug.py`.
 Tool: `tools/re_enh_lib.py <exe> "cmd args" ...` (annotated `dis`, `str`, `rva`, `callers`, `strs`, `fn`,
 `q8`, `ptr` = absolute pointers in .rdata/.data, `anyref` = any rip-relative operand, e.g. byte flags).
-It reuses `re_sim_lib.Img` with its own index cache under `D:/v3x_tmp/enhance/`.
+It reuses `re_sim_lib.Img` with its own index cache in the temp directory (`RE_SIM_CACHE`).
 
 ## 1. Autosave freeze
 
@@ -144,7 +144,7 @@ the 8 anchor strings, cache 1 with shape `40 38 35 D 74`); a mismatch skips only
 
 ## 5. fast_speed5: withdrawn (caused a crash)
 
-**Crash 13:37:44** (D:/v3x_tmp/sessions/crash3-20261113-133830):
+**Crash 13:37:44** (session folder crash3-20261113-133830, not in the repo):
 - The lead typed `add_relations RUS 1000` at speed 5.
 - debug.log: `Random is blocked by thread 5052`. devtools' thread table: 5052 = **Network/Session thread**.
 - Then AV, read of 0x0 at 03787360. The global random pointer `[0540ae80]` was NULL: `test rdi,rdi; je` takes

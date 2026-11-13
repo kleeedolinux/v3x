@@ -1,278 +1,370 @@
-# V3X — native code loader for Victoria 3
+<p align="center">
+  <img src="docs/assets/banner.svg" alt="V3X: Victoria 3, faster and fixed. Engine-level mods made easy." width="100%">
+</p>
 
-Regular Victoria 3 mods are script and data (`common/`, `events/`, GUI) that the engine interprets.
-V3X is a different layer: it runs **your compiled code inside `victoria3.exe`**, so plugins can
-hook, replace and patch engine functions directly, like a script extender.
+<p align="center">
+  <img alt="Victoria 3 1.15.1" src="https://img.shields.io/badge/Victoria%203-1.15.1-1f3550">
+  <img alt="Windows x64" src="https://img.shields.io/badge/platform-Windows%20x64-1f3550">
+  <img alt="Single player" src="https://img.shields.io/badge/mode-single%20player-b98b3e">
+  <img alt="Status: pre-release" src="https://img.shields.io/badge/status-pre--release-b98b3e">
+  <img alt="Plugin API v4" src="https://img.shields.io/badge/plugin%20API-v4-2f6f73">
+  <img alt="License: not chosen yet" src="https://img.shields.io/badge/license-not%20chosen%20yet-9b2d20">
+</p>
 
-## How it works
+**V3X is a free add-on for Victoria 3. It starts together with the game and fixes and speeds up the
+game engine itself: the part of the game that normal mods cannot reach.** It does not change any
+game file, it works next to your normal mods, and you remove it by deleting one file.
 
-1. **Proxy DLL.** `victoria3.exe` imports `VERSION.dll`, and version.dll is not a Windows
-   KnownDLL. Windows therefore loads `binaries/version.dll` (ours) before the system one. Our
-   DLL forwards all 17 exports to `System32\version.dll` (`src/proxy.c`), so the game behaves
-   normally.
-2. **Entry hook.** In `DllMain`, V3X installs a MinHook hook on the exe's entry point and does
-   nothing else under the loader lock (`src/core.c`).
-3. **Plugin load.** On the main thread, before the CRT and static constructors run, V3X loads
-   every `binaries/v3x/plugins/*.dll` and calls `v3x_plugin_load(&api)`. Then the game starts.
-4. **Frame tick.** A `PeekMessageW` hook calls the plugins' `on_frame` callbacks on the main
-   thread, about once per frame.
+<p align="center">
+  <img src="docs/assets/results.svg" alt="Measured on the author's PC: 3D-model loading 37.5 s before, 6.7 s with V3X (opt-in lazy_mesh); autosave in debug mode 156 MB before, 26 MB with V3X; New Game crashed before, a 4-hour session was played after." width="100%">
+</p>
 
-### Finding engine code that survives patches
+<sub>Real measurements from the author's PC (16 GB RAM, integrated GPU, Victoria 3 1.15.1), not
+estimates. Your PC will give different numbers. Sources: [lazy_mesh](docs/re/lazy_mesh.md#7-first-in-game-session-1151-lead-4-h-modelazy-defaults-and-the-hitch-fixes),
+[saves](docs/re/enhance.md#1-autosave-freeze), [New Game crash](docs/re/memory.md#3-leads-crash-what-the-dumps-show-d).</sub>
 
-Hardcoded addresses break on every game update. The API instead lets you anchor on things that
-rarely change:
+<p align="center">
+  <img src="docs/assets/how-it-works.svg" alt="How V3X works: you start Victoria 3, V3X loads with it as one extra file (version.dll), plugins fix the engine, you play. Delete version.dll to return to vanilla." width="100%">
+</p>
+
+## A normal mod vs. V3X
+
+You probably know mods from the Steam Workshop. Those are **text and data files**: new events,
+buildings, laws, interface screens, scripts. The game reads them and runs them by its own rules,
+so they can change *what is in the game*. They cannot change *how the game program works*: how fast
+it loads, how it uses memory, why it crashes, or bugs in the engine.
+
+V3X is a different kind of add-on. It is a small program file (`version.dll`) that Windows loads
+into the game when it starts. Because it runs *inside* the game's program, its plugins can repair
+and speed up the engine directly. It does not replace your mods: keep your playset as it is.
+
+<p align="center">
+  <img src="docs/assets/compare.svg" alt="Side by side: a normal mod is text and data the game runs by its own rules and changes content; V3X is a native add-on running inside the game's program that can fix and speed up the engine. They work together." width="100%">
+</p>
+
+| | Normal mod | V3X |
+|---|---|---|
+| What it is | text and data files (events, buildings, GUI, scripts) | a native add-on: `version.dll` + a `v3x` folder next to the game exe |
+| Installed from | Steam Workshop / Paradox launcher | a zip you unpack into the game's `binaries` folder |
+| Can change | game content | the engine: loading, memory, crashes, engine bugs, threads |
+| Together? | yes: V3X works with any playset | yes: it does not touch your mod list |
+| Multiplayer | yes | **no, single player only** |
+| Remove it | unsubscribe | delete `binaries/version.dll` and `binaries/v3x/` |
+
+## What it does for you
+
+<table>
+<tr>
+<td width="50%" valign="top">
+<img src="docs/assets/icon-speed.svg" width="48" alt=""><br>
+<b>Loads 3D models faster (opt-in)</b><br>
+The game loads all 2,118 kinds of 3D models at startup, used or not. With <code>lazy_mesh</code> in
+<code>lazy</code> mode it loads only those it needs and the rest when first used: that part of loading
+went from <b>37.5 s to 6.7 s</b>. Some of the work moves later (531 small loads in a 4-hour game),
+which is why it is off by default for now.
+</td>
+<td width="50%" valign="top">
+<img src="docs/assets/icon-shield.svg" width="48" alt=""><br>
+<b>Fewer out-of-memory crashes</b><br>
+Five New Game crash dumps showed the same cause: Windows had run out of <i>commit</i> memory
+(5-20 MB left) while 0.6-3.9 GB of RAM was still free. <code>mem_tuner</code> makes the game commit
+less memory up front, returns free memory to Windows after loads, keeps a 128 MB emergency reserve and says
+in the log when the pagefile is too small. With a bigger pagefile the author played a 4-hour session.
+</td>
+</tr>
+<tr>
+<td valign="top">
+<img src="docs/assets/icon-history.svg" width="48" alt=""><br>
+<b>History graphs you can trust</b><br>
+In the unmodded game, the GDP, population and other graphs of a country are wiped when you stop
+playing it, and AI countries record only every 120 days. <code>keep_history</code> keeps the graphs
+(it disables the 11 places that wipe them) and records every country like a player country, every
+28 days by default.
+</td>
+<td valign="top">
+<img src="docs/assets/icon-save.svg" width="48" alt=""><br>
+<b>Small saves in debug mode</b><br>
+Playing with <code>debug_mode</code> makes the game write uncompressed text saves:
+<b>156 MB</b> per autosave. <code>enhance</code> makes them normal compressed saves again:
+<b>26 MB</b>. (The 3-second save pause stays; that time goes into preparing the save, not
+writing it.)
+</td>
+</tr>
+</table>
+
+Also on by default: the developer console works in **ironman** (`ironman_console`), a readable
+**crash log** with the real error and stack (`crash_logger`), a **frame cap that sleeps instead of
+running a core at 100%** and lowers the frame rate when you are idle, paused or in another window
+(`frame_pacer`), P-core / E-core placement of the game's threads on hybrid CPUs (`cpu_sched`)
+and **quieter log files** (`log_filter`).
+
+## Is it safe?
+
+* **No game file is changed.** V3X is one extra file next to the game. Steam's "Verify integrity"
+  leaves it alone, and deleting `binaries/version.dll` gives you the unmodded game back.
+* **Every plugin can be turned off**, one by one, from the main menu or a text file (see below).
+* **Single player only.** V3X is not part of the game's multiplayer checksum, so do not use it
+  online. (`ironman_console` keeps the console blocked in multiplayer.)
+* **It does not unlock anything.** No plugin touches DLC ownership or achievement code.
+* **It refuses rather than guesses.** Every plugin checks that the engine code it wants to change
+  looks exactly as expected. After a game update, a plugin that no longer matches does nothing and
+  says so in `binaries/v3x/v3x.log`, instead of crashing:
+
+```mermaid
+flowchart LR
+    A[Plugin looks for the engine code it needs] --> B{Found, unique, and the bytes match?}
+    B -- yes --> C[Install the fix]
+    B -- no --> D["Install nothing, log why<br/>(that part of the game stays vanilla)"]
+```
+
+Back up your saves before trying plugins that change the simulation (all of those are off by
+default). The rules plugin authors follow: [docs/safety.md](docs/safety.md).
+
+## Install in 3 steps
+
+> **No release zip has been published yet.** Until the first release, use
+> [Build from source](#build-from-source) below; the result is the same two items.
+
+1. **Download** the latest V3X release zip from the [Releases page](https://github.com/kleeedolinux/v3x/releases).
+2. **Unzip** it into the game's `binaries` folder, so that you get
+   `...\steamapps\common\Victoria 3\binaries\version.dll` and `...\binaries\v3x\`.
+   (In Steam: right-click Victoria 3 > Manage > Browse local files > `binaries`.)
+3. **Start the game** as usual. A "V3X console" window opens next to it and shows what loaded.
+
+**Turn plugins on or off:** main menu > **V3X** button (the `mod_menu` plugin; new and not yet
+verified in game), or edit `binaries/v3x/v3x.ini`:
+
+```ini
+[plugins]
+lazy_mesh = 1
+alloc_tracker = 0
+```
+
+`name = 0` means "do not load this plugin", a missing line means "load it". Changes apply at the
+next start. No console window: put `console=0` in the same file. All options:
+[docs/configuration.md](docs/configuration.md).
+
+**Uninstall:** delete `binaries/version.dll` and the `binaries/v3x/` folder. That's all.
+
+### Build from source
+
+Needs Windows, Python and Git Bash. The compiler is zig from pip (no Visual Studio).
+
+```sh
+cd "<Steam>/steamapps/common/Victoria 3"
+git clone --recursive https://github.com/kleeedolinux/v3x.git
+cd v3x && pip install ziglang && ./build.sh install    # copies version.dll + v3x/plugins into ../binaries
+```
+
+Details: [docs/getting-started.md](docs/getting-started.md).
+
+## Screenshots
+
+> **TODO:** real in-game screenshots are still missing. The two pictures below are drawings made
+> for this README, clearly marked as illustrations; they show the layout, not the game's art.
+
+<p align="center">
+  <img src="docs/assets/mockup-console.svg" alt="Illustration (not a screenshot) of the V3X console window: loader lines in cyan, plugin lines in green, a failed anchor in red." width="49%">
+  <img src="docs/assets/mockup-menu.svg" alt="Illustration (not a screenshot) of the V3X plugin window opened from a V3X button on the main menu, with a checkbox per plugin." width="49%">
+</p>
+
+## Features
+
+| | |
+|---|---|
+| <img src="docs/assets/icon-speed.svg" width="32" alt=""> **Loading** | load timeline (`fast_load`), 3D models on demand (`lazy_mesh`), texture streaming forced on (`asset_stream`) |
+| <img src="docs/assets/icon-shield.svg" width="32" alt=""> **Stability** | memory tuning and OOM rescue (`mem_tuner`), crash log with C++ error types and stacks (`crash_logger`) |
+| <img src="docs/assets/icon-history.svg" width="32" alt=""> **Engine fixes** | graphs kept on country switch (`keep_history`), compressed saves in debug mode (`enhance`) |
+| <img src="docs/assets/icon-cpu.svg" width="32" alt=""> **CPU and GPU** | sleeping frame cap (`frame_pacer`), P/E-core scheduling (`cpu_sched`), fewer GPU-driver threads on integrated GPUs (`gfx_driver`) |
+| <img src="docs/assets/icon-console.svg" width="32" alt=""> **Console** | console in ironman (`ironman_console`), the V3X console window with commands, Tab completion (`console_plus`) |
+| <img src="docs/assets/icon-toggle.svg" width="32" alt=""> **Control** | V3X button on the main menu (`mod_menu`), `[plugins]` on/off list, file overrides without a mod (`content_packs`) |
+| <img src="docs/assets/icon-sdk.svg" width="32" alt=""> **For modders** | C plugin API, safe hooks, anchors, offline tests against the real exe, profilers and a disassembler console |
+
+## Plugin catalog
+
+25 plugins ship with V3X. "In game" says how far each one has really been run in Victoria 3 1.15.1:
+**4h** = played in a 4-hour session, **loads** = loaded in a short run without exercising its
+features, **not yet** = never run in the game. All of them build and pass their offline tests.
+Full catalog with console commands: [docs/plugins.md](docs/plugins.md).
+
+| plugin | what it does | default | in game |
+|---|---|---|---|
+| **Players** | | | |
+| `mem_tuner` | lower memory commit, free memory after loads, one OOM rescue | on | 4h (newer features: loads) |
+| `keep_history` | country graphs survive a country switch; AI countries recorded like players | on | 4h |
+| `enhance` | compressed saves in debug mode, save timing; opt-in speed table and lean debug mode | binary saves + save log on | loads (binary saves measured in game) |
+| `frame_pacer` | timer sleep instead of a busy-wait frame cap; lower caps when idle, paused or in background | on | 4h |
+| `cpu_sched` | main thread on P-cores, background workers on E-cores (hybrid CPUs only) | on | 4h |
+| `gfx_driver` | fewer D3D11 driver threads on integrated GPUs; retries without on failure | on | 4h |
+| `lazy_mesh` | 3D-model types loaded on first use (`measure` / `lazy`) | off | 4h incl. `lazy` (prefetch: loads) |
+| `asset_stream` | forces the engine's texture streamer on | off | 4h |
+| `fast_load` | load timeline; optional loading tweaks | timeline on | 4h (tweaks: loads) |
+| `log_filter` | drops and dedupes noisy engine log lines | on, 5 rules | 4h |
+| `ironman_console` | developer console in ironman (multiplayer stays blocked) | on | 4h |
+| `console_plus` | Tab completion of command arguments (tags, states, laws, ...) | on | not yet |
+| `content_packs` | overrides game files from `v3x/content_packs/` without a mod | on | 4h (no packs tested) |
+| `mod_menu` | V3X button + plugin window on the main menu | on | not yet |
+| `crash_logger` | `v3x/crash.log`: C++ exceptions with type names, crashes with registers and stack | on | 4h |
+| **Diagnostics and modders** | | | |
+| `hello` | minimal example plugin | on | 4h |
+| `devtools` | CPU per thread, sampling profiler, memory and GPU-memory reports | profiler off | 4h |
+| `devconsole` | disassembler and memory-reading commands (read-only) | on | loads |
+| `devbridge` | console over a named pipe for the MCP tool `mcp/v3x_mcp.py` | on | 4h |
+| `tick_profiler` | time per simulation task, top 25 every 60 s | on | 4h |
+| `alloc_tracker` | memory allocations per call site | off | 4h |
+| `sim_opt` | tick diagnostics; opt-in throttling of chosen tasks | read-only diagnostics | loads |
+| `tick_par` | how much a parallel tick could save (measure only) | measure | not yet |
+| `map_cache` | measures repeated texture reads behind map-mode lag; opt-in cache | measure | loads |
+| `mod_loader` | measures the per-file cost of mods | measure | not yet |
+
+## For modders
+
+Normal mods describe content. V3X plugins are **C code that runs in the game process** and can
+hook engine functions. The SDK makes the dangerous parts boring:
+
+* **No addresses to maintain.** Find engine code by strings, RTTI names and byte patterns that
+  survive patches (`find_string`, `find_xref`, `function_start`, `pattern_scan`, `sdk/v3x_anchor.h`).
+* **Hooks that cannot get the arguments wrong.** `hook_safe` forwards all 16 integer argument
+  slots, `xmm0`-`xmm3` and the return value; your `pre` / `post` callbacks see all of them.
+* **Fail-closed by design.** Anchor tables check uniqueness and prologue bytes and install nothing
+  on a mismatch.
+* **Test without starting the game.** `sdk/v3x_testkit.h` maps the real `victoria3.exe` and checks
+  your anchors offline; `python sdk/build_plugin.py <dir> --test` builds and tests in one command.
+* **Batteries included.** Console commands, events between plugins (`load_transition`,
+  `save_begin`, `process_exit`), per-plugin ini files, a manifest with supported game builds, and
+  25 working plugins to read.
+
+A complete plugin that counts game ticks (this exact file builds warning-free and resolves its
+anchor in the 1.15.1 exe offline):
 
 ```c
-void *s  = api->find_string("No Console commands in ironman!"); // .rdata
-void *x  = api->find_xref(s, 0);        // the instruction that loads that string
-void *fn = api->function_start(x);      // enclosing function, from the .pdata unwind table
-api->hook(fn, my_detour, (void **)&original);
+#include <windows.h>
+#include "v3x.h"
+
+V3X_PLUGIN_MANIFEST("tick_counter", "0.1.0", "you", "counts game ticks", "release/1.15*");
+static volatile LONG g_ticks;
+
+static void on_tick(V3X_HookCall *call) { (void)call; InterlockedIncrement(&g_ticks); }
+
+V3X_EXPORT int v3x_plugin_load(const V3X_API *api)
+{
+    if (!V3X_HAS(api, hook_safe)) return 1;                 /* loader older than API v4 */
+    void *s  = api->find_string("Processing Tick: ");      /* 1. anchor: a log string */
+    void *x  = s ? api->find_xref(s, 0) : NULL;            /* 2. the code that loads it */
+    void *fn = x ? api->function_start(x) : NULL;          /* 3. its function (.pdata) */
+    if (!fn) { api->log("tick_counter", "anchor FAILED: nothing installed"); return 1; }
+    return api->hook_safe(fn, on_tick, NULL, NULL);        /* 4. observe; args forwarded */
+}
 ```
 
-`pattern_scan("48 8B 05 ?? ?? ?? ??")` (IDA-style signatures) is also available, along with
-`patch()` for raw byte writes.
+<p align="center">
+  <img src="docs/assets/anchors.svg" alt="How a plugin finds engine code: string anchor, cross-reference, function start with prologue check, safe hook; any mismatch fails closed." width="100%">
+</p>
 
-## Install / uninstall
+Start here: [getting started](docs/getting-started.md) (first plugin in about 10 minutes), the
+[plugin template](templates/plugin_template/) (manifest, ini, anchor, `hook_safe`, console command,
+offline test), the [API reference](docs/api-reference.md) for [`include/v3x.h`](include/v3x.h), the
+[SDK headers](sdk/), the [safety rules](docs/safety.md) and the
+[reverse-engineering guide](docs/reverse-engineering.md) with the [engine map](docs/engine-map.md).
 
-```sh
-./build.sh install      # builds, copies version.dll + plugins into ../binaries
-```
+<p align="center">
+  <img src="docs/assets/lifecycle.svg" alt="A plugin's life: process start, plugins load before the CRT, anchors resolve, hooks go in, the game runs, events, process_exit; and which thread runs which callback." width="100%">
+</p>
 
-* Uninstall: delete `binaries/version.dll` (and `binaries/v3x/`). Steam "Verify files" does not
-  remove it, because version.dll is not a game file.
-* Disable for one run: set the environment variable `V3X_DISABLE=1`.
-* Log: `binaries/v3x/v3x.log`.
-* Live console: a "V3X console" window opens next to the game and shows the loader and plugin
-  logs in color (red = failures and exceptions). Its close button is removed, because closing a
-  console window kills the game. Turn it off with `console=0` in `binaries/v3x/v3x.ini` or
-  `V3X_NO_CONSOLE=1`. You can type commands into it (see [Console commands](#console-commands)).
-* Enable / disable plugins: main menu > **V3X** button (plugin `mod_menu`, needs `content_packs`).
-  Each tick is saved to the `[plugins]` section of `binaries/v3x/v3x.ini` (`name=0` = the DLL is
-  not loaded) and takes effect at the next start. You can also edit that section by hand, or use the
-  console: `modmenu toggle <plugin>`. mod_menu writes the menu to
-  `binaries/v3x/content_packs/v3x_menu/` at every start. **When you remove or disable mod_menu,
-  delete that folder too.** A Paradox mod that changes `gui/frontend/frontend_main.gui` is mounted
-  above content packs, so it wins and the V3X button does not show (mod_menu logs a WARNING naming
-  the mod; the console still works). Details: `docs/re/gui.md`.
+## How it works (technical)
 
-## Writing a plugin
+`victoria3.exe` imports `VERSION.dll`, which is not a Windows "KnownDLL", so Windows loads the copy
+in the game's folder first. V3X's `version.dll` forwards all 17 real functions to
+`System32\version.dll` ([src/proxy.c](src/proxy.c)), hooks the game's entry point, and there, before
+the game's own startup code runs, loads every enabled plugin ([src/core.c](src/core.c)).
 
-See `include/v3x.h` (the whole API) and `plugins/hello/hello.c` (template). Any C or C++
-compiler targeting x64 Windows works. With this repo's toolchain:
+<p align="center">
+  <img src="docs/assets/architecture.svg" alt="Architecture: victoria3.exe loads binaries/version.dll, which forwards to System32 version.dll and starts the V3X core (loader, code finding, hooks, frame tick, console, events), which loads the plugins; plugins hook engine functions after fail-closed checks." width="100%">
+</p>
 
-```sh
-python -m ziglang cc -target x86_64-windows-gnu -O2 -shared -Iinclude -o my.dll my.c
-```
+## Troubleshooting
 
-Plugins run at the very start of the process: code is mapped and hookable, but game globals
-do not exist yet. Hook functions now and do the work when they are called, or use `on_frame`.
+* **The game does not start or crashes at once:** rename `binaries/version.dll` and try again. If
+  the game now works, turn plugins off one by one in `binaries/v3x/v3x.ini` to find the culprit.
+* **Where are the logs?** `binaries/v3x/v3x.log` (everything V3X did), `crash.log` and
+  `crash.prev.log` (the last two runs). Copy them before you restart: the next start overwrites them.
+* **There is a `v3x.<number>.log` instead of `v3x.log`:** after a crash, Paradox's CrashReporter can
+  keep `v3x.log` open, so V3X writes a per-process log instead.
+* **New Game or loading crashes with "out of memory":** look for `Windows commit limit is
+  exhausted` in `v3x.log`. Make the Windows pagefile bigger (system-managed or 16 GB+). Background:
+  [docs/re/memory.md](docs/re/memory.md).
+* **Low disk space on C::** the pagefile grows on its drive, and the game failed to write an
+  autosave (`Failed to write to disk`) when C: was nearly full. Keep several GB free.
+* **A plugin says `anchor ... FAILED`:** the game was updated and that plugin switched itself off.
+  The rest keeps working.
 
-The API is versioned (`api_version`, `struct_size`); check them before using newer fields:
+More: [docs/troubleshooting.md](docs/troubleshooting.md).
 
-* v1: logging, scanning (`pattern_scan`, `find_string`, `find_xref`, `function_start`), hooks,
-  `patch`, `on_frame`, paths.
-* v2: console commands: `register_command`, `print`, `run_on_main`, `exec_command`.
-* v3: `exec_capture` (run a command and also receive its `print`/`log` output in a callback),
-  and named events between plugins: `on_event` / `emit_event` (e.g. `load_transition`).
+## FAQ
 
-## Plugins
+**Multiplayer?** No. V3X is a single-player tool; other players would run different code.
 
-Every plugin finds its targets by string / RTTI anchors plus byte checks (reverse-engineered on
-1.15.1) and **fails closed**: if an anchor does not match, that plugin (or that feature) changes
-nothing and says why in `v3x.log`. "built+tests" = builds and its offline test passes;
-"in game" = how far it has been run in the real game (1.15.1).
+**Ironman and achievements?** V3X does not touch achievement code or DLC ownership. But the
+bundled `ironman_console` makes the console usable in ironman, and some plugins can change the
+simulation. If achievements matter to you, set `ironman_console = 0` and leave the opt-in
+simulation options off.
 
-| plugin | built+tests | in game | what it does | default | console |
-|---|---|---|---|---|---|
-| `hello` | yes | played (4h session) | template; logs on load and every 3000 frames | always on | - |
-| `ironman_console` | yes | played (4h session) | the developer console works in ironman: hooks the "is the console blocked?" predicate and clears only the ironman reason, so multiplayer stays blocked | always on | - |
-| `crash_logger` | yes | played (4h session) | own crash log `v3x/crash.log` (previous run: `crash.prev.log`): C++ throws with type names, fatal SEH exceptions with registers and stack, abort, big memory changes | always on | - |
-| `devtools` | yes | played (4h session) | CPU per thread, optional ~1 kHz sampling profiler, memory and GPU memory reports in `v3x/devtools.log`, profile CSVs (per load phase with API v3) | profiler off | `profile` |
-| `devconsole` | yes | loads only (smoke test); commands not typed in game yet | reverse-engineering commands with Zydis disassembly; reads memory only | always on | `dis` `fn` `xref` `scan` `mem` `mods` |
-| `devbridge` | yes | played (4h session); MCP answered live | runs console commands for a local tool (`mcp/v3x_mcp.py`) over the named pipe `\\.\pipe\v3x_devbridge` and returns their output; adds no commands or hooks | on | - |
-| `log_filter` | yes | played (4h session) | drops / dedupes noisy engine log messages in `spdlog::logger::sink_it_` before any log file sees them; stats in `v3x/log_filter_stats.txt` | on, 5 noise rules | - |
-| `content_packs` | yes | played (4h session); loads, no packs tested | mounts every folder in `v3x/content_packs/` on top of the game's virtual file system (file overrides without a mod; optional `order.txt`; `_name` = disabled) | always on | `packs` |
-| `mod_menu` | yes | not run in game | **V3X** button + plugin window on the main menu: hooks one GUI static initializer (OpenWikiUrl registrar) to register the GUI functions `V3XToggle<i>`, generates `content_packs/v3x_menu/gui/frontend/frontend_main.gui` from the vanilla file, ticks write `[plugins]` in `v3x.ini` (restart needed); fails closed to the vanilla menu | on | `modmenu` |
-| `keep_history` | yes | played (4h session) | graphs of a country you stop playing are no longer wiped (NOPs the 11 `Trend::Clear` calls); `record_all` also samples AI countries like players (28 days, daily) | on | - |
-| `tick_profiler` | yes | played (4h session) | per-tick-task wall-time profile (hook on `RunTask`); top-25 table every 60 s and `v3x/tick_profile.csv` | on (`V3X_NO_TICKPROF=1` = off) | `ticks` |
-| `sim_opt` | yes | loads only (smoke test) | tick diagnostics via a slot-6 wrapper on every `CTickTask_` vtable; opt-in `throttle` (skip 1 of N runs) and `stagger_journal` (spread the monthly journal pulse) change the simulation, single player only | only `diag_trades` (read-only) | `simopt` |
-| `fast_load` | yes | played (4h session); `pump_yield`/`worker_spin`: loads only (smoke test) | load-time measurement hooks, `v3x/load_timeline.txt`; emits `load_transition(_begin)`; optional `mesh_threads`, `pump_yield`, `worker_spin` | timeline on, no behaviour change | - |
-| `mem_tuner` | yes | played (4h session); periodic collect / census / gui pool: loads only (smoke test) | tunes the engine's mimalloc options before CRT init (lower commit), `mi_collect` after loads and on commit growth, one OOM rescue, mimalloc error log, commit census | on | `memcollect` `memstat` |
-| `alloc_tracker` | yes | played (4h session) | diagnostic: hooks mimalloc `mi_new`/`mi_malloc`/`mi_free`, live and total bytes per call site in `v3x/alloc_report.txt` | off | `allocs` |
-| `cpu_sched` | yes | played (4h session) | on hybrid (P/E) CPUs: main thread and ABOVE_NORMAL workers on P-cores, BELOW_NORMAL workers on E-cores (CPU sets); optional `task_threads`; does nothing on non-hybrid CPUs | on | `cpusched` |
-| `frame_pacer` | yes | played (4h session) | replaces the frame-cap busy-wait with a timer sleep; lower caps when idle, paused, in background or minimised; optional `tick_render_hz` | on | `frame_pacer` |
-| `gfx_driver` | yes | played (4h session) | creates the D3D11 device with `PREVENT_INTERNAL_THREADING_OPTIMIZATIONS` (fewer GPU-driver threads on iGPUs); retries without it on failure | on | - |
-| `asset_stream` | yes | played (4h session) | forces the engine's own texture streamer on (every quality preset turns it off), budget `cache_mb` | off | `assetstream` |
-| `lazy_mesh` | yes | played (4h session) (incl. `lazy`); prefetch / merge: loads only (smoke test) | `measure` records which mesh types are really used (`v3x/lazy_mesh_used.txt`); `lazy` loads deferred mesh types on first use | off | `lazymesh` |
-| `map_cache` | yes | loads only (smoke test) | measures repeated texture disk reads (weak texture cache) behind map-mode / GUI lag, `v3x/map_cache_report.txt`; `mode=on` keeps re-read textures alive (LRU) | `measure` | `mapcache` |
-| `enhance` | yes | loads only (smoke test) | single-player engine fixes: `binary_saves_in_debug` (debug_mode no longer forces 156 MB text saves), `deflate_level`, `speed_table`, `save_timing`, `lean_debug`, `fast_speed5` (*experimental*); always hooks `SaveGameState` to emit `save_begin`/`save_end` | binary saves + save log on | `enhance` `speed` `lean` `fast5` |
+**Does it work with my Workshop mods?** Yes. V3X does not change your mod list. One exception: a
+mod that replaces the main menu file hides the V3X button (the `[plugins]` list in `v3x.ini` still
+works).
 
-### Configuration
+**Will it break my saves?** The default plugins only measure, log, or fix engine behaviour. Plugins
+that change the simulation are off by default. Back up saves before trying new options anyway.
 
-Each plugin reads `binaries/v3x/<plugin>.ini`; every key is optional and a missing file means the
-defaults below. Where a `plugins/<p>/<p>.ini.example` exists it holds the defaults with comments.
+**What happens when Victoria 3 updates?** Plugins whose engine code changed switch themselves off
+and say so in the log until they are updated. V3X was built and tested on **1.15.1**.
 
-| plugin | keys (default) |
+**Is it a virus?** It uses the standard "DLL next to the exe" technique that many game tools use,
+which some antivirus programs flag on principle. All source code is here; you can build it yourself.
+
+**Linux / Proton?** Untested. It may need `WINEDLLOVERRIDES="version=n,b"`.
+
+More: [docs/faq.md](docs/faq.md).
+
+## Compatibility
+
+| | |
 |---|---|
-| `devtools` | `profile=0` (or env `V3X_PROFILE=1`; Ctrl+hotkey toggles), `interval_sec=10`, `hotkey_report=F10`, `sample_hz=1000`, `sample_threads=4`, `unwind_depth=8` |
-| `devbridge` | `enabled=1`, `pipe=v3x_devbridge` (env `V3X_DEVBRIDGE_PIPE` wins) |
-| `log_filter` | `preset=default` (`aggressive`), `enabled=1`, `min_level=0`, `dedupe_first=3`, `dedupe_template=0`, `summary_interval=60`; rules `drop`/`drop_loc`/`drop_msg`, `keep`/`keep_loc`/`keep_msg` (max 128) |
-| `keep_history` | `[keep_history]` `record_all=1`, `rate_days=28` |
-| `sim_opt` | `[sim_opt]` `enabled=1`, `diag=0`, `diag_trades=1`, `throttle=0`, `throttle_tasks=HandleAutonomousInvestment:3,...`, `stagger_journal=0`, `stagger_days=4` (env `V3X_NO_SIMOPT=1` = off) |
-| `fast_load` | `timeline=1`, `db_nodes=1`, `mesh_threads=0`, `counters=1`, `pump_yield=0`, `worker_spin=0`, `checksum_cache=0` (fails closed in this build), `cache_verify=1` |
-| `mem_tuner` | `[mem_tuner] enabled=1`; `[options] enabled=1 eager_commit=0 abandoned_page_decommit=1 decommit_delay=10 segment_decommit_delay=100 decommit_extend_delay=0`; `[collect] after_transition=1 own_hook=0 delay_frames=30`; `[oom] enabled=1 reserve_mb=128 log_mimalloc_errors=1 max_error_logs=32`; `[periodic] enabled=1 force=0 check_sec=30 grow_mb=256 min_interval_min=5 max_ms=100`; `[census] enabled=1 every_min=10`; `[gui_anim_pool] diag=1` |
-| `alloc_tracker` | `[alloc_tracker]` `enabled=0`, `big_kb=64`, `sample_kb=256`, `stack_mb=1`, `report_interval_s=30`, `report_top=40`, `wrapper_max_bytes=256`, `skip=` |
-| `cpu_sched` | `[cpu_sched]` `enabled=1`, `main=pcores`, `below_normal=ecores`, `normal=all`, `above_normal=pcores`, `task_threads=0` |
-| `frame_pacer` | `[frame_pacer]` `enabled=1`, `replace_busy_wait=1`, `idle_fps=20`, `idle_after_s=30`, `paused_idle_after_s=3`, `background_fps=20`, `minimized_fps=5`, `sim_idle_ms=3000`, `tick_render_hz=0`, `log_interval_s=10` |
-| `gfx_driver` | `[gfx_driver]` `prevent_driver_threading=1` |
-| `asset_stream` | `[asset_stream]` `enabled=0`, `texture_streaming=1`, `cache_mb=512` |
-| `lazy_mesh` | `mode=off` (`measure`, `lazy`), `skip_debug=1`, `defer_dirs=gfx/models/portraits/, gfx/models/military/`, `defer_all=0`, `eager_contains=bridge`, `eager_file=lazy_mesh_eager.txt`, `startup_from_report=1`, `prefetch_on_game=1`, `prefetch_all=0`, `prefetch_gap_ms=20`, `merge_report=1`, `prefetch_after_s=0`, `wait_timeout_ms=60000`, `log_loads=1` |
-| `map_cache` | `mode=measure` (`off`, `on`), `spike_ms=250`, `load_log_ms=50`, `load_log_mb=8`, `log_budget=2000`, `big_reserve_mb=16`, `summary_sec=300`; `mode=on` only: `budget_mb=256`, `max_texture_mb=32`, `repeat_min=2`, `max_pins=1024`, `unknown_size_kb=1024` |
-| `enhance` | `[enhance]` `binary_saves_in_debug=1`, `deflate_level=0`, `speed_table=0`, `speed1=2.0`, `speed2=1.0`, `speed3=0.5`, `speed4=0.25`, `save_timing=1`, `lean_debug=0`, `lean_gui=1`, `lean_tooltips=1`, `lean_theater_cache=1`, `fast_speed5=0` |
+| Game | Victoria 3 **1.15.1** (Steam), single player. Other versions: plugins that do not match switch themselves off. |
+| OS | Windows x64. Linux/Proton untested. |
+| Mods | works with normal mods and playsets. |
+| Hardware | developed on a 16 GB PC with an integrated GPU; `cpu_sched` helps only on hybrid (P/E-core) CPUs. |
 
-`hello`, `ironman_console`, `crash_logger`, `devconsole`, `content_packs` and `tick_profiler`
-have no ini.
+## Roadmap
 
-## Console commands
+Planned, not promised:
 
-Type them into the V3X console window (`help` lists everything that is registered). Commands run
-on the console input thread, not the game's main thread.
+* First release zip on GitHub Releases, and real screenshots for this page.
+* Verify in game what has only been tested offline so far: `mod_menu`, `console_plus`, `tick_par`,
+  `mod_loader`, and the newer `mem_tuner` and `lazy_mesh` features.
+* Measure the `lazy_mesh` follow-up fixes (start-up prefetch) and decide whether it can be on by default.
+* Keep plugins working on new game versions (update their anchors).
+* Choose a license (see below).
 
-| command | from | what it does |
-|---|---|---|
-| `help [command]` | core | list commands |
-| `plugins` | core | plugin DLLs and their load status |
-| `log <text>` | core | write a line to `v3x.log` |
-| `version` | core | loader API version, game version, exe base |
-| `quit`, `exit` | core | does not quit; says how to close the game |
-| `dis <addr> [count]` | devconsole | disassemble (default 20, max 500 instructions) |
-| `fn <addr> [max]` | devconsole | the whole function containing addr (bounds from `.pdata`) |
-| `xref <addr\|"string"> [max]` | devconsole | rip-relative `lea`/`mov` in the game's `.text` that reference addr or the exact string |
-| `scan [-n max] <ida pattern>` | devconsole | all matches in the game's `.text` (default max 20), e.g. `scan 48 8B 05 ?? ?? ?? ?? 48 85 C0` |
-| `mem <addr> [len]` | devconsole | hex + ASCII dump (default 128, max 4096 bytes) |
-| `mods [filter]` | devconsole | loaded modules: base, size, name |
-| `profile on\|off\|report\|reset` | devtools | sampling profiler |
-| `packs` | content_packs | content packs and their mount state |
-| `modmenu` | mod_menu | plugin list (now / next start); `modmenu toggle <plugin>` flips one for the next start |
-| `ticks [reset]` | tick_profiler | tick task profile |
-| `simopt [reset \| throttle on\|off]` | sim_opt | diag / trades report, reset, switch throttling |
-| `memcollect` | mem_tuner | return free mimalloc memory to Windows (`mi_collect(true)`) |
-| `memstat` | mem_tuner | commit census (mimalloc segments vs other) + periodic collect stats |
-| `allocs [top N]` | alloc_tracker | top allocation call sites by live and total bytes |
-| `cpusched` | cpu_sched | P/E core map and each worker's CPU set |
-| `frame_pacer` | frame_pacer | frame pacer status |
-| `assetstream` | asset_stream | texture streamer forcing status |
-| `lazymesh [status \| dump \| load <type>]` | lazy_mesh | status, write `v3x/lazy_mesh_used.txt`, load one type |
-| `mapcache [status \| report \| flush]` | map_cache | status, write `v3x/map_cache_report.txt`, release pins |
-| `enhance` | enhance | which enhancements are active |
-| `speed [<1-4> <seconds per tick>]` | enhance | show / set the game-speed table (not saved to the ini) |
-| `lean [on\|off]` | enhance | debug_mode without its debug-only GUI / tooltips |
-| `fast5 [on\|off]` | enhance | post the next speed-5 tick when the previous one ends |
+## Documentation
 
-devconsole addresses can be written as hex (`0x7ff6...`, WinDbg backticks allowed), `+rva` in
-the game exe (`+0x3e17820`), or `module+offset` exactly as the commands print them
-(`victoria3.exe+0x3e17820`). Game memory is only read through `ReadProcessMemory` after a
-`VirtualQuery` check, so a bad address prints an error instead of crashing the game.
+[Docs index](docs/README.md) · [Getting started](docs/getting-started.md) ·
+[Configuration](docs/configuration.md) · [Console commands and events](docs/console-commands.md) ·
+[Plugin catalog](docs/plugins.md) · [API reference](docs/api-reference.md) ·
+[Safety rules](docs/safety.md) · [Building and testing](docs/testing.md) ·
+[Reverse engineering](docs/reverse-engineering.md) · [Engine map](docs/engine-map.md) ·
+[Troubleshooting](docs/troubleshooting.md) · [FAQ](docs/faq.md) · [RE notes](docs/re/)
 
-## Known events
+## Contributing, license, credits
 
-Named events between plugins (API v3, `on_event` / `emit_event`; list in `include/v3x.h`):
+* **Contributing:** read [CONTRIBUTING.md](CONTRIBUTING.md) and [docs/safety.md](docs/safety.md)
+  first. Changes: [CHANGELOG.md](CHANGELOG.md).
+* **License: not chosen yet.** Until the project lead picks one, no license is granted (all rights
+  reserved by the authors); see [LICENSE](LICENSE).
+* **Credits:** [MinHook](https://github.com/TsudaKageyu/minhook) (BSD 2-Clause) for inline hooks,
+  [Zydis](https://github.com/zyantific/zydis) (MIT) for disassembly. Details:
+  [third_party/NOTICES.md](third_party/NOTICES.md).
+* Victoria 3 is a trademark of Paradox Interactive. V3X is an unofficial fan project and is not
+  affiliated with or endorsed by Paradox Interactive.
 
-| event | emitter, thread | data | subscribers |
-|---|---|---|---|
-| `load_transition` | fast_load, main, when a load-state transition ends | `const V3X_LoadTransition *` {`from`, `to`, `seconds`} (may be NULL) | alloc_tracker, devtools, lazy_mesh, map_cache, mem_tuner, sim_opt, tick_profiler |
-| `load_transition_begin` | fast_load, main, when a transition begins | `const V3X_LoadTransition *` (`seconds` = 0; may be NULL) | devtools |
-| `save_begin` | enhance, the saving thread (main), right before `SaveGameState` | `const V3X_SaveBegin *` {`name`, may be NULL} | sim_opt |
-| `save_end` | enhance, same thread, right after that save returned | the same `const V3X_SaveBegin *` | - |
-
-## Layout
-
-```
-include/v3x.h        public plugin API (C ABI, versioned)
-include/v3x_rtti.h   MSVC RTTI lookup helpers for plugins
-src/proxy.c          version.dll export forwarding
-src/core.c           boot, plugin loader, scanning, hooks, frame tick, console, events
-plugins/*            plugins (see above)
-test/*.c             tests without the game (see below)
-tools/*.py           reverse-engineering helpers: pestrings (strings + RVA),
-                     pexref (code xrefs + disassembly), peptr (pointer refs), re_* (per topic)
-docs/re/*.md         reverse-engineering notes
-third_party/minhook  inline hooking (BSD-2)
-third_party/zydis    x86 disassembler, amalgamated (MIT); used by devconsole
-```
-
-## Tests (no game needed)
-
-C: is often full on this machine, so every test writes only under `D:/v3x_tmp`, and the
-compiler's temp and cache directories go there too. Run this once per shell, from `v3x/`:
-
-```sh
-export TEMP=D:/v3x_tmp TMP=D:/v3x_tmp ZIG_GLOBAL_CACHE_DIR=D:/v3x_tmp/zcache ZIG_LOCAL_CACHE_DIR=D:/v3x_tmp/zcache
-CC="python -m ziglang cc -target x86_64-windows-gnu -O2 -Iinclude"
-M=third_party/minhook; EXE=../binaries/victoria3.exe; T=D:/v3x_tmp/t; mkdir -p $T
-./build.sh                                   # build/version.dll + build/plugins/*.dll
-```
-
-Every test prints one line per check and `ALL OK` at the end (exit code 0). Arguments in `[ ]`
-are optional; with `$EXE` a test maps the real exe as an image (no game code runs) and checks the
-plugin's anchors against it. Each file's header comment has the full details.
-
-Offline tests (one line each; they `#include` the plugin source or load the built DLL against a
-fake `V3X_API`):
-
-```sh
-$CC -o $T/att.exe test/alloc_tracker_test.c && $T/att.exe [$EXE build/plugins/alloc_tracker.dll]
-$CC -o $T/ast.exe test/asset_stream_test.c && $T/ast.exe plugins/asset_stream/asset_stream.ini.example [$EXE [$T]]
-mkdir -p $T/cp && $CC -o $T/cpt.exe test/content_packs_test.c && $T/cpt.exe $T/cp
-mkdir -p $T/mm && $CC -o $T/mmt.exe test/mod_menu_test.c && $T/mmt.exe $T/mm [../game/gui/frontend/frontend_main.gui [$EXE]]
-$CC -o $T/cst.exe test/cpu_sched_test.c && $T/cst.exe [$EXE|- [build/plugins/cpu_sched.dll]]
-mkdir -p $T/enh && $CC -o $T/enht.exe test/enhance_test.c && $T/enht.exe $T/enh [$EXE]
-$CC -I$M/include -o $T/flt.exe test/fast_load_test.c $M/src/buffer.c $M/src/hook.c $M/src/trampoline.c $M/src/hde/hde64.c && $T/flt.exe [$EXE]
-$CC -o $T/fpt.exe test/frame_pacer_test.c && $T/fpt.exe plugins/frame_pacer/frame_pacer.ini.example [$EXE]
-$CC -o $T/gdt.exe test/gfx_driver_test.c && $T/gdt.exe plugins/gfx_driver/gfx_driver.ini.example [$EXE]
-$CC -o $T/kht.exe test/keep_history_test.c && $T/kht.exe $EXE build/plugins/keep_history.dll
-$CC -o $T/lmt.exe test/lazy_mesh_test.c && $T/lmt.exe [$EXE]                # writes D:/v3x_tmp/lazymesh/t/
-$CC -o $T/lft.exe test/log_filter_test.c && $T/lft.exe plugins/log_filter/log_filter.ini.example
-$CC -DMC_TEST -o $T/mct.exe test/map_cache_test.c && $T/mct.exe [$EXE]      # writes D:/v3x_tmp/mapmode/t/
-$CC -o $T/mtt.exe test/mem_tuner_test.c && $T/mtt.exe [$EXE [build/plugins/mem_tuner.dll [api_version]]]
-$CC -o $T/rtti.exe test/rtti_test.c && $T/rtti.exe [$EXE <expected CTickTask_ count>]
-$CC -o $T/sot.exe test/sim_opt_test.c && $T/sot.exe
-$CC -o $T/cplt.exe test/console_plus_test.c && $T/cplt.exe [$EXE]
-$CC -o $T/tpar.exe test/tick_par_test.c && $T/tpar.exe
-$CC -o $T/tpt.exe test/tick_profiler_test.c && $T/tpt.exe
-```
-
-End-to-end tests link `build/version.dll` like `victoria3.exe` does, so V3X boots and loads
-`<dir>/v3x/plugins/*.dll` before `main`. `e2e <test> <plugins...>` builds one into `$T/<test>/`
-with only the plugins it needs:
-
-```sh
-e2e() { D=$T/$1; mkdir -p $D/v3x/plugins && cp build/version.dll $D/ && $CC -o $D/$1.exe test/$1.c -Lbuild -l:version.dll -luser32 && shift && for p in "$@"; do cp build/plugins/$p.dll $D/v3x/plugins/; done; }
-e2e harness ironman_console && (cd $D && V3X_NO_CONSOLE=1 ./harness.exe)                 # loader + ironman_console
-e2e devconsole_test devconsole && (cd $D && V3X_NO_CONSOLE=1 ./devconsole_test.exe)      # commands, fault-proof reads, exec_capture
-e2e devbridge_test devconsole devbridge && (cd $D && V3X_NO_CONSOLE=1 V3X_DEVBRIDGE_PIPE=v3x_devbridge_test ./devbridge_test.exe)  # private pipe required
-e2e devtools_test devtools && echo interval_sec=2 > $D/v3x/devtools.ini && (cd $D && V3X_NO_CONSOLE=1 V3X_PROFILE=1 ./devtools_test.exe)
-e2e crash_test crash_logger && (cd $D && V3X_NO_CONSOLE=1 ./crash_test.exe)               # runs copies of itself in child_<mode>/
-```
-
-Process-exit test: every plugin plus the test-only `test/shutdown_probe.c`; the runner starts the
-child 20 times, each must exit within 10 s with code 42 after `ExitProcess` while other threads
-hammer the log lock, heap and CRT (`con` = own hidden console window with the input thread
-reading, `nocon` = `V3X_NO_CONSOLE=1`):
-
-```sh
-D=$T/shutdown && mkdir -p $D/v3x/plugins && cp build/version.dll $D/ && cp build/plugins/*.dll $D/v3x/plugins/
-$CC -shared -o $D/v3x/plugins/shutdown_probe.dll test/shutdown_probe.c
-$CC -o $D/shutdown_child.exe test/shutdown_test.c -Lbuild -l:version.dll -luser32
-$CC -DSHUTDOWN_RUNNER -o $D/shutdown_test.exe test/shutdown_test.c
-$D/shutdown_test.exe $D/shutdown_child.exe 20 con && $D/shutdown_test.exe $D/shutdown_child.exe 20 nocon
-```
-
-`test/test_mcp.py` tests the MCP server against `devbridge_test.exe --serve N`.
-
-## Caveats
-
-* Single player only. Native code bypasses the checksum, so don't use it in multiplayer.
-* Ironman achievements may still be affected by what your plugins do. That's your call.
-* Game updates can change function shapes, even when the string anchors survive. Plugins should
-  check what they find and fail gracefully (return non-zero from `v3x_plugin_load`).
+<p align="center"><img src="docs/assets/logo.svg" alt="V3X logo" width="64"></p>

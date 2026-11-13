@@ -241,7 +241,7 @@ It is not a cache of tooltip strings: the key is (widget, animation name from .g
 - Next session: if `live` keeps rising during steady play with the same windows open, it is a leak in the engine. Then the next step is to RE which widget type keeps its record (count records in `M+0x88` by widget vtable).
 
 ## 11. Where the 17 GB are, and the attribution/fix tools (worker mem3, 2026-11-13)
-Session: `D:/v3x_tmp/sessions/crash3-20261113-133830` (about 10 min: load, then 7 min of play, 17.5 GB private, 0.4-2.4 GB RAM free).
+Session: `crash3-20261113-133830` (local session folder, not in the repo) (about 10 min: load, then 7 min of play, 17.5 GB private, 0.4-2.4 GB RAM free).
 
 **Split at 13:35:39 [D]** (mem_tuner census, private commit 17,469 MiB):
 

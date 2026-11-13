@@ -18,3 +18,14 @@ mods/v3x_lowspec_shaders/gfx/
 
 # local config
 .mcp.json
+
+# logs, dumps and runtime outputs (never commit a session's data)
+*.log
+*.dmp
+tools/*.csv
+
+# editor / OS
+.vscode/
+.idea/
+Thumbs.db
+scripts/*.log

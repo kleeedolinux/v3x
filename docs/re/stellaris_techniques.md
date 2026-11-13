@@ -5,7 +5,7 @@ diaries and patch notes, (C) what carries over to Victoria 3 1.15.1 and how V3X 
 
 How the claims are marked:
 - **[V-code]**: read in the cloned source (`%TEMP%\v3x_research\<repo>`, `git clone --depth 1`, 2026-11-12).
-- **[V-exe]**: checked by static scripts on `D:\SteamLibrary\steamapps\common\Victoria 3\binaries\victoria3.exe`.
+- **[V-exe]**: checked by static scripts on `binaries\victoria3.exe` (1.15.1).
   - PE TimeDateStamp is `0x6AF3094F`.
   - The scripts are in `...\v3x_research\scripts\` (`rtti.py`, `rtti2.py`, `strgrep.py`, `ctx.py`, `col.py`).
 - **[V-news]**: quoted from the Steam News API, full text, `feeds=steam_community_announcements`.

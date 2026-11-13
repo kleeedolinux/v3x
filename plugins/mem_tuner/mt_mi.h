@@ -203,9 +203,11 @@ static int mt_mi_anchor(const unsigned char *code, size_t n, uint64_t va0, mt_mi
 }
 
 /* ---- live walk (Windows) ---- */
-/* VirtualQuery the whole address space; parse each 32 MiB-aligned private allocation. `buf` must hold
+/* VirtualQuery the whole address space; parse each 32 MiB-aligned private allocation except the one
+ * based at `skip` (0 = none; a caller's own non-mimalloc allocation, e.g. mem_tuner's OOM reserve,
+ * which is 32 MiB aligned by chance often enough to make the counts nondeterministic). `buf` must hold
  * MI_HDR_BYTES. Returns the number of candidate allocations. Runs in a few ms for ~300 segments. */
-static int mt_mi_walk(mt_mi_sum *s, uint64_t key, unsigned char *buf)
+static int mt_mi_walk_skip(mt_mi_sum *s, uint64_t key, unsigned char *buf, uint64_t skip)
 {
     memset(s, 0, sizeof *s);
     SYSTEM_INFO si; GetSystemInfo(&si);
@@ -225,7 +227,8 @@ static int mt_mi_walk(mt_mi_sum *s, uint64_t key, unsigned char *buf)
             cur = 0; cur_ok = 0; vq = 0;
             if (more && mb.State != MEM_FREE) {
                 cur = ab;
-                cur_ok = mb.Type == MEM_PRIVATE && !(ab & (MI_SEGSZ - 1)) && mb.BaseAddress == mb.AllocationBase && mb.State == MEM_COMMIT;
+                cur_ok = mb.Type == MEM_PRIVATE && !(ab & (MI_SEGSZ - 1)) && mb.BaseAddress == mb.AllocationBase && mb.State == MEM_COMMIT
+                         && (!skip || ab != skip);
             }
         }
         if (!more) break;
@@ -236,6 +239,7 @@ static int mt_mi_walk(mt_mi_sum *s, uint64_t key, unsigned char *buf)
     }
     return cand;
 }
+static int mt_mi_walk(mt_mi_sum *s, uint64_t key, unsigned char *buf) { return mt_mi_walk_skip(s, key, buf, 0); }
 
 /* Read the OS stats block (our own process memory; plain reads of .data). */
 typedef struct { int64_t committed, committed_peak, reserved, reserved_peak, threads, commit_calls; } mt_mi_os;

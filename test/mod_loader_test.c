@@ -65,6 +65,27 @@ static void mkfile(const char *rel)
     if (f) { fputs(strstr(rel, ".yml") ? "l_english:\n" : "x = 1\n", f); fclose(f); }
 }
 
+/* The cache signature is "every directory keeps its mtime". NTFS stamps a directory change with the
+ * coarse system clock (~1-16 ms), so a file created within the same tick as the previous change of
+ * that directory leaves its mtime unchanged and the change is invisible to the signature. Tests that
+ * need "this directory changed" set the mtime explicitly (+10 s) instead of relying on timing. */
+static void bump_dir_mtime(const char *rel)
+{
+    char p[600];
+    snprintf(p, sizeof p, TROOT "/%s", rel);
+    HANDLE h = CreateFileA(p, FILE_WRITE_ATTRIBUTES | FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                           NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    FILETIME ft; ULARGE_INTEGER u;
+    int ok = h != INVALID_HANDLE_VALUE && GetFileTime(h, NULL, NULL, &ft);
+    if (ok) {
+        u.LowPart = ft.dwLowDateTime; u.HighPart = ft.dwHighDateTime; u.QuadPart += 10ull * 10000000ull;
+        ft.dwLowDateTime = u.LowPart; ft.dwHighDateTime = u.HighPart;
+        ok = SetFileTime(h, NULL, NULL, &ft) != 0;
+    }
+    if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+    if (!ok) { printf("FAIL bump_dir_mtime(%s): error %lu\n", rel, GetLastError()); fails++; }
+}
+
 static void wait_ready(root_t *r)
 {
     for (int i = 0; i < 400 && r->state == IX_PENDING; i++) Sleep(5);
@@ -239,6 +260,7 @@ static void test_runtime(void)
     CHECK(r1->would_n == 2 && r1->mismatch == 0 && r1->fp == 0);
     CHECK(r1->st_n == 5 && r1->st_miss == 2 - alias && r1->op_n == 2 && r1->op_miss == 1 && r1->skipped == 0);
     mkfile("ws/steamapps/workshop/content/529340/111/common/new.txt");          /* appears after indexing */
+    bump_dir_mtime("ws/steamapps/workshop/content/529340/111/common");           /* test_cache relies on this change */
     CHECK((int)stat_detour(op1, "common/new.txt", 0, 0, 0, 0, 0, 0) == 1);       /* measure: real answer */
     CHECK(r1->mismatch == 1 && g_nmismatch == 1 && !g_disabled);
     /* install root <game>/game: indexed too (index_game=1) */
@@ -622,8 +644,8 @@ static void test_cache(void)
     }
     /* change a deep directory of 555 -> next launch rebuilds 555 */
     CHECK(cache_save() > 0);
-    Sleep(20);
     mkfile("ws/steamapps/workshop/content/529340/555/gfx/sub/deep/added.txt");
+    bump_dir_mtime("ws/steamapps/workshop/content/529340/555/gfx/sub/deep");
     g_nroots = 0;
     cache_load();
     stat_detour(op5, "gfx", 0, 0, 0, 0, 0, 0);

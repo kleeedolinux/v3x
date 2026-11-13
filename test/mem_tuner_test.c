@@ -117,6 +117,12 @@ static void test_periodic_census(void)
     CHECK(c.bn[0] == 1 && c.bn[1] == 0 && c.bn[2] == 2 && c.bn[3] == 1 && c.bc[3] == 128 * M);
     CHECK(c.mapped_commit == 2 * M && c.image_commit == 97 * M);
     CHECK(c.total_private_commit == c.seg_commit + c.huge_commit + c.other_commit);
+    /* the plugin's own OOM reserve is often 32 MiB aligned by chance: passed as NOT_MI it stays "other" */
+    memset(&c, 0, sizeof c);
+    mt_census_region(&c, a, 128 * M, 1, MT_PRIVATE_NOT_MI); mt_census_region(&c, a + 4 * S, 32 * M, 1, MT_PRIVATE_NOT_MI);
+    mt_census_finish(&c);
+    CHECK(c.seg_n == 0 && c.huge_n == 0 && c.mi_reserved_only == 0);
+    CHECK(c.other_n == 2 && c.other_commit == 160 * M && c.bn[3] == 1 && c.bn[2] == 1 && c.total_private_commit == 160 * M);
 
     /* census schedule: every 10 min, first one 10 min after start */
     uint64_t next = 0;
@@ -429,6 +435,10 @@ static void test_plugin(const char *dll, int ver)
         /* zero header = not a segment (unparsed); a synthetic 2.0.x header parses (key global is 0 in the mapped image) */
         CHECK(strstr(printbuf, "mimalloc os: committed 0 MiB") && strstr(printbuf, "segments 0 (+0 huge 0 MiB, 1 unparsed 32 MiB"));
         if (al) {
+            /* the walk skips exactly the allocation it is told to skip (the plugin passes its OOM reserve) */
+            static mt_mi_sum ws; static unsigned char wb[MI_HDR_BYTES];
+            int n_all = mt_mi_walk(&ws, 0, wb), n_skip = mt_mi_walk_skip(&ws, 0, wb, (uint64_t)(uintptr_t)al);
+            CHECK(n_all >= 1 && n_skip == n_all - 1);
             build_seg((unsigned char *)al, (uint64_t)(uintptr_t)al, 0);
             printbuf[0] = 0; memstat_cb("threads", NULL);
             CHECK(strstr(printbuf, "segments 1 (+0 huge 0 MiB, 0 unparsed 0 MiB, mask!=VQ 1): committed 0 MiB") != NULL);

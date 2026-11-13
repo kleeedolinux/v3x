@@ -180,10 +180,12 @@ static void census_walk(mt_census *c)
     SYSTEM_INFO si; GetSystemInfo(&si);
     unsigned char *p = (unsigned char *)si.lpMinimumApplicationAddress, *end = (unsigned char *)si.lpMaximumApplicationAddress;
     MEMORY_BASIC_INFORMATION mb;
+    void *own = g_reserve;                         /* our OOM reserve: "other", even when 32 MiB aligned by chance */
     while (p < end && VirtualQuery(p, &mb, sizeof mb) == sizeof mb) {
         if (mb.State != MEM_FREE)
             mt_census_region(c, (uint64_t)(uintptr_t)mb.AllocationBase, mb.RegionSize, mb.State == MEM_COMMIT,
-                             mb.Type == MEM_IMAGE ? MT_IMAGE : mb.Type == MEM_MAPPED ? MT_MAPPED : MT_PRIVATE);
+                             mb.Type == MEM_IMAGE ? MT_IMAGE : mb.Type == MEM_MAPPED ? MT_MAPPED
+                             : own && mb.AllocationBase == own ? MT_PRIVATE_NOT_MI : MT_PRIVATE);
         unsigned char *n = (unsigned char *)mb.BaseAddress + mb.RegionSize;
         if (n <= p) break;
         p = n;
@@ -275,7 +277,7 @@ static int mi_lines(int log, int threads)
     AcquireSRWLockExclusive(&g_mi_lock);
     uint64_t key = (g_mia_got & 2) ? *(volatile uint64_t *)(uintptr_t)g_mia.cookie_key : 0;
     LARGE_INTEGER q0, q1, qf; QueryPerformanceFrequency(&qf); QueryPerformanceCounter(&q0);
-    mt_mi_walk(&s, key, g_mi_buf);
+    mt_mi_walk_skip(&s, key, g_mi_buf, (uint64_t)(uintptr_t)g_reserve);   /* our OOM reserve is never a segment */
     QueryPerformanceCounter(&q1);
     int have_os = (g_mia_got & 1) && mt_mi_os_read(g_mia.stats, &os) == 0;
     mt_mi_format(&s, &os, have_os, b, sizeof b);

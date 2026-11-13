@@ -140,10 +140,12 @@ static void mt_periodic_done(mt_periodic *p, uint64_t now_ms, long long commit_a
  * with the same AllocationBase). mimalloc 2.0.x reserves each segment separately, 32 MiB aligned
  * (mi_free masks pointers with ~(32 MiB-1)): normal segment = exactly 32 MiB, huge segment (object
  * > 16 MiB) = one aligned reservation > 16 MiB. Anything else private is not mimalloc (Win32 heaps,
- * driver/D3D resources, the OOM reserve). A non-mimalloc reservation is 32 MiB aligned by chance
- * with p = 1/512 (64 KiB granularity), so the split is a close estimate, not exact. */
+ * driver/D3D resources, the OOM reserve). A non-mimalloc reservation can be 32 MiB aligned by chance,
+ * so the split is a close estimate, not exact. The chance is far above the naive 1/512 (64 KiB
+ * granularity): a fresh 128 MiB VirtualAlloc came back 32 MiB aligned 2 times in 12 processes. So the
+ * caller passes allocations it knows are not mimalloc (our own OOM reserve) as MT_PRIVATE_NOT_MI. */
 #define MT_SEG (32ull << 20)
-enum { MT_PRIVATE = 1, MT_MAPPED = 2, MT_IMAGE = 3 };
+enum { MT_PRIVATE = 1, MT_MAPPED = 2, MT_IMAGE = 3, MT_PRIVATE_NOT_MI = 4 };
 #define MT_NBUCKET 4   /* other private by committed size: < 1 MiB, < 16 MiB, < 64 MiB, >= 64 MiB */
 typedef struct {
     uint64_t seg_n, seg_full_n, seg_commit;               /* mimalloc normal 32 MiB segments */
@@ -160,7 +162,7 @@ static void mt_census_close(mt_census *c)
     else if (c->cur_type == MT_IMAGE) c->image_commit += c->cur_com;
     else {
         c->total_private_commit += c->cur_com;
-        if (c->cur_base % MT_SEG == 0 && c->cur_res > (16ull << 20)) {
+        if (c->cur_type == MT_PRIVATE && c->cur_base % MT_SEG == 0 && c->cur_res > (16ull << 20)) {
             if (c->cur_res == MT_SEG) { c->seg_n++; c->seg_commit += c->cur_com; c->seg_full_n += c->cur_com == MT_SEG; }
             else { c->huge_n++; c->huge_commit += c->cur_com; }
             c->mi_reserved_only += c->cur_res - c->cur_com;

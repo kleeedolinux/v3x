@@ -39,6 +39,7 @@
 #include "ml_core.h"
 
 V3X_EXPORT const char *v3x_plugin_name = "mod_loader";
+V3X_PLUGIN_MANIFEST("mod_loader", "0.5.0", "v3x", "measures and removes the per-file cost of mods", "release/1.15.1");
 
 #define TAG "mod_loader"
 #define MAX_ROOTS 128

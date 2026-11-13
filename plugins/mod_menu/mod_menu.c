@@ -28,6 +28,7 @@
 #include "mm_resolve.h"
 
 V3X_EXPORT const char *v3x_plugin_name = "mod_menu";
+V3X_PLUGIN_MANIFEST("mod_menu", "0.5.0", "v3x", "enable or disable V3X plugins from the main menu", "release/1.15.1");
 
 #define TAG "mod_menu"
 

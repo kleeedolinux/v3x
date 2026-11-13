@@ -27,6 +27,7 @@
 #include "../../sdk/v3x_hook.h"   /* V3X_PASS8: forward 8 integer slots, whatever the real arg count */
 
 V3X_EXPORT const char *v3x_plugin_name = "content_packs";
+V3X_PLUGIN_MANIFEST("content_packs", "0.5.0", "v3x", "mounts extra content folders into the game file system", "release/1.15.1");
 
 #define TAG "content_packs"
 #define MAX_PACKS 64

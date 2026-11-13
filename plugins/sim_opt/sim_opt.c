@@ -44,6 +44,7 @@
 #include "v3x_rtti.h"
 
 V3X_EXPORT const char *v3x_plugin_name = "sim_opt";
+V3X_PLUGIN_MANIFEST("sim_opt", "0.5.0", "v3x", "simulation-tick diagnostics and opt-in task changes", "release/1.15.1");
 
 #define TAG "sim_opt"
 #define MAXT 512

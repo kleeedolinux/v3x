@@ -67,7 +67,7 @@ int main(void)
 {
     setvbuf(stdout, NULL, _IONBF, 0);
     const V3X_API *api = v3x_api();
-    CHECK(api && api->api_version == 4 && api->struct_size == sizeof(V3X_API), "api v%u, struct_size %u",
+    CHECK(api && api->api_version >= 4 && api->struct_size == sizeof(V3X_API), "api v%u (>= 4), struct_size %u",
           api ? api->api_version : 0, api ? api->struct_size : 0);
     CHECK(V3X_HAS(api, hook_safe) && V3X_HAS(api, main_thread_id) && V3X_HAS(api, game_build_id) && V3X_HAS(api, enum_commands),
           "V3X_HAS: all four v4 fields");

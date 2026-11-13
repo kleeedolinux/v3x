@@ -5,7 +5,8 @@
  *   pages, NULL page, cstr cut at a page end, pointer chains), v3x_scan (pattern compile, counts,
  *   rel32/rip targets, xrefs, callers), v3x_anchor against THIS test exe through v3x_testkit (a
  *   string anchor, ambiguity, shape selection, prologue mismatch, unique/duplicate patterns,
- *   check callback), v3x_hook macros and the manifest macro.
+ *   check callback), v3x_hook macros and the manifest macro, v3x_util (paths, atomic write, QPC,
+ *   leveled logging on v5 and pre-v5 loaders, reload filter).
  * Part 2 (with the exe): v3x_testkit maps victoria3.exe; v3x_game_resolve finds the script-RNG
  *   owner global (1.15.1: exe+0x540ae80) and v3x_script_random_allowed is 0 / 1 for a fake owner.
  * Exit code 0 = ALL OK. */
@@ -194,6 +195,83 @@ static void test_game(const char *exe)
     CHECK(v3x_script_random_allowed(&none) == -1, "unresolved -> -1 (fail closed)");
 }
 
+/* ---- v3x_util.h: a fake API whose log / log_at record what they got */
+static char g_logged[4096];
+static int g_logged_at = -1;
+static void cap_log(const char *tag, const char *fmt, ...)
+{
+    va_list ap; va_start(ap, fmt);
+    size_t n = strlen(g_logged);
+    n += snprintf(g_logged + n, sizeof g_logged - n, "[%s] ", tag);
+    vsnprintf(g_logged + n, sizeof g_logged - n, fmt, ap);
+    strncat(g_logged, "|", sizeof g_logged - strlen(g_logged) - 1);
+    va_end(ap);
+}
+static void cap_log_at(int level, const char *tag, const char *fmt, ...)
+{
+    va_list ap; va_start(ap, fmt);
+    g_logged_at = level;
+    size_t n = strlen(g_logged);
+    n += snprintf(g_logged + n, sizeof g_logged - n, "<%d>[%s] ", level, tag);
+    vsnprintf(g_logged + n, sizeof g_logged - n, fmt, ap);
+    strncat(g_logged, "|", sizeof g_logged - strlen(g_logged) - 1);
+    va_end(ap);
+}
+static int cap_level(const char *tag) { return tag && !strcmp(tag, "loud") ? V3X_LOG_TRACE : V3X_LOG_INFO; }
+
+static void test_util(const V3X_API *tk)
+{
+    char p[MAX_PATH], small[12];
+    char dir[MAX_PATH];
+    snprintf(dir, sizeof dir, "%s", tk->v3x_dir());
+    CHECK(v3x_plugin_file(tk, "my_plugin", ".ini", p, sizeof p) == p && !strncmp(p, dir, strlen(dir)) &&
+              !strcmp(p + strlen(dir), "my_plugin.ini"),
+          "util: v3x_plugin_file -> %s", p);
+    CHECK(v3x_path(tk, p, sizeof p, "rep_%d.csv", 7) && !strcmp(p + strlen(dir), "rep_7.csv"), "util: v3x_path with format");
+    CHECK(v3x_path(tk, small, sizeof small, "a_much_too_long_name_%d", 1) == NULL && small[0] == 0, "util: v3x_path refuses truncation");
+
+    /* atomic write: create, replace, no temp file left behind */
+    char f[MAX_PATH], buf[64] = "";
+    GetTempPathA(sizeof f, f);
+    strncat(f, "v3x_util_atomic_test.txt", sizeof f - strlen(f) - 1);
+    CHECK(v3x_file_write_atomic(f, "first", 5) == 0 && v3x_file_write_atomic(f, "second!", 7) == 0, "util: atomic write + replace");
+    FILE *fp = fopen(f, "rb");
+    size_t n = fp ? fread(buf, 1, sizeof buf - 1, fp) : 0;
+    if (fp) fclose(fp);
+    buf[n] = 0;
+    char tmp[MAX_PATH + 24];
+    snprintf(tmp, sizeof tmp, "%s.%lu.tmp", f, (unsigned long)GetCurrentThreadId());
+    CHECK(!strcmp(buf, "second!") && GetFileAttributesA(tmp) == INVALID_FILE_ATTRIBUTES, "util: file has the new content, temp removed");
+    DeleteFileA(f);
+    CHECK(v3x_file_write_atomic("Z:/no/such/dir/x.txt", "x", 1) == -1, "util: atomic write into a missing dir fails cleanly");
+
+    double t0 = v3x_now_ms();
+    int64_t q0 = v3x_qpc();
+    Sleep(30);
+    double dt = v3x_now_ms() - t0, dq = v3x_qpc_ms(v3x_qpc() - q0);
+    CHECK(dt >= 20 && dt < 2000 && dq >= 20 && v3x_now_s() > 0, "util: QPC clock (%.1f ms for Sleep(30))", dt);
+
+    /* leveled logging: v5 path (log_at) and fallback (loader without v5) */
+    V3X_API a = *tk;
+    a.log = cap_log; a.log_at = cap_log_at; a.log_level = cap_level;
+    g_logged[0] = 0;
+    V3X_LOGW(&a, "me", "w%d", 1);
+    V3X_LOGD(&a, "me", "hidden");
+    V3X_LOGT(&a, "loud", "t%d", 2);
+    CHECK(!strcmp(g_logged, "<2>[me] w1|<5>[loud] t2|"), "util: v5 loader -> log_at, filtered by log_level (%s)", g_logged);
+    CHECK(v3x_log_enabled(&a, "loud", V3X_LOG_TRACE) && !v3x_log_enabled(&a, "me", V3X_LOG_DEBUG), "util: v3x_log_enabled");
+    a.struct_size = (uint32_t)offsetof(V3X_API, log_at);   /* a v4 loader */
+    g_logged[0] = 0;
+    V3X_LOGE(&a, "me", "e%d", 3);
+    V3X_LOGI(&a, "me", "i");
+    V3X_LOGD(&a, "loud", "dropped");
+    CHECK(!strcmp(g_logged, "[me] ERROR: e3|[me] i|"), "util: v4 loader -> api->log with prefix, debug dropped (%s)", g_logged);
+
+    CHECK(v3x_reload_is_for(NULL, "me") && v3x_reload_is_for("ME", "me") && !v3x_reload_is_for("other", "me"),
+          "util: v3x_reload_is_for (NULL = all, case-insensitive)");
+    CHECK(V3X_HAS(tk, log_at) && V3X_HAS(tk, build_matches) && tk->build_matches("*") == 1, "testkit fills the API v5 fields");
+}
+
 int main(int argc, char **argv)
 {
     setvbuf(stdout, NULL, _IONBF, 0);
@@ -207,6 +285,7 @@ int main(int argc, char **argv)
     test_scan(&api);
     test_anchor(&api);
     test_hook_macros();
+    test_util(&api);
     if (argc > 1) test_game(argv[1]);
     else printf("(no exe given: game checks skipped)\n");
     return v3x_testkit_done();

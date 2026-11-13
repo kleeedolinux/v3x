@@ -17,7 +17,14 @@ From the repository root (needs `pip install ziglang`):
 python sdk/build_plugin.py templates/plugin_template                 # build/plugins/my_plugin.dll
 python sdk/build_plugin.py templates/plugin_template --test          # + offline test against the game exe
 python sdk/build_plugin.py templates/plugin_template --test --install
+python sdk/build_plugin.py check build/plugins/my_plugin.dll         # will the installed loader + game accept it?
 ```
+
+`check` reads the DLL without loading it: exports, manifest, `min_api` against the installed
+loader's API version, `game_builds` against the installed `victoria3.exe` (including the loader's
+unknown-build safe mode after a game patch). Exit code 0 = compatible. With a v5 loader the
+template also shows leveled logging (`[log] my_plugin = debug` in `v3x/v3x.ini`) and re-reads its
+ini on `reload my_plugin` (docs/api-reference.md).
 
 The plain compiler line, if you prefer it:
 

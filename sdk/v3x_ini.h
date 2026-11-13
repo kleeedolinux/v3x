@@ -24,9 +24,10 @@
 #include <string.h>
 #include "v3x.h"
 
+typedef struct V3xIniKv { const char *section, *key, *value; } V3xIniKv;   /* file scope: same in C and C++ */
 typedef struct V3xIni {
     char *text;            /* parsed in place: NUL-terminated section/key/value strings */
-    struct V3xIniKv { const char *section, *key, *value; } *kv;
+    V3xIniKv *kv;
     int n, cap;
     int found;             /* 1 if a file was read */
 } V3xIni;

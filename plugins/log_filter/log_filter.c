@@ -21,6 +21,7 @@
 #include "lf_rules.h"
 
 V3X_EXPORT const char *v3x_plugin_name = "log_filter";
+V3X_PLUGIN_MANIFEST("log_filter", "0.5.0", "v3x", "drops and dedupes noisy engine log messages", "release/1.15.1");
 
 /* spdlog::details::log_msg (spdlog >= 1.12, MSVC x64) */
 #define MSG_LEVEL    0x10

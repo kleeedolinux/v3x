@@ -23,6 +23,7 @@
 #include "as_resolve.h"
 
 V3X_EXPORT const char *v3x_plugin_name = "asset_stream";
+V3X_PLUGIN_MANIFEST("asset_stream", "0.5.0", "v3x", "streams engine assets instead of loading everything up front", "release/1.15.1");
 #define TAG "asset_stream"
 
 typedef uintptr_t (*master_init_fn)(void *ctx, void *desc);

@@ -288,6 +288,25 @@ int main(void)
     for (int k = 0; k < 4; k++) v3x_hook_remove(OWN(20 + k), (void *)f2, &busy);
     CHECK(v3x_hook_subscribers((void *)f2) == 0 && memcmp(orig2, (void *)f2, sizeof orig2) == 0, "f2 bytes restored after the run");
 
+    /* v3x_hook_remove_owner (loader rollback of a failed plugin): everything of one owner, nothing else */
+    uint8_t o4[16], o6[16], or_[16];
+    memcpy(o4, (void *)f4, 16); memcpy(o6, (void *)f6, 16); memcpy(or_, (void *)fraw, 16);
+    void *orig_r = NULL;
+    Sub ra = {0}, rb = {0};
+    CHECK(add(OWN(30), (void *)f4, sub_pre, sub_post, &ra) == 0 && add(OWN(31), (void *)f4, sub_pre, sub_post, &rb) == 0 &&
+              add(OWN(30), (void *)f6, NULL, post_only, &ra) == 0 &&
+              v3x_hook_add_raw(OWN(30), (void *)fraw, (void *)f2, &orig_r, &busy) == 0,
+          "owner 30: hook_safe on f4 + f6 and a raw hook on fraw; owner 31 shares f4");
+    CHECK(v3x_hook_remove_owner(OWN(30)) == 3, "remove_owner(30) releases its 3 targets");
+    CHECK(v3x_hook_subscribers((void *)f4) == 1 && v3x_hook_subscribers((void *)f6) == 0 && v3x_hook_subscribers((void *)fraw) == 0 &&
+              memcmp(o6, (void *)f6, 16) == 0 && memcmp(or_, (void *)fraw, 16) == 0 && praw(2) == 15,
+          "owner 31's subscription on f4 stays; f6 and fraw restored");
+    rb.pre = 0;
+    p4(1, 2, 3, 4);
+    CHECK(rb.pre == 1 && v3x_hook_remove_owner(OWN(30)) == 0, "f4 still calls owner 31; a second remove_owner finds nothing");
+    CHECK(v3x_hook_remove_owner(OWN(31)) == 1 && memcmp(o4, (void *)f4, 16) == 0 && v3x_hook_remove_owner(NULL) == 0,
+          "remove_owner(31) restores f4; NULL owner is a no-op");
+
     printf("%d checks, %d failed\n%s\n", checks, fails, fails ? "FAILED" : "ALL OK");
     return fails ? 1 : 0;
 }

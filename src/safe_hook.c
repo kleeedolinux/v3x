@@ -528,3 +528,25 @@ int v3x_hook_subscribers(void *target)
     ReleaseSRWLockShared(&g_sh_lock);
     return n;
 }
+
+/* Removes everything `owner` holds (raw hooks and hook_safe subscriptions) on every target, like
+ * calling v3x_hook_remove for each. For the loader's rollback of a plugin whose v3x_plugin_load failed
+ * or whose callback faulted. Returns the number of targets released. */
+int v3x_hook_remove_owner(void *owner)
+{
+    void *targets[SH_MAX_RECS];
+    int n = 0, released = 0;
+    if (!owner) return 0;
+    AcquireSRWLockShared(&g_sh_lock);
+    for (int i = 0; i < g_sh_nrecs; i++) {
+        ShRec *r = &g_sh_recs[i];
+        int mine = r->raw_owner == owner;
+        ShList *l = r->list;
+        for (int k = 0; !mine && l && k < l->n; k++) mine = l->sub[k].owner == owner;
+        if (mine) targets[n++] = r->target;
+    }
+    ReleaseSRWLockShared(&g_sh_lock);
+    for (int i = 0; i < n; i++)
+        if (v3x_hook_remove(owner, targets[i], NULL) == MH_OK) released++;
+    return released;
+}

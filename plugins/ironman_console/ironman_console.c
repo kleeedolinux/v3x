@@ -10,6 +10,7 @@
 #include "v3x.h"
 
 V3X_EXPORT const char *v3x_plugin_name = "ironman_console";
+V3X_PLUGIN_MANIFEST("ironman_console", "0.5.0", "v3x", "allows the developer console in ironman games", "release/1.15.1");
 
 static const V3X_API *api;
 static const char IRONMAN_MSG[] = "No Console commands in ironman!";

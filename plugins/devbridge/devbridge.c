@@ -30,6 +30,7 @@
 #define TRUNC_NOTE "[devbridge: output truncated at 256 KB]\n"
 
 V3X_EXPORT const char *v3x_plugin_name = "devbridge";
+V3X_PLUGIN_MANIFEST("devbridge", "0.5.0", "v3x", "runs V3X console commands for local tools (MCP server)", "release/1.15.1");
 
 static const V3X_API *api;
 static int g_has_capture;

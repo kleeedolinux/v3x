@@ -12,6 +12,7 @@
  *     V3X_PLUGIN_MANIFEST("my_plugin", "1.0.0", "me", "what it does", "release/1.15.1");  // API v4
  *
  * Full reference with thread rules: docs/api-reference.md. Safety rules: docs/safety.md.
+ * What is guaranteed to stay (ABI, return codes, versioning, game patches): docs/api-stability.md.
  *
  * v3x_plugin_load runs on the game's main thread, right before the game's own
  * entry point (CRT startup, static constructors and WinMain have NOT run yet).
@@ -30,13 +31,51 @@
 extern "C" {
 #endif
 
-#define V3X_API_VERSION 4
+/* Stability contract (docs/api-stability.md): every struct, field, constant and return value in
+ * this header is frozen. New things are only APPENDED (new V3X_API fields at the end, new
+ * constants); nothing is reordered, resized or removed, and a documented return value keeps its
+ * meaning. test/abi_test.c fails the build on any layout change; test/compat_test.c loads plugins
+ * built against the frozen v1..v4 headers (test/compat_v*.h) into the current loader. */
+#define V3X_API_VERSION 5
 
 #ifdef __cplusplus
 #define V3X_EXPORT extern "C" __declspec(dllexport)
 #else
 #define V3X_EXPORT __declspec(dllexport)
 #endif
+
+/* ---- Return codes (unified names, API v5; the VALUES are those of v1-v4, unchanged) ----------
+ * Functions returning int use 0 for success. Negative = V3X's own errors; the hook functions
+ * (hook, unhook, hook_safe) also return MinHook MH_STATUS values (1..12) and V3X_EHOOKBUSY.
+ * patch returns a Win32 GetLastError() code. Exceptions: print returns the chars written,
+ * emit_event / enum_commands return a count, exec_* return 0 / -1. */
+#define V3X_OK 0
+#define V3X_EFAIL (-1)          /* bad arguments, table/queue full, unknown command, or the process is
+                                   exiting; also MinHook's MH_UNKNOWN */
+#define V3X_EEXIST (-2)         /* register_command: name taken; on_event: same (name, fn, user) */
+#define V3X_EMH_NOT_INITIALIZED 2   /* hooks: MinHook unavailable, or the process is exiting */
+#define V3X_EMH_ALREADY_CREATED 3   /* hook_safe: this plugin already subscribed the same
+                                       pre/post/user there (a raw hook on a hooked target is V3X_EHOOKBUSY) */
+#define V3X_EMH_NOT_CREATED 4       /* unhook: nothing hooked at target */
+#define V3X_EMH_NOT_EXECUTABLE 7    /* target (or detour) is not executable memory */
+#define V3X_EMH_UNSUPPORTED_FUNCTION 8   /* target's first bytes cannot be relocated */
+#define V3X_EMH_MEMORY_ALLOC 9      /* no trampoline memory / thunk pool full / too many subscribers */
+#define V3X_EMH_MEMORY_PROTECT 10   /* VirtualProtect failed */
+
+/* ---- Log levels (API v5 log_at / log_level) ---- */
+#define V3X_LOG_ERROR 1   /* line prefixed "ERROR: " (red in the console) */
+#define V3X_LOG_WARN 2    /* "WARNING: " (red) */
+#define V3X_LOG_INFO 3    /* no prefix; the default threshold */
+#define V3X_LOG_DEBUG 4   /* "debug: "; hidden unless enabled in v3x.ini [log] */
+#define V3X_LOG_TRACE 5   /* "trace: " */
+
+/* ---- Event names emitted by the core and the bundled plugins (see on_event) ---- */
+#define V3X_EVENT_PROCESS_EXIT "process_exit"                  /* data: const long * exit code */
+#define V3X_EVENT_CONFIG_RELOAD "config_reload"                /* v5, data: const char * plugin name or NULL = all */
+#define V3X_EVENT_LOAD_TRANSITION "load_transition"            /* data: const V3X_LoadTransition * */
+#define V3X_EVENT_LOAD_TRANSITION_BEGIN "load_transition_begin"
+#define V3X_EVENT_SAVE_BEGIN "save_begin"                      /* data: const V3X_SaveBegin * */
+#define V3X_EVENT_SAVE_END "save_end"
 
 typedef void (*v3x_frame_fn)(void *user);
 typedef void (*v3x_command_fn)(const char *args, void *user);
@@ -182,7 +221,10 @@ typedef struct V3X_API {
      * run_on_main: queue fn(user) to run once in the next on_frame tick on the main thread
      *   (use it from commands that touch game state). Returns 0, or -1 if the queue is full.
      * exec_command: run one console line synchronously on the calling thread, as if typed.
-     *   Returns 0 if a command ran, -1 if the name is unknown/empty. */
+     *   Returns 0 if a command ran, -1 if the name is unknown/empty (loader 0.5.0: or its plugin was
+     *   disabled after a fault; a command that faults is isolated and still returns 0).
+     * Loader 0.5.0: on_frame, run_on_main, command and event callbacks (and v3x_plugin_load) run inside
+     *   a fault guard; a fault disables that plugin's callbacks (docs/api-reference.md "Fault isolation"). */
     int (*register_command)(const char *name, const char *help, v3x_command_fn fn, void *user);
     int (*print)(const char *fmt, ...);
     int (*run_on_main)(v3x_frame_fn fn, void *user);
@@ -262,6 +304,30 @@ typedef struct V3X_API {
     uint32_t (*main_thread_id)(void);
     const char *(*game_build_id)(void);
     int (*enum_commands)(void (*fn)(const char *name, const char *help, void *user), void *user);
+
+    /* ---- API v5 (check with V3X_HAS(api, field) before using) ----
+     * log_at: like log, with a level (V3X_LOG_ERROR..V3X_LOG_TRACE). The line is written only if
+     *   level <= log_level(tag); ERROR/WARN/DEBUG/TRACE lines get the prefix "ERROR: " / "WARNING: " /
+     *   "debug: " / "trace: " after the tag. Levels outside 1..5 are clamped. Any thread.
+     * log_level: the current threshold for `tag` (NULL = the global one): v3x.ini [log] "<tag> = <level>"
+     *   if present, else [log] "level = <level>", else env V3X_LOG_LEVEL, else V3X_LOG_INFO. Levels are
+     *   names (error, warn, info, debug, trace) or numbers 1-5. The console command
+     *   `loglevel [tag] <level>` changes it at runtime. Use it to skip expensive formatting:
+     *   if (api->log_level("me") >= V3X_LOG_DEBUG) dump(); Any thread, lock-free.
+     * loader_version: semantic version of the loader build (version.dll), e.g. "0.5.0". Independent
+     *   of api_version (the table layout) and of game_version / game_build_id (the game). Any thread.
+     * build_matches: 1 if the running game matches the ';'-separated list (the exact rules of the
+     *   manifest's game_builds: game_version() or game_build_id(), case-insensitive, trailing '*' =
+     *   prefix, NULL / "" / "*" = any), else 0. For plugins that gate single features per build.
+     *   Any thread.
+     * Core event V3X_EVENT_CONFIG_RELOAD ("config_reload"): the console command `reload [plugin]`
+     *   emits it on the MAIN thread (next frame tick) with data = const char * plugin name, or NULL
+     *   for `reload` without a name (= every plugin). Re-read your ini in the handler if data is NULL
+     *   or equals your name (sdk/v3x_util.h v3x_reload_is_for). */
+    void (*log_at)(int level, const char *tag, const char *fmt, ...);
+    int (*log_level)(const char *tag);
+    const char *(*loader_version)(void);
+    int (*build_matches)(const char *game_builds);
 } V3X_API;
 
 /* True if the loader's API table has `field` and it is set (the loader was built with a header
@@ -286,6 +352,13 @@ typedef int (*v3x_plugin_load_fn)(const V3X_API *api);
 /* version.dll also exports `const V3X_API *v3x_api(void)` (for tests and tools that are not
  * plugins, e.g. GetProcAddress(GetModuleHandleA("version.dll"), "v3x_api")). */
 typedef const V3X_API *(*v3x_api_fn)(void);
+
+/* Since loader 0.5.0 (API v5) version.dll also exports two data symbols that tools can read
+ * from the file without loading it (sdk/build_plugin.py check):
+ *   const uint32_t v3x_loader_api;      = V3X_API_VERSION of that loader
+ *   const char v3x_loader_semver[];     = loader_version(), e.g. "0.5.0"
+ *   const char v3x_loader_known_builds[];   ';'-separated game_build_id()s the loader was tested on;
+ *                                       on any other victoria3.exe the unknown-build gate applies */
 
 #ifdef __cplusplus
 }

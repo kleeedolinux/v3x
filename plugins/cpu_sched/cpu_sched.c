@@ -20,6 +20,7 @@
 #include "cs_core.h"
 
 V3X_EXPORT const char *v3x_plugin_name = "cpu_sched";
+V3X_PLUGIN_MANIFEST("cpu_sched", "0.5.0", "v3x", "keeps the simulation on P-cores on hybrid CPUs", "release/1.15.1");
 #define TAG "cpu_sched"
 
 static const V3X_API *api;

@@ -2,6 +2,7 @@
 #include "v3x.h"
 
 V3X_EXPORT const char *v3x_plugin_name = "hello";
+V3X_PLUGIN_MANIFEST("hello", "0.5.0", "v3x", "minimal example plugin", "*");
 
 static const V3X_API *api;
 static unsigned long long frames;

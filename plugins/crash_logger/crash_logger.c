@@ -25,6 +25,7 @@
 #include "v3x.h"
 
 V3X_EXPORT const char *v3x_plugin_name = "crash_logger";
+V3X_PLUGIN_MANIFEST("crash_logger", "0.5.0", "v3x", "crash and diagnostic log (crash.log)", "*");
 
 #define MAX_FRAMES 48
 #define MAX_THROWS_LOGGED 200

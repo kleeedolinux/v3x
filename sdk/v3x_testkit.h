@@ -40,6 +40,7 @@ static struct {
     IMAGE_RUNTIME_FUNCTION_ENTRY *pdata; size_t npdata;
     uint64_t pref_base;
     int hooks, patches, frames, commands, checks, fails;
+    int log_level;   /* API v5 log_level() of the fake API (0 = V3X_LOG_INFO) */
     char dir[260];
 } v3x_tk;
 
@@ -139,6 +140,18 @@ static int v3x_tk_on_event(const char *n, void (*fn)(const char *, void *, void 
 static int v3x_tk_emit(const char *n, void *d) { (void)n; (void)d; return 0; }
 static int v3x_tk_hook_safe(void *t, v3x_hook_fn pre, v3x_hook_fn post, void *u) { (void)t; (void)pre; (void)post; (void)u; v3x_tk.hooks++; return 0; }
 static int v3x_tk_enum(void (*fn)(const char *, const char *, void *), void *u) { (void)fn; (void)u; return 0; }
+/* API v5: log_at prints like log (level prefix, threshold v3x_tk.log_level, default info) */
+static int v3x_tk_log_level(const char *tag) { (void)tag; return v3x_tk.log_level ? v3x_tk.log_level : V3X_LOG_INFO; }
+static void v3x_tk_log_at(int level, const char *tag, const char *fmt, ...)
+{
+    static const char *const pre[] = {"", "ERROR: ", "WARNING: ", "", "debug: ", "trace: "};
+    if (level < 1) level = 1;
+    if (level > 5) level = 5;
+    if (level > v3x_tk_log_level(tag)) return;
+    va_list ap; va_start(ap, fmt); printf("[%s] %s", tag ? tag : "?", pre[level]); vprintf(fmt, ap); printf("\n"); va_end(ap);
+}
+static const char *v3x_tk_loader_version(void) { return "testkit"; }
+static int v3x_tk_build_matches(const char *list) { return !list || !*list || strchr(list, '*') != NULL; }
 
 /* Fills api with the fake functions (base/scanners see whatever v3x_tk describes). */
 static void v3x_testkit_api(V3X_API *api)
@@ -155,6 +168,8 @@ static void v3x_testkit_api(V3X_API *api)
     api->on_event = v3x_tk_on_event; api->emit_event = v3x_tk_emit;
     api->hook_safe = v3x_tk_hook_safe; api->main_thread_id = v3x_tk_main_tid; api->game_build_id = v3x_tk_build;
     api->enum_commands = v3x_tk_enum;
+    api->log_at = v3x_tk_log_at; api->log_level = v3x_tk_log_level; api->loader_version = v3x_tk_loader_version;
+    api->build_matches = v3x_tk_build_matches;
 }
 
 /* Describes a PE image already in memory (a mapped exe, or a synthetic one built by a test). */

@@ -16,6 +16,7 @@ frame_pacer      1  timer sleep instead of a busy-wait frame cap, lower fps when
 cpu_sched        1  P-/E-core placement on hybrid CPUs, nothing on other CPUs; played 4h
 gfx_driver       1  fewer D3D11 driver threads; retries without the flag on failure; played 4h
 mem_tuner        1  lower memory commit, one out-of-memory rescue; played 4h
+script_ext       1  hooks nothing; lets plugins ship script/loc/gui packs via content_packs (needed by plugins that ship script)
 fast_load        1  load timeline + load_transition events other plugins use; optional speedups stay off; played 4h
 
 # --- off: shipped, opt-in (the player turns them on knowingly)
@@ -35,7 +36,8 @@ tick_profiler    -  per-tick-task timing for developers
 tick_par         -  read-only tick parallelism analysis
 alloc_tracker    -  allocation tracker, heavy overhead
 map_cache        -  default mode=measure (reports only)
-mod_loader       -  default mode=measure (reports only); mode=on not yet run in game
+mod_loader       -  default mode=measure (reports only); mode=on ran 1h44m in game 2026-11-13: 0 mismatches, 98,786 verified skips (docs/sessions/2026-11-13-evening.md:175)
 par_load         -  default mode=measure (reports only)
 lazy_gfx         -  default mode=measure (reports only); not run in game
-fast_lookup      -  default mode=measure; caused crash5 (fixed offline, not run in game since)
+fast_lookup      -  default mode=measure; caused crash5 (fixed); measure ran 1h44m in game 2026-11-13: 1.72 M calls, 0 mismatches = criterion for on met, on not run yet (sessions/2026-11-13-evening.md:170)
+ai_par           -  measure-only analysis of AI/economy tick tasks (mode=on refused); not for players, not run in game

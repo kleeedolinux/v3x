@@ -13,12 +13,16 @@ int main(int argc, char **argv)
     V3X_API fake;
     v3x_testkit_api(&fake);
     api = &fake;
-    QueryPerformanceFrequency(&g_freq);
     V3X_HookCall c; memset(&c, 0, sizeof c);
     tick_pre(&c);
     V3X_TEST_CHECK(c.scratch[0] != 0, "pre stores the start time in scratch[0]");
     tick_post(&c);
     V3X_TEST_CHECK(g_ticks == 1, "post counts one tick");
+    g_log_every = 7;
+    on_reload("config_reload", (void *)"other_plugin", NULL);
+    V3X_TEST_CHECK(g_log_every == 7, "reload for another plugin is ignored");
+    on_reload("config_reload", NULL, NULL);   /* no my_plugin.ini in the testkit dir: defaults */
+    V3X_TEST_CHECK(g_log_every == 0, "reload (all) re-reads the config");
 
     /* 2. anchors against the real exe */
     if (argc > 1) {

@@ -32,6 +32,7 @@
 #include "lm_core.h"
 
 V3X_EXPORT const char *v3x_plugin_name = "lazy_mesh";
+V3X_PLUGIN_MANIFEST("lazy_mesh", "0.5.0", "v3x", "loads a mesh type only when it is about to be used", "release/1.15.1");
 
 typedef uintptr_t (*fn4)(uintptr_t, uintptr_t, uintptr_t, uintptr_t);
 typedef void (*fn1)(void *);

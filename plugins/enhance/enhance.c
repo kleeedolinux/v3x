@@ -79,6 +79,7 @@
 #include "v3x.h"
 
 V3X_EXPORT const char *v3x_plugin_name = "enhance";
+V3X_PLUGIN_MANIFEST("enhance", "0.5.0", "v3x", "engine-level single-player enhancements", "release/1.15.1");
 
 #define TAG "enhance"
 

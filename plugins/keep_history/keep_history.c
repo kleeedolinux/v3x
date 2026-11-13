@@ -35,6 +35,7 @@
 #include "v3x.h"
 
 V3X_EXPORT const char *v3x_plugin_name = "keep_history";
+V3X_PLUGIN_MANIFEST("keep_history", "0.5.0", "v3x", "keeps the history graphs of countries you stop playing", "release/1.15.1");
 
 #define TAG "keep_history"
 #define N_COUNTRY 6

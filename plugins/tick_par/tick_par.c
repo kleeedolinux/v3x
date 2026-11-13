@@ -41,6 +41,7 @@
 #include "tick_par_sched.h"
 
 V3X_EXPORT const char *v3x_plugin_name = "tick_par";
+V3X_PLUGIN_MANIFEST("tick_par", "0.5.0", "v3x", "fork/join analysis of the simulation tick", "release/1.15.1");
 
 #define TAG "tick_par"
 #define NAMELEN 64

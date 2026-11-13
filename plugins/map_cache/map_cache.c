@@ -30,6 +30,7 @@
 #include "mc_core.h"
 
 V3X_EXPORT const char *v3x_plugin_name = "map_cache";
+V3X_PLUGIN_MANIFEST("map_cache", "0.5.0", "v3x", "measures and stops repeated texture reads on map-mode switches", "release/1.15.1");
 
 typedef uintptr_t (*fn4)(uintptr_t, uintptr_t, uintptr_t, uintptr_t);
 

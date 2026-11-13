@@ -50,6 +50,7 @@
 #include "v3x.h"
 
 V3X_EXPORT const char *v3x_plugin_name = "devtools";
+V3X_PLUGIN_MANIFEST("devtools", "0.5.0", "v3x", "CPU and RAM usage inside the game", "release/1.15.1");
 
 #define TAG "devtools"
 #ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION

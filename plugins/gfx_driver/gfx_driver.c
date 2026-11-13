@@ -20,6 +20,7 @@
 #include "gd_iat.h"
 
 V3X_EXPORT const char *v3x_plugin_name = "gfx_driver";
+V3X_PLUGIN_MANIFEST("gfx_driver", "0.5.0", "v3x", "D3D11 device-creation tweaks for weak GPUs", "release/1.15.1");
 #define TAG "gfx_driver"
 
 typedef HRESULT(WINAPI *create_fn)(void *adapter, int driver_type, HMODULE sw, UINT flags,

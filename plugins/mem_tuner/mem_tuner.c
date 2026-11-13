@@ -46,6 +46,7 @@
 #include "mt_mi.h"
 
 V3X_EXPORT const char *v3x_plugin_name = "mem_tuner";
+V3X_PLUGIN_MANIFEST("mem_tuner", "0.5.0", "v3x", "tunes the engine allocator for lower memory commit", "release/1.15.1");
 #define TAG "mem_tuner"
 
 static const V3X_API *api;

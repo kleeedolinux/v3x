@@ -34,6 +34,7 @@
 #include "fl_core.h"
 
 V3X_EXPORT const char *v3x_plugin_name = "fast_load";
+V3X_PLUGIN_MANIFEST("fast_load", "0.5.0", "v3x", "load-time measurement and load-state events", "release/1.15.1");
 
 typedef uintptr_t (*fn4)(uintptr_t, uintptr_t, uintptr_t, uintptr_t);
 

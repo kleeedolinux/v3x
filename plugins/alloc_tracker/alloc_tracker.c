@@ -39,6 +39,7 @@
 #include "../mem_tuner/mt_mi.h"
 
 V3X_EXPORT const char *v3x_plugin_name = "alloc_tracker";
+V3X_PLUGIN_MANIFEST("alloc_tracker", "0.5.0", "v3x", "who holds the engine memory (diagnostic, off by default)", "release/1.15.1");
 #define TAG "alloc_tracker"
 
 static const V3X_API *api;

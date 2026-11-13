@@ -5,7 +5,61 @@ is append-only (plugins built for an older version keep working).
 
 ## Unreleased
 
-### Added
+### Loader 0.5.0, API v5 (stability release)
+
+The loader now has a version of its own (`loader_version()`, semver, "0.5.0"), separate from the
+API version (5) and the game build. The contract is written down in `docs/api-stability.md`.
+
+#### Added
+- **ABI freeze, enforced**: `test/abi_test.c` pins every offset, type and constant of
+  `include/v3x.h` with `_Static_assert` (a layout change fails to compile; `test/run_all.sh` also
+  proves a swapped field is rejected). `test/compat_test.c` loads plugins built against frozen
+  copies of the v1-v4 headers (`test/compat_v1.h` .. `compat_v4.h`) and a v5 plugin into the
+  current loader, and the v5 plugin into the real v4 loader from git 317e574 (degrades via `V3X_HAS`).
+- **API v5** fields (append-only, check with `V3X_HAS`): `log_at(level, tag, fmt, ...)`,
+  `log_level(tag)`, `loader_version()`, `build_matches(list)`.
+- Named return codes `V3X_OK`, `V3X_EFAIL`, `V3X_EEXIST`, `V3X_EMH_*` (the values of v1-v4,
+  unchanged), log levels `V3X_LOG_ERROR..TRACE`, event-name macros `V3X_EVENT_*`.
+- Log levels: `[log]` section in `v3x.ini` (`level = debug`, `<tag> = trace`), env
+  `V3X_LOG_LEVEL`, console command `loglevel [tag] [level]`.
+- Console command `reload [plugin]` and core event `config_reload` (main thread; data = plugin
+  name or NULL).
+- **Fault isolation**: `v3x_plugin_load`, `on_frame`, `run_on_main`, commands and event
+  subscribers run inside an SEH guard; a fault logs module+offset and disables that plugin's
+  callbacks, the game continues. Hook callbacks are not covered (documented).
+- **Rollback**: a `v3x_plugin_load` that returns non-zero or faults has its hooks removed and its
+  patches restored (`api->patch` now records the original bytes per plugin;
+  `v3x_hook_remove_owner` in `src/safe_hook.c`).
+- **Crash-loop guard**: `v3x/loading.marker` names the plugin being loaded; if the game died
+  there, that plugin is skipped on the next start (once). The last `UNHANDLED EXCEPTION` line of
+  the previous `crash.log` is logged at start.
+- **Unknown-build gate**: on a `victoria3.exe` build the loader was not tested on, only plugins
+  whose manifest declares the build (`*`, a prefix, or the exact build id) load;
+  `unknown_build = load` in `v3x.ini` (or env `V3X_UNKNOWN_BUILD=load`) loads everything.
+- version.dll data exports `v3x_loader_api`, `v3x_loader_semver`, `v3x_loader_known_builds`.
+- `sdk/build_plugin.py check <dll> [--json]`: validates a plugin DLL without loading it (x64 DLL,
+  exports, manifest, `min_api` vs the installed loader, `game_builds` vs the installed exe, the
+  unknown-build gate, debug-CRT imports). Test `test/compat_check.py`.
+- `sdk/v3x_util.h` (SDK version 2): `v3x_plugin_file`, `v3x_path`, `v3x_file_write_atomic`,
+  `v3x_qpc` / `v3x_now_ms` / `v3x_now_s`, `V3X_LOGE..T` with a fallback for older loaders,
+  `v3x_reload_is_for`. The testkit fills the v5 fields.
+- Every bundled plugin has a `V3X_PLUGIN_MANIFEST` (`crash_logger`, `hello`: `"*"`; the others
+  `release/1.15.1`).
+- `test/run_all.sh`: builds and runs every offline and end-to-end test, prints a summary table,
+  exit code = failed tests. `test/api_v5_test.c` + `test/api_v5_plugin.c`.
+
+#### Changed
+- `api_version` is 5; `struct_size` 240 (was 208).
+- `version` command prints the loader version.
+- `emit_event` returns the number of subscribers actually called (faulted plugins are skipped).
+- `exec_command` returns -1 for a command whose plugin faulted.
+- `pattern_scan(NULL)` / `find_string(NULL or "")` return NULL, `on_frame(NULL)` returns -1,
+  `patch(NULL / 0 bytes)` returns `ERROR_INVALID_PARAMETER` (all used to crash or misbehave).
+- The core is built with `-fms-extensions` (SEH); `build.sh` skips plugin folders without `.c` files.
+- `sdk/v3x_ini.h`: `V3xIniKv` is declared at file scope (the header now compiles as C++ too).
+- Template: `v3x_util.h` timing, `V3X_LOGD`, `reload my_plugin`; README shows `check`.
+
+### Added (API v4)
 - **API v4** (`include/v3x.h`, `src/core.c`, `src/safe_hook.c`):
   - `hook_safe(target, pre, post, user)`: hooks without a hand-written detour. A core-generated
     pass-through thunk forwards 16 integer argument slots and xmm0-3 and keeps the return value;

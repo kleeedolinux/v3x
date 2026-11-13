@@ -18,7 +18,7 @@ game's program*, so they can change Victoria 3 far more deeply than script mods 
 functions safely, read live game data, add console commands, react to loads and saves, and ship
 it all as a plugin that players turn on or off from the main menu.
 
-V3X comes with more than 25 plugins built this way. They are the proof that it works: 3D models
+V3X comes with 31 plugins built this way. They are the proof that it works: 3D models
 load in 6.7 s instead of 37.5 s, debug-mode autosaves shrink from 156 MB to 26 MB, and the GDP
 history graphs no longer get wiped ([showcase](#what-we-built-with-v3x)).
 
@@ -161,7 +161,10 @@ the main menu was 704 texture files at 12.9 ms each. *Found:* every file is sear
 mod and DLC folder before the base game, one Windows call per folder. *Fixed:* a per-folder file
 index, built once in the background, that predicts those misses. *Result:* in game it predicted
 **94.4 %** of the misses with **0 mismatches** against the engine (99.90 % in an offline replay
-after a coverage fix). Using it to skip the misses is next.
+after a coverage fix). With `mode=on` it now skips the predicted misses: in a 1 h 44 m session it
+did so with **0 mismatches** and 98,786 re-checked skips, and the remaining misses cost 1.43 s in
+the whole session ([session report](docs/sessions/2026-11-13-evening.md)). It is not shipped to
+players yet (default `mode=measure`).
 [Story](docs/re/modloading.md) · [textures](docs/re/lazy_gfx.md)
 
 **GDP history wiped on a country switch** (`keep_history`). *Found:* when you stop playing a
@@ -195,13 +198,25 @@ Also bundled: a crash log with C++ error types and stacks (`crash_logger`), the 
 P-/E-core thread placement on hybrid CPUs (`cpu_sched`), quieter engine logs (`log_filter`), file
 overrides without a mod (`content_packs`), and modder tools: a sampling profiler (`devtools`), a
 disassembler console (`devconsole`), per-task tick timing (`tick_profiler`), allocation tracking
-(`alloc_tracker`) and an MCP bridge (`devbridge`). Full list: [docs/plugins.md](docs/plugins.md).
+(`alloc_tracker`) and an MCP bridge (`devbridge`), plus `script_ext`, which lets a plugin ship game
+script, localization and GUI files ([docs/scripting.md](docs/scripting.md)).
 
-**In progress** (built and tested offline, not yet confirmed in game): skipping the predicted file
-misses (`mod_loader mode=on`), texture prefetch and a decoded-image cache (`lazy_gfx`), the save-lock
-cache in game (`fast_lookup`), parallel game init (`par_load`), English fallback text for mods that
-lack your language (`loc_fallback`), the main-menu plugin window (`mod_menu`) and console Tab
-completion (`console_plus`).
+| class | plugins |
+|---|---|
+| on in the player installer | crash_logger, content_packs, mod_menu, keep_history, ironman_console, log_filter, frame_pacer, cpu_sched, gfx_driver, mem_tuner, fast_load, script_ext |
+| shipped, off (opt-in) | console_plus, loc_fallback, enhance, asset_stream, lazy_mesh, sim_opt |
+| measure-only (not shipped) | fast_lookup, mod_loader, map_cache, lazy_gfx, par_load, tick_par, ai_par |
+| developer tools (not shipped) | alloc_tracker, devtools, devconsole, devbridge, tick_profiler, hello |
+| SDK service (shipped on, hooks nothing) | script_ext |
+
+Status, defaults, crash history and tests of each: [docs/plugins.md](docs/plugins.md).
+
+**In progress:** in a 1 h 44 m session (2026-11-13) `mod_loader mode=on` skipped 98,786 file
+misses with 0 mismatches, and `fast_lookup` checked 1.7 M answers in `measure` with 0 mismatches,
+so it can be switched on ([session report](docs/sessions/2026-11-13-evening.md)). Texture prefetch
+and the decoded-image cache (`lazy_gfx`), parallel game init (`par_load`), AI tick analysis
+(`ai_par`) and `script_ext` are tested offline only; `loc_fallback`, `mod_menu` and `console_plus`
+loaded in that session, but their features were not checked in game.
 
 ## For players
 
@@ -211,13 +226,17 @@ completion (`console_plus`).
 
 ### Install in 3 steps
 
-> **No release zip has been published yet.** Until then, use the [quick start](#quick-start)
-> above: `./build.sh install` puts the same two items in place.
+> **No release has been published yet.** Until then, get `V3X-Setup.exe` from whoever sent it to
+> you, build it yourself with `python installer/make_dist.py` (output `build/dist/V3X-Setup.exe`), or
+> use the [quick start](#quick-start) above (`./build.sh install`).
 
-1. **Download** the latest release zip from the [Releases page](https://github.com/kleeedolinux/v3x/releases).
-2. **Unzip** it into the game's `binaries` folder, so you get `...\Victoria 3\binaries\version.dll`
-   and `...\binaries\v3x\`. (In Steam: right-click Victoria 3 > Manage > Browse local files.)
+1. **Download** `V3X-Setup.exe` from the [Releases page](https://github.com/kleeedolinux/v3x/releases).
+2. **Close Victoria 3 and run it.** It finds the game through Steam (or asks for the folder), shows
+   the game version, and installs `binaries\version.dll` and `binaries\v3x\`. No admin rights, no
+   game file changed.
 3. **Start the game** as usual. A "V3X console" window opens next to it and shows what loaded.
+
+Details, checksums and the silent mode for scripts: [docs/install.md](docs/install.md).
 
 **Turn plugins on or off** from the main-menu **V3X** button, or in `binaries/v3x/v3x.ini`:
 
@@ -230,7 +249,8 @@ alloc_tracker = 0
 `0` means "do not load", a missing line means "load". Changes apply at the next start. To hide the
 console window, add `console=0`. All options: [docs/configuration.md](docs/configuration.md).
 
-**Uninstall:** delete `binaries/version.dll` and the `binaries/v3x/` folder.
+**Repair, update, uninstall:** run `V3X-Setup.exe` again. Without it, delete `binaries/version.dll`
+and the `binaries/v3x/` folder ([docs/install.md](docs/install.md)).
 
 <p align="center">
   <img src="docs/assets/mockup-console.svg" alt="Illustration (not a screenshot) of the V3X console window: loader lines in cyan, plugin lines in green, a failed anchor in red." width="49%">
@@ -307,7 +327,7 @@ the game's own startup code runs, it loads every enabled plugin ([src/core.c](sr
 
 ## Roadmap
 
-* The first release zip on GitHub Releases, and real screenshots.
+* The first release (`V3X-Setup.exe`) on GitHub Releases, and real screenshots.
 * Bring the in-progress items above into the game and publish their numbers.
 * Keep the bundled plugins working on new game versions (anchor updates).
 * Choose a license.
@@ -318,6 +338,8 @@ the game's own startup code runs, it loads every enabled plugin ([src/core.c](sr
 [API reference](docs/api-reference.md) · [Safety rules](docs/safety.md) ·
 [Configuration](docs/configuration.md) · [Console commands and events](docs/console-commands.md) ·
 [Plugin catalog](docs/plugins.md) · [Building and testing](docs/testing.md) ·
+[Installing (players)](docs/install.md) · [Script from plugins](docs/scripting.md) ·
+[Maturity](docs/maturity.md) · [Session reports](docs/sessions/) ·
 [Reverse engineering](docs/reverse-engineering.md) · [Engine map](docs/engine-map.md) ·
 [Troubleshooting](docs/troubleshooting.md) · [FAQ](docs/faq.md) · [RE notes](docs/re/)
 

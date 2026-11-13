@@ -30,6 +30,7 @@
 #include "v3x.h"
 
 V3X_EXPORT const char *v3x_plugin_name = "devconsole";
+V3X_PLUGIN_MANIFEST("devconsole", "0.5.0", "v3x", "reverse-engineering commands for the V3X console", "release/1.15.1");
 
 static const V3X_API *api;
 

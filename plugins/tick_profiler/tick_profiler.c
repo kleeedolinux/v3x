@@ -29,6 +29,7 @@
 #include "v3x_rtti.h"
 
 V3X_EXPORT const char *v3x_plugin_name = "tick_profiler";
+V3X_PLUGIN_MANIFEST("tick_profiler", "0.5.0", "v3x", "per-task wall-time profile of the simulation tick", "release/1.15.1");
 
 #define TAG "tick_profiler"
 #define TBL 1024                  /* power of two, > 4x the ~270 task classes */

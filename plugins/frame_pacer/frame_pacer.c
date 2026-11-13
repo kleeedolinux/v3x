@@ -29,6 +29,7 @@
 #endif
 
 V3X_EXPORT const char *v3x_plugin_name = "frame_pacer";
+V3X_PLUGIN_MANIFEST("frame_pacer", "0.5.0", "v3x", "adaptive frame cap with timer sleep instead of spin-wait", "release/1.15.1");
 
 typedef void (*frame_end_fn)(void *self);
 typedef void *(*tick_guard_fn)(void *self, unsigned char active, unsigned char check_time, void *name);

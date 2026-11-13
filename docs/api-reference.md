@@ -1,8 +1,11 @@
-# API reference (`include/v3x.h`, API v4)
+# API reference (`include/v3x.h`, API v5, loader 0.5.0)
 
 A plugin is a Windows x64 DLL in `binaries/v3x/plugins/`. The loader (`binaries/version.dll`,
 source `src/core.c`) calls its `v3x_plugin_load(const V3X_API *api)` once and passes a table of
 function pointers. The API is plain C, so any compiler works.
+
+What is guaranteed to stay the same across loader updates (layout, return codes, thread rules,
+deprecation, game patches) is in [api-stability.md](api-stability.md).
 
 ## Exports a plugin provides
 
@@ -31,16 +34,36 @@ alphabetical). For each file:
 
 1. If `binaries/v3x/v3x.ini` has `[plugins]` `<file name without .dll> = 0` (`off`, `no`,
    `false`; case-insensitive), the DLL is not loaded at all: `disabled (v3x.ini [plugins])`.
-2. `LoadLibrary`. Your `DllMain` runs under the loader lock: do nothing there (see
+2. Crash-loop guard (0.5.0): if the game died while loading this plugin on the previous start
+   (`v3x/loading.marker` still names it), it is skipped once: `disabled: crashed during load
+   last start`. The marker is written before step 3 and removed after step 5.
+3. `LoadLibrary`. Your `DllMain` runs under the loader lock: do nothing there (see
    [safety.md](safety.md#dllmain)).
-3. The manifest is read (if exported). `min_api` above the loader's version, or a game-build
+4. The manifest is read (if exported). `min_api` above the loader's version, or a game-build
    mismatch with `V3X_MANIFEST_REQUIRE_BUILD`, refuses the plugin (`v3x_plugin_load` is not
-   called; the DLL is unloaded).
-4. `v3x_plugin_load(&api)`.
+   called; the DLL is unloaded). On a game build the loader does not know (a patch), the
+   [unknown-build gate](api-stability.md#game-patches) also skips plugins whose manifest does not
+   declare that build.
+5. `v3x_plugin_load(&api)`, inside a fault guard. If it returns non-zero or faults, the loader
+   **rolls the plugin back**: its hooks are removed, its patches restored (newest first), and its
+   `on_frame` / command / event / `run_on_main` callbacks are never called. Status:
+   `FAILED: v3x_plugin_load returned N, rolled back` or `FAULTED in v3x_plugin_load, rolled back`.
+
+### Fault isolation (0.5.0)
+
+Every callback the loader itself calls (`v3x_plugin_load`, `on_frame`, `run_on_main`, console
+commands, event subscribers) runs inside an SEH guard. An access violation, illegal
+instruction, divide by zero, in-page error or an escaping C++ exception there is caught: v3x.log
+gets `FAULT in plugin x.dll during <what>: exception 0x... (write of 0x...) at module+offset`,
+the plugin's callbacks are skipped from then on (`plugins` shows `FAULTED in ...`), its hooks
+stay, and the game keeps running. **Not isolated**: faults in your hook detours / `hook_safe`
+pre/post (they run inside engine calls), in engine code you call or patched, and in threads you
+start. A fault isolated this way may have left your own locks or data half-updated; that is why
+the whole plugin is switched off.
 
 ## Versioning
 
-* `api->api_version`: the loader's `V3X_API_VERSION` (1..4).
+* `api->api_version`: the loader's `V3X_API_VERSION` (1..5).
 * `api->struct_size`: `sizeof(V3X_API)` of the loader.
 * The table is **append-only**: fields are never moved or removed. A plugin built with a newer
   header runs on an older loader as long as it checks before using newer fields:
@@ -59,6 +82,7 @@ fields, `api->api_version >= N` also works.
 | v2 | `register_command`, `print`, `run_on_main`, `exec_command` |
 | v3 | `exec_capture`, `on_event`, `emit_event` |
 | v4 | `hook_safe`, `main_thread_id`, `game_build_id`, `enum_commands`; the plugin manifest; the `[plugins]` skip list |
+| v5 | `log_at`, `log_level`, `loader_version`, `build_matches`; the `config_reload` event; named return codes and log levels; loader 0.5.0 hardening (fault isolation, rollback, crash-loop guard, unknown-build gate) |
 
 ## Thread rules at a glance
 
@@ -76,6 +100,8 @@ fields, `api->api_version >= N` also works.
 | `on_event` | any thread | the emitting thread (synchronously) |
 | `emit_event` | any thread | - |
 | `enum_commands` | any thread | caller |
+| `log_at`, `log_level`, `loader_version`, `build_matches` (v5) | any thread (`log_level` lock-free) | - |
+| `config_reload` event (v5) | emitted by the core on the main thread | main thread |
 
 Every function returns immediately and does nothing once the process is exiting
 (`ExitProcess` has started killing threads, or `DLL_PROCESS_DETACH` ran): logging, printing,
@@ -146,13 +172,13 @@ cache). 0 on success, otherwise a Win32 error code. Verify the bytes you replace
 ### `int on_frame(v3x_frame_fn fn, void *user)`
 Registers `fn(user)`, called on the main thread once per message-pump iteration (from a
 `PeekMessageW` hook; about once per frame whenever the main thread pumps messages). Max 64 callbacks
-for all plugins. Register only from `v3x_plugin_load`. Returns 0 or -1 (table full).
+for all plugins. Register only from `v3x_plugin_load`. Returns 0 or -1 (table full, or `fn` NULL).
 Keep it cheap: it runs every frame on the thread that renders.
 
 ### `const char *game_dir(void)`, `const char *v3x_dir(void)`
 Absolute paths with a trailing backslash: `.../Victoria 3/binaries/` and
 `.../Victoria 3/binaries/v3x/`. Your config is `v3x_dir() + "<plugin>.ini"`; write output
-files there too.
+files there too (`v3x_plugin_file` / `v3x_path` / `v3x_file_write_atomic` in `sdk/v3x_util.h`).
 
 ### `int register_command(const char *name, const char *help, v3x_command_fn fn, void *user)` (v2)
 Adds a console command. `name`: up to 31 chars, no spaces, case-insensitive. `fn(args, user)`
@@ -173,7 +199,9 @@ render/UI thread; it is **not** inside a simulation tick task, so it is not a pl
 script (see [safety.md](safety.md#script-and-rng-scope)).
 
 ### `int exec_command(const char *line)` (v2)
-Runs one console line synchronously on the calling thread. 0 if a command ran, -1 if unknown.
+Runs one console line synchronously on the calling thread. 0 if a command ran (also if it
+faulted: the fault is isolated, see [Fault isolation](#fault-isolation-050)), -1 if unknown or if
+its plugin was disabled after a fault.
 
 ### `int exec_capture(const char *line, void (*sink)(const char *text, void *user), void *user)` (v3)
 Like `exec_command`, and every `print`/`log` made **on the calling thread** while the command
@@ -198,6 +226,12 @@ Known events:
 | `save_begin` | enhance, the saving thread, right before `SaveGameState` | `const V3X_SaveBegin *` {`name`} |
 | `save_end` | enhance, same thread, after the save returned | same pointer |
 | `process_exit` | core, the thread calling `ExitProcess`, while every thread still runs | `const LONG *` exit code |
+| `config_reload` (v5) | core, **main thread**, next frame tick after the console command `reload [plugin]` | `const char *` plugin name, or NULL = all plugins |
+
+The names are also macros: `V3X_EVENT_PROCESS_EXIT`, `V3X_EVENT_CONFIG_RELOAD`,
+`V3X_EVENT_LOAD_TRANSITION`, `V3X_EVENT_LOAD_TRANSITION_BEGIN`, `V3X_EVENT_SAVE_BEGIN`,
+`V3X_EVENT_SAVE_END`. A subscriber of a plugin that faulted is skipped; `emit_event` counts only
+the subscribers it called.
 
 `process_exit` subscribers must be short and must not wait for other threads without a timeout.
 `save_begin` runs **outside** any tick task: never run game script from it.
@@ -293,6 +327,52 @@ Identity of the running exe from its PE header: `"<TimeDateStamp>-<SizeOfImage>"
 Calls `fn` for every registered console command in registration order. Returns the count, -1
 on bad args. For completion UIs and tools.
 
+### `void log_at(int level, const char *tag, const char *fmt, ...)` (v5)
+`log` with a level: `V3X_LOG_ERROR` (1), `V3X_LOG_WARN` (2), `V3X_LOG_INFO` (3),
+`V3X_LOG_DEBUG` (4), `V3X_LOG_TRACE` (5); out-of-range levels are clamped. Written only if
+`level <= log_level(tag)`. ERROR/WARN/DEBUG/TRACE lines get `ERROR: ` / `WARNING: ` / `debug: ` /
+`trace: ` after the tag (the first two are shown red in the console). Any thread.
+`V3X_LOGE/W/I/D/T(api, tag, ...)` in `sdk/v3x_util.h` use it and fall back to `log` on older
+loaders (dropping debug/trace there).
+
+### `int log_level(const char *tag)` (v5)
+Current threshold for `tag` (NULL = global): `v3x.ini` `[log]` `<tag> = <level>`, else `[log]`
+`level = <level>`, else env `V3X_LOG_LEVEL`, else info. Levels: `off` (0), `error`, `warn`,
+`info`, `debug`, `trace` or `0`-`5`. Tags are case-insensitive, up to 31 chars, 32 tags. The
+console command `loglevel [tag] <level>` changes it at runtime. Lock-free: use it to skip
+expensive formatting (`if (api->log_level("me") >= V3X_LOG_DEBUG) dump();`).
+
+### `const char *loader_version(void)` (v5)
+Semantic version of the loader build, e.g. `"0.5.0"`. Independent of `api_version` (the table
+layout) and of `game_version` / `game_build_id` (the game). See
+[api-stability.md](api-stability.md#three-version-numbers).
+
+### `int build_matches(const char *game_builds)` (v5)
+1 if the running game matches a `;`-separated list with exactly the manifest's `game_builds`
+rules (see [Manifest](#manifest)), else 0. For plugins that switch single features per build:
+`if (api->build_matches("release/1.15*")) install_feature_x();`.
+
+## Return codes
+
+v1-v4 return values are unchanged; v5 only gives them names (`include/v3x.h`):
+
+| name | value | returned by |
+|---|---|---|
+| `V3X_OK` | 0 | success everywhere |
+| `V3X_EFAIL` | -1 | bad arguments, table/queue full, unknown or disabled command, process exiting (`register_command`, `run_on_main`, `exec_*`, `on_event`, `emit_event`, `enum_commands`, `on_frame`, `hook_safe` bad args) |
+| `V3X_EEXIST` | -2 | `register_command`: name taken; `on_event`: same (name, fn, user) |
+| `V3X_EMH_NOT_INITIALIZED` | 2 | hooks: MinHook unavailable or process exiting |
+| `V3X_EMH_ALREADY_CREATED` | 3 | `hook_safe`: this plugin already subscribed the same pre/post/user there |
+| `V3X_EMH_NOT_CREATED` | 4 | `unhook`: nothing hooked there |
+| `V3X_EMH_NOT_EXECUTABLE` | 7 | hooks: target is not executable memory |
+| `V3X_EMH_UNSUPPORTED_FUNCTION` | 8 | hooks: the first instructions cannot be relocated |
+| `V3X_EMH_MEMORY_ALLOC` | 9 | hooks: no trampoline memory, thunk pool full, 8 subscribers already |
+| `V3X_EMH_MEMORY_PROTECT` | 10 | hooks: VirtualProtect failed |
+| `V3X_EHOOKBUSY` | 100 | `hook` / `hook_safe` / `unhook`: another plugin holds the target |
+| Win32 error | >0 | `patch`: `GetLastError()` of VirtualProtect (`ERROR_INVALID_PARAMETER` for NULL / 0 bytes since 0.5.0) |
+
+Counts: `print` (chars), `emit_event` (subscribers called), `enum_commands` (commands).
+
 ## Manifest
 
 ```c
@@ -315,9 +395,10 @@ the code is still what you expect.
 ## Built-in console commands
 
 `help [command]`, `plugins` (name, version, file, status, then description and author),
-`log <text>`, `version` (API version, game version, build id, exe base), `quit`/`exit` (only
-explain how to close the game; the console's close button is removed because closing a console
-window kills its process).
+`log <text>`, `version` (loader version, API version, game version, build id, exe base),
+`loglevel [tag] [level]` (v5: show or set `log_at` thresholds), `reload [plugin]` (v5: emit
+`config_reload` on the main thread), `quit`/`exit` (only explain how to close the game; the
+console's close button is removed because closing a console window kills its process).
 
 ## Environment variables and `v3x.ini`
 
@@ -326,6 +407,10 @@ window kills its process).
 | `V3X_DISABLE=1` | loader does nothing (no hooks, no plugins) |
 | `V3X_NO_CONSOLE=1` or `console=0` in `v3x.ini` | no console window |
 | `[plugins]` `<dll stem> = 0` in `v3x.ini` | skip that plugin |
+| `[log]` `level = <level>`, `<tag> = <level>` in `v3x.ini`; env `V3X_LOG_LEVEL` | `log_at` thresholds (v5) |
+| `unknown_build = load` at the top of `v3x.ini` (before any `[section]`), or env `V3X_UNKNOWN_BUILD=load` | on a game build the loader does not know, load every plugin (default `safe`: only plugins whose manifest declares the build) |
+| env `V3X_BUILD_GATE=1` | apply the unknown-build gate even when the host is not `victoria3.exe` (tests) |
+| `v3x/loading.marker` (written by the loader) | names the plugin being loaded; if it survives a crash, that plugin is skipped once |
 
 Plugins have their own (`V3X_PROFILE`, `V3X_DEVBRIDGE_PIPE`, `V3X_NO_TICKPROF`, ...), see
 [plugins.md](plugins.md).
@@ -334,4 +419,7 @@ Plugins have their own (`V3X_PROFILE`, `V3X_DEVBRIDGE_PIPE`, `V3X_NO_TICKPROF`, 
 
 Besides the 17 forwarded `version.dll` functions, the loader exports
 `const V3X_API *v3x_api(void)` for tests and tools that are not plugins:
-`GetProcAddress(GetModuleHandleA("version.dll"), "v3x_api")`.
+`GetProcAddress(GetModuleHandleA("version.dll"), "v3x_api")`. Since 0.5.0 also three data
+exports that tools read from the file without loading it (`sdk/build_plugin.py check`):
+`uint32_t v3x_loader_api` (API version), `char v3x_loader_semver[]` (loader version) and
+`char v3x_loader_known_builds[]` (`;`-separated build ids the loader was tested on).

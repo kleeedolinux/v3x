@@ -69,6 +69,7 @@
 #include "cp_wild.h"
 
 V3X_EXPORT const char *v3x_plugin_name = "console_plus";
+V3X_PLUGIN_MANIFEST("console_plus", "0.5.0", "v3x", "Tab completion and wildcards for the in-game developer console", "release/1.15.1");
 
 static const V3X_API *api;
 static CpCfg g_cfg;

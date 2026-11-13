@@ -14,11 +14,16 @@ game version.
 - If the game was patched and your V3X does not know the new build yet, most plugins switch themselves
   off (safe mode). The updater still runs. When a V3X release for the new build exists, it tells you so
   and installs it.
+- Every V3X release is **signed** by the V3X developers (Ed25519, file `compat.json.sig`). The updater
+  installs a release on its own only if that signature is valid; the checksum it then checks comes from
+  the signed file. A release without a valid signature is only announced (the console says
+  *"NOT signed"*); it is installed only if you type `update now` yourself.
 - Updates are never installed while you play. The new `V3X-Setup.exe` is downloaded to
-  `binaries/v3x/update/` and its SHA-256 checksum is checked. When you quit the game, the setup starts and
-  swaps the files after the game has closed. Your settings (`*.ini`) are kept. The next start runs the
-  new version.
-- V3X never downgrades. If the download or the checksum check fails, nothing is installed and one line
+  `binaries/v3x/update/` and its SHA-256 checksum is checked. When you quit the game, the checksum is
+  checked again and the setup starts and swaps the files after the game has closed. Your settings
+  (`*.ini`) are kept. The next start runs the new version.
+- V3X never downgrades: `binaries/v3x/update/floor.txt` remembers the newest version that ran here, and
+  nothing older is ever offered. If the download or the checksum check fails, nothing is installed and one line
   goes to `binaries/v3x/v3x.log`. With no internet you get a single log line and nothing else happens.
 - If an automatic install fails 3 times for the same version, V3X stops retrying.
   `binaries/v3x/install.log` has the reason, and you can run `binaries/v3x/update/V3X-Setup.exe` by hand.
@@ -29,7 +34,7 @@ Console (the V3X console window):
 |---|---|
 | `update` | status: installed version, game build, what is available and why |
 | `update check` | check now (at most once per minute) |
-| `update now` | with `auto = 0`: download the offered update and install it when you quit |
+| `update now` | download the offered update and install it when you quit (needed with `auto = 0`, and for a release that is not signed) |
 | `update cancel` | install nothing when the game exits (this session only) |
 
 Settings, in `binaries/v3x/v3x.ini`:
@@ -37,7 +42,7 @@ Settings, in `binaries/v3x/v3x.ini`:
 ```ini
 [update]
 check = 1         ; 0 = no automatic checks (only `update check`)
-auto = 1          ; 0 = only tell me; install with `update now`
+auto = 1          ; install SIGNED updates when I quit; 0 = only tell me; install with `update now`
 channel = stable  ; beta = pre-releases too (e.g. 0.7.0-rc1)
 ```
 
@@ -52,27 +57,40 @@ channel = stable  ; beta = pre-releases too (e.g. 0.7.0-rc1)
 - Se o jogo foi atualizado e o seu V3X ainda não conhece o novo build, a maioria dos plugins se desliga
   (modo seguro). O atualizador continua funcionando: quando sair uma versão do V3X para o novo build, ele
   avisa e instala.
+- Toda versão do V3X é **assinada** pelos desenvolvedores (Ed25519, arquivo `compat.json.sig`). O
+  atualizador só instala sozinho uma versão com assinatura válida; o checksum conferido vem do arquivo
+  assinado. Uma versão sem assinatura válida só é anunciada (o console diz *"NOT signed"*) e só é
+  instalada se você digitar `update now`.
 - Nada é instalado durante a partida. O `V3X-Setup.exe` novo é baixado para `binaries/v3x/update/` e o
   checksum SHA-256 dele é conferido. Quando você fecha o jogo, o instalador abre e troca os arquivos depois
   que o jogo terminou de fechar. As suas configurações (`*.ini`) são mantidas.
-- O V3X nunca volta para uma versão mais antiga. Se o download ou a conferência falhar, nada é instalado e
+- O V3X nunca volta para uma versão mais antiga (`binaries/v3x/update/floor.txt` guarda a versão mais
+  nova que já rodou aqui). Se o download ou a conferência falhar, nada é instalado e
   só uma linha vai para `binaries/v3x/v3x.log`. Sem internet também fica só uma linha no log.
 - Comandos no console: `update` (situação), `update check` (procurar agora), `update now` (instalar ao
   sair, quando `auto = 0`), `update cancel` (não instalar nada ao sair).
 - Configuração em `binaries/v3x/v3x.ini`, seção `[update]`: `check = 0` desliga a busca automática,
   `auto = 0` só avisa sem instalar, `channel = beta` inclui versões de teste.
 
-## For release makers: `compat.json`
+## For release makers: `compat.json` and `compat.json.sig`
 
-Every GitHub release must have a `compat.json` asset. `installer/make_dist.py` writes it from
-`installer/builds.txt` and `include/v3x.h`:
+Every GitHub release must have a `compat.json` asset and its signature `compat.json.sig`.
+`installer/make_dist.py` writes `compat.json` from `installer/builds.txt` and `include/v3x.h`; the
+`publish` job of `.github/workflows/release.yml` signs it with `tools/sign_release.py`:
 
 ```json
-{"v3x_version": "0.6.0", "loader_semver": "0.6.0", "api_version": 5,
+{"schema": 1, "v3x_version": "0.6.0", "loader_semver": "0.6.0", "api_version": 5,
  "game_builds": [{"branch": "release/1.15.2", "build_id": "<api->game_build_id()>"}],
- "assets": {"setup": "V3X-Setup.exe", "zip": "v3x-0.6.0.zip", "install_ps1": "install.ps1",
-            "sha256": {"V3X-Setup.exe": "<64 hex>", "v3x-0.6.0.zip": "<64 hex>", "install.ps1": "<64 hex>"}}}
+ "assets": [{"name": "V3X-Setup.exe", "size": 123456, "sha256": "<64 hex>"},
+            {"name": "v3x-0.6.0.zip", "size": 123, "sha256": "<64 hex>"},
+            {"name": "install.ps1", "size": 12, "sha256": "<64 hex>"}]}
 ```
+
+`compat.json.sig` is one ASCII line, `v3x-sig 1 <key id> <base64 Ed25519 signature>`, over the exact
+bytes of `compat.json` (key id = first 8 bytes of SHA-512 of the public key, hex). The trusted public
+keys are in `installer/release_keys.h` (CURRENT + NEXT rotation slot), compiled into V3X-Setup.exe
+(`--verify-release`) and the updater (`plugins/updater/up_sig.c`, Monocypher), and copied into
+`installer/install.ps1` (`$ReleaseKeyCurrent` / `$ReleaseKeyNext`, checked in PowerShell).
 
 How the updater (`plugins/updater/up_logic.c` `up_select`) picks a release:
 
@@ -84,9 +102,19 @@ How the updater (`plugins/updater/up_logic.c` `up_select`) picks a release:
   the running loader's API version.
 - A `game_builds` entry with a `build_id` matches only that exact build. An entry with just a `branch`
   matches every build of that branch, including hotfixes.
-- The setup asset (`assets.setup`) needs a SHA-256: from `assets.sha256`, otherwise from
-  `SHA256SUMS.txt`.
+- If the release lists a `compat.json.sig`, it must verify (bad signature, unknown key or a `.sig` that
+  cannot be downloaded = the release is rejected). Then the setup's SHA-256 and size come from the
+  signed `compat.json` only. Without a `.sig` the release is *unsigned*: its SHA-256 may also come from
+  `SHA256SUMS.txt`, it is offered, but only `update now` installs it (`auto = 1` never does).
+- The version must not be below `update/floor.txt` (the highest version that ran here or that the
+  updater started).
 - Of all releases that pass, the newest one wins.
+
+The cache (`binaries/v3x/update_cache.json`) keeps a signed `compat.json` and its signature verbatim and
+verifies them again on every read; a cache entry never makes a release "signed" by itself, and the setup
+file name is always `V3X-Setup.exe`. At exit the verified file is opened without write/delete sharing,
+hashed again through that handle and started while the handle is held. WinHTTP is loaded from System32
+only.
 
 Only URLs under `https://github.com/kleeedolinux/v3x/releases/download/` and
 `https://api.github.com/repos/kleeedolinux/v3x/` are ever requested.
@@ -97,3 +125,46 @@ it reads the last `update-result:` line of `binaries/v3x/install.log`.
 
 Plugins can subscribe to the `update_available` event (`plugins/updater/updater.h`, `V3X_UpdateInfo`;
 main thread).
+
+## Release signing (for the lead)
+
+One-time setup. The private key never enters the repository or a checkout.
+
+1. Generate the key on a trusted machine, outside any git checkout (the tool refuses a folder inside
+   the repo):
+
+   ```
+   python tools/sign_release.py keygen --out-dir <offline folder> --name v3x-release
+   ```
+
+   It writes `v3x-release.seed.b64` (PRIVATE, base64 of the 32-byte seed) and `v3x-release.pub.txt`,
+   and prints the public key and key id. Keep an offline backup of the seed file (for example on two
+   USB sticks): losing it means a key rotation, leaking it means every player trusts the thief.
+2. Put the public key (64 hex digits) into `installer/release_keys.h`
+   (`#define V3X_RELEASE_KEY_CURRENT "<hex>"`) and the same value into `installer/install.ps1`
+   (`$ReleaseKeyCurrent = '<hex>'`). `python installer/test_installer.py` fails if the two differ.
+   Commit both (public data). Until then the release workflow stops at "Release key configured".
+3. GitHub, repository Settings > Environments > New environment `release`:
+   - Deployment branches and tags: *Selected branches and tags*, add the tag rule `v*`.
+   - Required reviewers: yourself (every release waits for your approval before it is signed).
+   - Environment secret `V3X_SIGNING_KEY` = the content of `v3x-release.seed.b64` (one line).
+   Do not create it as a repository secret: only the `publish` job, which runs in this environment,
+   may read it.
+4. Settings > Rules > Rulesets > New tag ruleset, target `v*`: restrict creations, updates and
+   deletions (bypass: you / repository admin), so nobody else can push or move a release tag.
+   Settings > Actions > General: Workflow permissions = "Read repository contents" (the workflows ask
+   for more only where needed). Optionally Settings > General > Releases > "Enable release immutability".
+5. Check a published release: `python tools/sign_release.py verify compat.json` (uses
+   `release_keys.h`), `V3X-Setup.exe --verify-release <folder with the downloaded assets>`, and
+   `gh attestation verify V3X-Setup.exe --repo kleeedolinux/v3x` (build provenance).
+
+Key rotation: generate the next key, put its public key into the NEXT slots (`V3X_RELEASE_KEY_NEXT`,
+`$ReleaseKeyNext`) and publish at least one release signed with the CURRENT key, so installed updaters
+already trust the next key. Then replace the secret, move the key to CURRENT and empty NEXT.
+
+Dry run with a development key (never for a published release):
+`python tools/sign_release.py keygen --out-dir D:/v3x_keys --name v3x-dev`, then
+`python installer/make_dist.py --no-build --out <dir> --version 0.6.0 --trust-key <dev public key>`,
+`V3X_SIGNING_KEY=<seed> python tools/sign_release.py sign <dir>/compat.json --allow-key <dev public key>`
+and `<dir>/V3X-Setup.exe --verify-release <dir>`. The installer tests do the same with the public TEST
+key of `tools/sign_release.py` (`TEST_SEED`), which no release build trusts.

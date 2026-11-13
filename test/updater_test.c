@@ -30,13 +30,22 @@ static void sink(const char *t, void *u) { (void)u; strncat(g_out, t, sizeof g_o
 int main(int argc, char **argv)
 {
     const V3X_API *api = v3x_api();
-    int want_ready = !(argc > 1 && !strcmp(argv[1], "tamper"));
+    /* "" = do nothing (auto); "now" = type `update now` (the cached release is unsigned) and wait
+     * until it is ready; "tamper" = `update now` with a modified setup on disk (never ready) */
+    const char *mode = argc > 1 ? argv[1] : "";
+    int want_ready = !strcmp(mode, "now");
+    int armed = !(want_ready || !strcmp(mode, "tamper"));
     FILE *f = fopen("child_out.txt", "wb");
     int ready = 0;
     for (int i = 0; i < 100 && !ready; i++) {   /* <= 10 s */
         MSG m;
         PeekMessageW(&m, NULL, 0, 0, PM_REMOVE);
         g_out[0] = 0;
+        if (!armed) {
+            api->exec_capture("update now", sink, NULL);
+            armed = strstr(g_out, "when you quit") != NULL;
+            g_out[0] = 0;
+        }
         api->exec_capture("update", sink, NULL);
         ready = strstr(g_out, "downloaded and verified") != NULL;
         if (!ready) Sleep(want_ready ? 100 : 30);
@@ -50,7 +59,12 @@ int main(int argc, char **argv)
 #else
 
 #include <shellapi.h>
+/* the public TEST key of tools/sign_release.py (seed = SHA-256 of TEST_SEED_TEXT): trusted only by
+ * this test binary, never by updater.dll */
+#define V3X_RELEASE_KEY_DEVTEST "b397fa20bfc6bba89cd5e467041d6fce492345f3aa90d3fccda438bba02c738b"
+#define TEST_SEED_TEXT "V3X PUBLIC TEST KEY - everyone knows this seed, never trust it in a release"
 #include "../plugins/updater/up_logic.c"
+#include "../plugins/updater/up_sig.c"
 
 static int fails, checks;
 #define CHECK(c, ...) do { int ok_ = !!(c); checks++; if (!ok_ || verbose) { printf("%s: ", ok_ ? "OK  " : "FAIL"); printf(__VA_ARGS__); printf("\n"); } fails += !ok_; } while (0)
@@ -112,7 +126,48 @@ typedef struct {
     const char *builds;    /* JSON array body */
     int compat;            /* 0 = no compat.json asset, 1 = good, 2 = HTTP 500, 3 = no sha (SHA256SUMS), 4 = no sha at all */
     const char *compat_ver;   /* NULL = tag without v */
+    int sign;              /* 0 = no compat.json.sig, 1 = signed with the test key, 2 = bad signature,
+                              3 = signed with an unknown key, 4 = .sig listed but HTTP 404;
+                              signed releases use make_dist.py's array "assets" layout */
 } relspec;
+
+/* signing with the public test key (or a random "unknown" key) */
+static void b64(const uint8_t *in, size_t n, char *out)
+{
+    static const char t[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    size_t k = 0;
+    for (size_t i = 0; i < n; i += 3) {
+        uint32_t v = (uint32_t)in[i] << 16 | (i + 1 < n ? (uint32_t)in[i + 1] << 8 : 0) | (i + 2 < n ? in[i + 2] : 0);
+        out[k++] = t[v >> 18 & 63]; out[k++] = t[v >> 12 & 63];
+        out[k++] = i + 1 < n ? t[v >> 6 & 63] : '=';
+        out[k++] = i + 2 < n ? t[v & 63] : '=';
+    }
+    out[k] = 0;
+}
+static void sign_with(const uint8_t seed32[32], const char *msg, size_t n, char *line, size_t cap)
+{
+    uint8_t seed[32], sk[64], pk[32], sig[64];
+    char kid[17], s64[100];
+    memcpy(seed, seed32, 32);
+    crypto_ed25519_key_pair(sk, pk, seed);
+    crypto_ed25519_sign(sig, sk, (const uint8_t *)msg, n);
+    v3x_sig_key_id_(pk, kid);
+    b64(sig, 64, s64);
+    snprintf(line, cap, "v3x-sig 1 %s %s\n", kid, s64);
+}
+static void test_seed(uint8_t out[32])
+{
+    up_sha256 s;
+    up_sha256_init(&s);
+    up_sha256_update(&s, TEST_SEED_TEXT, strlen(TEST_SEED_TEXT));
+    up_sha256_final(&s, out);
+}
+static void sign_test(const char *msg, size_t n, char *line, size_t cap)
+{
+    uint8_t seed[32];
+    test_seed(seed);
+    sign_with(seed, msg, n, line, cap);
+}
 
 static char g_list[65536];
 static void setup_body(const char *tag, char *out, size_t cap) { snprintf(out, cap, "FAKE V3X SETUP %s", tag); }
@@ -132,20 +187,43 @@ static void make_world(fake *f, const relspec *s, int n)
                               "\"author\":{\"login\":\"k\",\"id\":1,\"x\":[1,2,{\"y\":null}]},\"body\":\"line\\n\\\"quoted\\\" \\u00e9\","
                               "\"assets\":[{\"name\":\"V3X-Setup.exe\",\"size\":%zu,\"browser_download_url\":\"%sV3X-Setup.exe\"},"
                               "{\"name\":\"evil.exe\",\"size\":1,\"browser_download_url\":\"https://evil.example/x.exe\"},"
-                              "{\"name\":\"SHA256SUMS.txt\",\"size\":100,\"browser_download_url\":\"%sSHA256SUMS.txt\"}%s%s%s]}",
+                              "{\"name\":\"SHA256SUMS.txt\",\"size\":100,\"browser_download_url\":\"%sSHA256SUMS.txt\"}%s%s%s%s%s%s]}",
                               i ? "," : "", s[i].tag, s[i].tag, s[i].draft ? "true" : "false", s[i].pre ? "true" : "false",
                               strlen(setup), base, base, s[i].compat ? ",{\"name\":\"compat.json\",\"size\":10,\"browser_download_url\":\"" : "",
-                              s[i].compat ? base : "", s[i].compat ? "compat.json\"}" : "");
+                              s[i].compat ? base : "", s[i].compat ? "compat.json\"}" : "",
+                              s[i].sign ? ",{\"name\":\"compat.json.sig\",\"size\":120,\"browser_download_url\":\"" : "",
+                              s[i].sign ? base : "", s[i].sign ? "compat.json.sig\"}" : "");
         const char *ver = s[i].compat_ver ? s[i].compat_ver : s[i].tag + 1;
-        snprintf(cj, sizeof cj,
-                 "{\"v3x_version\":\"%s\",\"loader_semver\":\"%s\",\"api_version\":%d,\"game_builds\":[%s],"
-                 "\"assets\":{\"setup\":\"V3X-Setup.exe\",\"zip\":\"v3x.zip\",\"install_ps1\":\"install.ps1\",\"sha256\":{%s%s%s}}}",
-                 ver, ver, s[i].api, s[i].builds, s[i].compat == 3 || s[i].compat == 4 ? "" : "\"V3X-Setup.exe\":\"",
-                 s[i].compat == 3 || s[i].compat == 4 ? "\"install.ps1\":\"" "0000000000000000000000000000000000000000000000000000000000000000\"" : sha,
-                 s[i].compat == 3 || s[i].compat == 4 ? "" : "\"");
+        if (s[i].sign)   /* installer/make_dist.py layout */
+            snprintf(cj, sizeof cj,
+                     "{\n  \"schema\": 1,\n  \"v3x_version\": \"%s\",\n  \"api_version\": %d,\n  \"game_builds\": [%s],\n"
+                     "  \"assets\": [{\"name\": \"V3X-Setup.exe\", \"size\": %zu, \"sha256\": \"%s\"},"
+                     " {\"name\": \"install.ps1\", \"size\": 5, \"sha256\": \"%064d\"}]\n}\n",
+                     ver, s[i].api, s[i].builds, strlen(setup), sha, 0);
+        else
+            snprintf(cj, sizeof cj,
+                     "{\"v3x_version\":\"%s\",\"loader_semver\":\"%s\",\"api_version\":%d,\"game_builds\":[%s],"
+                     "\"assets\":{\"setup\":\"V3X-Setup.exe\",\"zip\":\"v3x.zip\",\"install_ps1\":\"install.ps1\",\"sha256\":{%s%s%s}}}",
+                     ver, ver, s[i].api, s[i].builds, s[i].compat == 3 || s[i].compat == 4 ? "" : "\"V3X-Setup.exe\":\"",
+                     s[i].compat == 3 || s[i].compat == 4 ? "\"install.ps1\":\"" "0000000000000000000000000000000000000000000000000000000000000000\"" : sha,
+                     s[i].compat == 3 || s[i].compat == 4 ? "" : "\"");
         snprintf(url, sizeof url, "%scompat.json", base);
         if (s[i].compat == 2) route_add(f, url, 500, NULL, 0);
         else if (s[i].compat) route_add(f, url, 200, cj, strlen(cj));
+        if (s[i].sign) {
+            char line[160];
+            if (s[i].sign == 3) {
+                uint8_t other[32];
+                for (int b = 0; b < 32; b++) other[b] = (uint8_t)(b * 7 + 1);
+                sign_with(other, cj, strlen(cj), line, sizeof line);
+            } else {
+                sign_test(cj, strlen(cj), line, sizeof line);
+            }
+            if (s[i].sign == 2) line[40] = line[40] == 'A' ? 'B' : 'A';   /* one base64 digit of the signature */
+            snprintf(url, sizeof url, "%scompat.json.sig", base);
+            if (s[i].sign == 4) route_add(f, url, 404, NULL, 0);
+            else route_add(f, url, 200, line, strlen(line));
+        }
         snprintf(url, sizeof url, "%sV3X-Setup.exe", base);
         route_add(f, url, 200, setup, strlen(setup));
         if (s[i].compat == 3) {
@@ -334,7 +412,7 @@ static void t_fuzz(void)
         snprintf(r1.version, sizeof r1.version, "0.5.0");
         up_parse_compat(buf, n, &r1);   /* not compat.json at all: must fail cleanly */
         if (r1.compat == 1) sane = 0;
-        up_catalog c2;
+        static up_catalog c2;
         up_cache_read(buf, n, &c2);
     }
     CHECK(sane, "20000 random mutations of the release list: no crash, bounded catalog (%d still parsed)", parsed);
@@ -470,7 +548,8 @@ static void t_select(void)
           "only newer non-draft releases' compat.json fetched (%d calls)", f.calls);
     fake_free(&f);
     /* offline */
-    up_catalog keep = cat;
+    static up_catalog keep;
+    keep = cat;
     int rc = up_fetch_catalog(offline_get, NULL, &l5, 2, &cat, err, sizeof err);
     CHECK(rc == -1 && strstr(err, "network error") && !memcmp(&keep, &cat, sizeof cat), "offline: -1, '%s', catalog untouched", err);
     memset(&f, 0, sizeof f);
@@ -483,7 +562,7 @@ static void t_select(void)
     CHECK(rc == -1 && strstr(err, "malformed"), "non-array answer: '%s'", err);
     fake_free(&f);
     up_local lo = {"0.5.0", 5, B1151, BR1151, 0, 1};
-    up_catalog empty;
+    static up_catalog empty;
     memset(&empty, 0, sizeof empty);
     up_choice off = {UP_OFFLINE, -1, -1};
     up_status_text(&empty, &lo, off, text, sizeof text);
@@ -589,6 +668,113 @@ static void t_download(void)
     snprintf(t.setup_url, sizeof t.setup_url, "https://evil.example/V3X-Setup.exe");
     int calls = f.calls;
     CHECK(up_download_setup(fake_get, &f, &t, &data, &n, err, sizeof err) == -1 && f.calls == calls, "foreign URL never requested");
+    fake_free(&f);
+}
+
+/* release signatures (H1), rollback floor and cache trust (M4) */
+static void t_sig(void)
+{
+    const char *msg = "{\"v3x_version\":\"1.0.0\"}\n";
+    char line[160], kid[17];
+    const char *why = "";
+    sign_test(msg, strlen(msg), line, sizeof line);
+    CHECK(up_sig_check(msg, strlen(msg), line, strlen(line), kid, &why) == V3X_SIG_SLOT_DEVTEST && !strcmp(kid, "c91e9e3c88025a36"),
+          "sig: test-key signature verifies (key id %s = tools/sign_release.py TEST key)", kid);
+    char m2[64];
+    snprintf(m2, sizeof m2, "%s", msg);
+    m2[3] ^= 1;
+    CHECK(up_sig_check(m2, strlen(m2), line, strlen(line), kid, &why) < 0 && !strcmp(why, "BAD signature"), "sig: one changed byte -> %s", why);
+    char l2[160];
+    snprintf(l2, sizeof l2, "%s", line);
+    l2[40] = l2[40] == 'A' ? 'B' : 'A';
+    CHECK(up_sig_check(msg, strlen(msg), l2, strlen(l2), kid, &why) < 0, "sig: changed signature digit -> %s", why);
+    const char *bad[] = {"", "v3x-sig 1 c91e9e3c88025a36", "v3x-sig 2 c91e9e3c88025a36 AAAA==", "garbage\n",
+                         "v3x-sig 1 C91E9E3C88025A36 AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="};
+    int ok = 1;
+    for (size_t i = 0; i < sizeof bad / sizeof *bad; i++)
+        if (up_sig_check(msg, strlen(msg), bad[i], strlen(bad[i]), kid, &why) >= 0) ok = 0;
+    CHECK(ok, "sig: malformed signature files rejected (%zu cases)", sizeof bad / sizeof *bad);
+    uint8_t other[32];
+    for (int b = 0; b < 32; b++) other[b] = (uint8_t)(b * 7 + 1);
+    sign_with(other, msg, strlen(msg), l2, sizeof l2);
+    CHECK(up_sig_check(msg, strlen(msg), l2, strlen(l2), kid, &why) < 0 && strstr(why, "unknown key"), "sig: another key -> %s", why);
+    CHECK(up_sig_keys() >= 1, "sig: %d trusted key(s) in this test build (release_keys.h + test key)", up_sig_keys());
+    for (int i = 0, mut = 0; i < 2000; i++) {   /* random signature lines never crash, never verify */
+        char fz[160];
+        snprintf(fz, sizeof fz, "%s", line);
+        size_t n = strlen(fz);
+        unsigned sd = (unsigned)i * 2654435761u;
+        fz[sd % n] = (char)(sd >> 8);
+        if (fz[sd % n] == line[sd % n]) continue;
+        if (up_sig_check(msg, strlen(msg), fz, n, kid, &why) >= 0) mut++;
+        if (i == 1999) CHECK(mut == 0, "sig: 2000 one-byte mutations of the .sig line: none verifies");
+    }
+
+    /* signed world: hashes from the signed compat.json (make_dist layout), auto only when signed */
+    relspec w[] = {
+        {"v0.9.0", 0, 0, 5, BLD(BR1151, B1151), 1, NULL, 1},   /* signed */
+        {"v0.8.0", 0, 0, 5, BLD(BR1151, B1151), 1, NULL, 0},   /* unsigned (older draft layout) */
+        {"v0.9.5", 0, 0, 5, BLD(BR1151, B1151), 1, NULL, 2},   /* bad signature */
+        {"v0.9.6", 0, 0, 5, BLD(BR1151, B1151), 1, NULL, 3},   /* unknown key */
+        {"v0.9.7", 0, 0, 5, BLD(BR1151, B1151), 1, NULL, 4},   /* .sig listed, HTTP 404 */
+    };
+    fake f;
+    memset(&f, 0, sizeof f);
+    make_world(&f, w, 5);
+    up_local l = {"0.5.0", 5, B1151, BR1151, 0, 1};
+    char err[160];
+    int rc = up_fetch_catalog(fake_get, &f, &l, 1000, &cat, err, sizeof err);
+    up_choice c = up_select(&cat, &l);
+    int i90 = -1, i80 = -1, i95 = -1, i96 = -1, i97 = -1;
+    for (int i = 0; i < cat.n; i++) {
+        if (!strcmp(cat.r[i].version, "0.9.0")) i90 = i;
+        if (!strcmp(cat.r[i].version, "0.8.0")) i80 = i;
+        if (!strcmp(cat.r[i].version, "0.9.5")) i95 = i;
+        if (!strcmp(cat.r[i].version, "0.9.6")) i96 = i;
+        if (!strcmp(cat.r[i].version, "0.9.7")) i97 = i;
+    }
+    CHECK(rc == 0 && i90 >= 0 && cat.r[i90].sig == 1 && up_release_auto_ok(&cat.r[i90]) && up_hex_valid(cat.r[i90].setup_sha) &&
+              cat.r[i90].setup_size > 0, "signed 0.9.0: sig=1, hash + size from the signed compat.json (array assets)");
+    CHECK(i80 >= 0 && cat.r[i80].compat == 1 && cat.r[i80].sig == 0 && !up_release_auto_ok(&cat.r[i80]),
+          "unsigned 0.8.0: parsed, sig=0, never automatic");
+    CHECK(i95 >= 0 && cat.r[i95].compat == -1 && strstr(cat.r[i95].compat_err, "BAD signature"), "bad signature 0.9.5: rejected (%s)",
+          i95 >= 0 ? cat.r[i95].compat_err : "?");
+    CHECK(i96 >= 0 && cat.r[i96].compat == -1 && strstr(cat.r[i96].compat_err, "unknown key"), "unknown key 0.9.6: rejected (%s)",
+          i96 >= 0 ? cat.r[i96].compat_err : "?");
+    CHECK(i97 >= 0 && cat.r[i97].compat == -1 && strstr(cat.r[i97].compat_err, "sig"), "listed .sig not downloadable 0.9.7: rejected, not 'unsigned' (%s)",
+          i97 >= 0 ? cat.r[i97].compat_err : "?");
+    CHECK(c.best == i90 && c.state == UP_AVAILABLE, "selection: the signed 0.9.0 (bad/unknown/missing-sig newer ones skipped)");
+    /* cache: signed state survives only by re-verification */
+    static char buf[1 << 20];
+    size_t n = up_cache_write(&cat, buf, sizeof buf);
+    static up_catalog back;
+    CHECK(n && up_cache_read(buf, n, &back) == 0 && back.r[i90].sig == 1 && up_hex_eq(back.r[i90].setup_sha, cat.r[i90].setup_sha) &&
+              back.r[i80].sig == 0, "cache round trip: signed release re-verified (sig=1), unsigned stays sig=0");
+    /* an edited cache: other hash for the signed release -> the signed compat.json's hash wins */
+    char *hp = strstr(buf, cat.r[i90].setup_sha);
+    if (hp) hp[0] = hp[0] == 'a' ? 'b' : 'a';
+    CHECK(hp && up_cache_read(buf, n, &back) == 0 && up_hex_eq(back.r[i90].setup_sha, cat.r[i90].setup_sha),
+          "cache edit of setup_sha of a signed release ignored (taken from the signed compat.json)");
+    /* an edited cache: changed signed text -> no longer signed, not eligible */
+    char *rp = strstr(buf, "\"compat_raw\":");
+    if (rp) { rp = strstr(rp, "api_version"); if (rp) rp[0] = 'A'; }
+    CHECK(rp && up_cache_read(buf, n, &back) == 0 && back.r[i90].sig == 0 && back.r[i90].compat == -1,
+          "cache edit inside the signed compat.json -> signature fails, release rejected");
+    const char *ev = "{\"schema\":1,\"releases\":[{\"tag\":\"v9.0.0\",\"version\":\"9.0.0\",\"draft\":false,\"prerelease\":false,"
+                     "\"compat\":1,\"sig\":1,\"api_version\":5,\"setup_name\":\"..\\\\..\\\\evil.exe\",\"setup_url\":\"" UP_ASSET_PREFIX
+                     "v9.0.0/V3X-Setup.exe\",\"setup_sha\":\"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\","
+                     "\"game_builds\":[{\"branch\":\"\",\"build_id\":\"" B1151 "\"}]}]}";
+    CHECK(up_cache_read(ev, strlen(ev), &back) == 0 && back.r[0].sig == 0 && !up_release_auto_ok(&back.r[0]) &&
+              !strcmp(back.r[0].setup_name, UP_SETUP_NAME), "cache saying sig=1 without a signed text: unsigned; setup_name '..\\..\\evil.exe' -> %s",
+          back.r[0].setup_name);
+    /* rollback floor */
+    up_local lf = {"0.5.0", 5, B1151, BR1151, 0, 1, "0.9.1"};
+    up_choice cf = up_select(&cat, &lf);
+    CHECK(cf.best < 0, "floor 0.9.1: the signed 0.9.0 is below the floor -> not offered (state %s)", up_state_name(cf.state));
+    up_local lg = {"0.5.0", 5, B1151, BR1151, 0, 1, "0.9.0"};
+    CHECK(up_select(&cat, &lg).best == i90, "floor 0.9.0: 0.9.0 itself is still allowed");
+    CHECK(up_name_ok("V3X-Setup.exe") && !up_name_ok("..") && !up_name_ok("a/b.exe") && !up_name_ok("a\\b.exe") && !up_name_ok("C:x.exe") &&
+              !up_name_ok("") && !up_name_ok("x.exe."), "setup names: only plain file names");
     fake_free(&f);
 }
 
@@ -737,29 +923,43 @@ static void t_e2e(const char *dir)
     write_cache(v3x, build, hex, (long long)fa.nFileSizeLow);
     DeleteFileA(args);
     DWORD pid = 0;
-    CHECK(run_child(bin, "", &pid) == 0, "e2e: child ran and exited (pid %lu)", pid);
     char out[16384], a[4096], log[65536];
-    char co[MAX_PATH];
+    char co[MAX_PATH], lp[MAX_PATH];
     snprintf(co, sizeof co, "%s\\child_out.txt", bin);
-    file_text(co, out, sizeof out);
-    char lp[MAX_PATH];
     snprintf(lp, sizeof lp, "%s\\v3x.log", v3x);
+    /* 1. auto = 1 (default) but the cached release is unsigned: announced, never started (H1) */
+    CHECK(run_child(bin, "", &pid) == 0, "e2e: child ran and exited (pid %lu)", pid);
+    Sleep(1000);
+    file_text(co, out, sizeof out);
     file_text(lp, log, sizeof log);
     CHECK(strstr(log, "Safe mode") && strstr(log, "loaded plugin 'updater'"), "e2e: updater loads in safe mode (manifest \"*\")");
-    CHECK(strstr(out, "99.0.0") && strstr(out, "downloaded and verified") && strstr(out, "supports it"),
-          "e2e: `update` shows the urgent 99.0.0 (cached, verified on disk)");
+    CHECK(strstr(out, "99.0.0") && strstr(out, "NOT signed") && strstr(out, "supports it") && !strstr(out, "downloaded and verified"),
+          "e2e: `update` shows the urgent 99.0.0, NOT signed, not downloaded on its own");
+    CHECK(GetFileAttributesA(args) == INVALID_FILE_ATTRIBUTES && strstr(log, "99.0.0 is NOT signed") && !strstr(log, "started the V3X"),
+          "e2e: unsigned release + auto=1 -> nothing started at exit");
     CHECK(strstr(log, "update check failed") != NULL, "e2e: blocked network = one log line");
+    /* 2. `update now`: the player asked, so the (hash-verified) unsigned setup is started at exit */
+    write_cache(v3x, build, hex, (long long)fa.nFileSizeLow);
+    CHECK(run_child(bin, "now", &pid) == 0, "e2e: 'update now' child ran and exited (pid %lu)", pid);
+    file_text(co, out, sizeof out);
+    file_text(lp, log, sizeof log);
+    CHECK(strstr(out, "99.0.0") && strstr(out, "downloaded and verified"), "e2e: after 'update now' the cached setup is verified on disk");
     for (int i = 0; i < 100 && GetFileAttributesA(args) == INVALID_FILE_ATTRIBUTES; i++) Sleep(100);
     file_text(args, a, sizeof a);
     char want[1024];
     snprintf(want, sizeof want, "%s\n--update\n--silent\n--game-dir\n%s\n--wait-pid\n%lu\n", setup, dir, pid);
     for (char *p = a; *p; p++) if (*p == '\r') memmove(p, p + 1, strlen(p));
     CHECK(!_stricmp(a, want), "e2e: at process exit the setup was started with the exact arguments\n%s", a);
-    CHECK(strstr(log, "started the V3X 99.0.0 setup") != NULL, "e2e: start logged");
-    char att[64];
-    snprintf(lp, sizeof lp, "%s\\attempts.txt", upd);
-    file_text(lp, att, sizeof att);
+    file_text(lp, log, sizeof log);
+    CHECK(strstr(log, "started the V3X 99.0.0 setup") && strstr(log, "UNSIGNED release, started because you typed"),
+          "e2e: start logged (and that it was unsigned + asked for)");
+    char att[64], fl[64], ap[MAX_PATH];
+    snprintf(ap, sizeof ap, "%s\\attempts.txt", upd);
+    file_text(ap, att, sizeof att);
     CHECK(!strncmp(att, "99.0.0 1", 8), "e2e: attempt counted (%s)", att);
+    snprintf(ap, sizeof ap, "%s\\floor.txt", upd);
+    file_text(ap, fl, sizeof fl);
+    CHECK(!strncmp(fl, "99.0.0", 6), "e2e: rollback floor raised to the started version (%s)", fl);
 
     /* tampered setup on disk: verification fails, the (blocked) re-download fails, nothing is started */
     FILE *f = fopen(setup, "ab");
@@ -769,7 +969,6 @@ static void t_e2e(const char *dir)
     DeleteFileA(args);
     CHECK(run_child(bin, "tamper", &pid) == 0, "e2e: tamper run exited");
     Sleep(1500);
-    snprintf(lp, sizeof lp, "%s\\v3x.log", v3x);
     file_text(lp, log, sizeof log);
     file_text(co, out, sizeof out);
     CHECK(GetFileAttributesA(args) == INVALID_FILE_ATTRIBUTES && !strstr(out, "downloaded and verified") &&
@@ -791,6 +990,7 @@ int main(int argc, char **argv)
     t_rate();
     t_cache();
     t_download();
+    t_sig();
     t_cmdline();
     t_install_result();
     if (argc > 1) {

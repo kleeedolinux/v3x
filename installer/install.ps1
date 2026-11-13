@@ -4,9 +4,16 @@
 #   irm https://github.com/kleeedolinux/v3x/releases/latest/download/install.ps1 | iex
 #
 # What it does: finds Victoria 3 (Steam registry + libraryfolders.vdf, appid 529340, or asks),
-# waits until the game is closed, downloads V3X-Setup.exe + SHA256SUMS.txt from the latest GitHub
-# release, checks the SHA-256, then runs "V3X-Setup.exe --silent --game-dir <game>" (the tested
-# installer does the real work: installer/setup.c) and explains the result in plain words.
+# waits until the game is closed, downloads V3X-Setup.exe + compat.json + compat.json.sig from the
+# latest GitHub release and checks them BEFORE running anything:
+#   1. compat.json.sig must be a valid Ed25519 signature over compat.json by one of the release keys
+#      below ($ReleaseKeyCurrent / $ReleaseKeyNext = installer/release_keys.h), checked here in
+#      PowerShell (Test-Ed25519), so a swapped download cannot vouch for itself;
+#   2. V3X-Setup.exe's size and SHA-256 must be the ones the signed compat.json names;
+#   3. "V3X-Setup.exe --verify-release <folder>" must agree (the signed exe checks the same chain).
+# Only then it runs "V3X-Setup.exe --silent --game-dir <game>" (the tested installer does the real
+# work: installer/setup.c) and explains the result in plain words. An unsigned release, an unknown
+# key or any mismatch: nothing is run and nothing is changed.
 # Run it again to update, repair or uninstall.
 #
 # iex cannot pass parameters, so options are environment variables:
@@ -14,15 +21,17 @@
 #                doctor = V3X-Setup.exe --doctor (offline checks), then offers Repair when it helps
 #   V3X_LANG     en | pt                                  (default: from the Windows display language)
 #   V3X_GAME_DIR the "Victoria 3" folder (or its binaries folder); skips the search
-#   V3X_SOURCE   where to download from: a local folder or a base URL holding V3X-Setup.exe and
-#                SHA256SUMS.txt (default: the latest GitHub release); V3X_VERSION=v0.5.0 = that tag
+#   V3X_SOURCE   where to download from: a local folder or a base URL holding V3X-Setup.exe,
+#                compat.json and compat.json.sig (default: the latest GitHub release);
+#                V3X_VERSION=v0.5.0 = that tag. The signature check applies to every source.
 #   V3X_PURGE=1  with uninstall: also delete binaries\v3x (logs, settings)
 #   V3X_YES=1    never ask; take the default answer (for scripts)
 #   V3X_ANSWERS  answers for the questions, separated by ';' (for tests)
 #   V3X_STEAM_PATH  use this Steam folder instead of the registry (for tests)
 # Exit code (only when run as a file, e.g. powershell -File install.ps1; after "irm | iex" it is in
 # $v3xInstallRc): 0 ok, 1 error,
-# 2 unsupported game (not forced), 3 game running, 4 game not found, 5 not installed, 10 stopped.
+# 2 unsupported game (not forced), 3 game running, 4 game not found, 5 not installed,
+# 8 release signature / checksum not verified, 10 stopped.
 # This file is ASCII on purpose: "irm | iex" on PowerShell 5.1 may decode a download as Latin-1, so
 # accented letters are written as \u00XX and decoded at run time.
 
@@ -32,6 +41,10 @@ $v3xInstallRc = & {
     $ProgressPreference = 'SilentlyContinue'   # Invoke-WebRequest is many times slower with the progress bar
 
     $Repo = 'kleeedolinux/v3x'
+    # Release signing keys (Ed25519 public keys, 64 hex digits; '' = slot unused). MUST equal
+    # V3X_RELEASE_KEY_CURRENT / V3X_RELEASE_KEY_NEXT in installer/release_keys.h (test_installer.py checks).
+    $ReleaseKeyCurrent = ''
+    $ReleaseKeyNext = ''
     $OneLiner = 'irm https://v3extender.pages.dev/install.ps1 | iex'
 
     # ------------------------------------------------------------------ language
@@ -80,7 +93,11 @@ $v3xInstallRc = & {
             dlFail       = 'The download failed: {0}'
             dlFail2      = 'Check your internet connection and try again. Nothing was changed.'
             hashBad      = 'The download is damaged (the checksum does not match). Nothing was changed. Try again later.'
-            hashMissing  = 'SHA256SUMS.txt has no line for V3X-Setup.exe. Nothing was changed.'
+            hashMissing  = 'compat.json does not list V3X-Setup.exe. Nothing was changed.'
+            sigBad       = 'This download is NOT signed by the V3X developers ({0}). Nothing was run and nothing was changed.'
+            sigBad2      = 'Do not run files from this download. Get V3X only from https://github.com/kleeedolinux/v3x/releases'
+            sigOk        = 'Signature OK (V3X release key {0}).'
+            verifyFail   = 'V3X-Setup.exe could not confirm the release ({0}). Nothing was changed.'
             installing   = 'Installing V3X...'
             uninstalling = 'Uninstalling V3X...'
             okInstall    = 'Done! V3X {0} is installed.'
@@ -142,7 +159,11 @@ $v3xInstallRc = & {
             dlFail       = 'O download falhou: {0}'
             dlFail2      = 'Confira sua internet e tente de novo. Nada foi alterado.'
             hashBad      = 'O download veio com defeito (o checksum n\u00e3o bate). Nada foi alterado. Tente mais tarde.'
-            hashMissing  = 'O SHA256SUMS.txt n\u00e3o tem uma linha para o V3X-Setup.exe. Nada foi alterado.'
+            hashMissing  = 'O compat.json n\u00e3o lista o V3X-Setup.exe. Nada foi alterado.'
+            sigBad       = 'Este download N\u00c3O tem a assinatura dos desenvolvedores do V3X ({0}). Nada foi executado nem alterado.'
+            sigBad2      = 'N\u00e3o rode arquivos deste download. Pegue o V3X s\u00f3 em https://github.com/kleeedolinux/v3x/releases'
+            sigOk        = 'Assinatura OK (chave de release do V3X {0}).'
+            verifyFail   = 'O V3X-Setup.exe n\u00e3o confirmou o release ({0}). Nada foi alterado.'
             installing   = 'Instalando o V3X...'
             uninstalling = 'Desinstalando o V3X...'
             okInstall    = 'Pronto! O V3X {0} est\u00e1 instalado.'
@@ -325,6 +346,100 @@ $v3xInstallRc = & {
         return $false
     }
 
+    # ------------------------------------------------------------------ release signature (Ed25519, RFC 8032)
+    # PowerShell 5.1 has no Ed25519, so this is a small verifier over System.Numerics.BigInteger.
+    # It only ever handles public data (public key, compat.json, its signature): no secret, so
+    # constant time does not matter. Same rules as installer/release_sig.h: S < L, the signature's
+    # R must equal the canonical encoding of [S]B - [k]A, k = SHA-512(R || A || message) mod L.
+    function Test-Ed25519([byte[]]$pub, [byte[]]$msg, [byte[]]$sig) {
+        if ($null -eq $pub -or $null -eq $sig -or $pub.Length -ne 32 -or $sig.Length -ne 64) { return $false }
+        try { Add-Type -AssemblyName System.Numerics -ErrorAction SilentlyContinue } catch { }
+        $B = [System.Numerics.BigInteger]
+        $p = $B::Subtract($B::Pow(2, 255), 19)
+        $L = $B::Add($B::Pow(2, 252), $B::Parse('27742317777372353535851937790883648493'))
+        $d = $B::Remainder($B::Multiply($B::Subtract($p, 121665), $B::ModPow(121666, $B::Subtract($p, 2), $p)), $p)
+        $d2 = $B::Remainder($B::Multiply($d, 2), $p)
+        $sqrtm1 = $B::ModPow(2, $B::Divide($B::Subtract($p, 1), 4), $p)
+        $zero = $B::Zero; $one = $B::One
+
+        function EdFromLE([byte[]]$b) { $x = New-Object byte[] ($b.Length + 1); [Array]::Copy($b, $x, $b.Length); New-Object System.Numerics.BigInteger (, [byte[]]$x) }
+        function EdMul($a, $b) { $B::Remainder($B::Multiply($a, $b), $p) }
+        function EdAdd($a, $b) { $B::Remainder($B::Add($a, $b), $p) }
+        function EdSub($a, $b) { $B::Remainder($B::Add($B::Subtract($a, $b), $p), $p) }
+        function EdPAdd($P1, $Q) {
+            $A1 = EdMul (EdSub $P1[1] $P1[0]) (EdSub $Q[1] $Q[0])
+            $B1 = EdMul (EdAdd $P1[1] $P1[0]) (EdAdd $Q[1] $Q[0])
+            $C1 = EdMul (EdMul $P1[3] $Q[3]) $d2
+            $D1 = EdMul $P1[2] (EdAdd $Q[2] $Q[2])
+            $E = EdSub $B1 $A1; $F = EdSub $D1 $C1; $G = EdAdd $D1 $C1; $H = EdAdd $B1 $A1
+            , @((EdMul $E $F), (EdMul $G $H), (EdMul $F $G), (EdMul $E $H))
+        }
+        function EdEncode($P1) {
+            $zi = $B::ModPow($P1[2], $B::Subtract($p, 2), $p)
+            $x = EdMul $P1[0] $zi; $y = EdMul $P1[1] $zi
+            $raw = $y.ToByteArray(); $out = New-Object byte[] 32
+            [Array]::Copy($raw, $out, [Math]::Min(32, $raw.Length))
+            if (-not $x.IsEven) { $out[31] = $out[31] -bor 0x80 }
+            , $out
+        }
+        # decompress the public key A (RFC 8032 5.1.3)
+        $yb = [byte[]]$pub.Clone(); $sign = ($yb[31] -shr 7) -band 1; $yb[31] = $yb[31] -band 0x7f
+        $y = EdFromLE $yb
+        if ($y.CompareTo($p) -ge 0) { return $false }
+        $yy = EdMul $y $y
+        $x2 = EdMul (EdSub $yy $one) ($B::ModPow((EdAdd (EdMul $d $yy) $one), $B::Subtract($p, 2), $p))
+        $x = $B::ModPow($x2, $B::Divide($B::Add($p, 3), 8), $p)
+        if (-not (EdSub (EdMul $x $x) $x2).IsZero) { $x = EdMul $x $sqrtm1 }
+        if (-not (EdSub (EdMul $x $x) $x2).IsZero) { return $false }
+        if ($x.IsZero -and $sign -eq 1) { return $false }
+        if ([int](-not $x.IsEven) -ne $sign) { $x = EdSub $p $x }
+        $negA = @((EdSub $zero $x), $y, $one, (EdSub $zero (EdMul $x $y)))
+        $s = EdFromLE ([byte[]]$sig[32..63])
+        if ($s.CompareTo($L) -ge 0) { return $false }
+        $sha = [Security.Cryptography.SHA512]::Create()
+        $h = $sha.ComputeHash([byte[]]($sig[0..31] + $pub + $msg))
+        $k = $B::Remainder((EdFromLE $h), $L)
+        $gy = EdMul 4 ($B::ModPow(5, $B::Subtract($p, 2), $p))
+        $gx = $B::Parse('15112221349535400772501151409588531511454012693041857206046113283949847762202')
+        $G0 = @($gx, $gy, $one, (EdMul $gx $gy))
+        # Straus: [s]B + [k](-A) with one shared doubling chain
+        $sb = $s.ToByteArray(); $kb = $k.ToByteArray()
+        $tab = @($null, $G0, $negA, (EdPAdd $G0 $negA))
+        $Q = @($zero, $one, $one, $zero)
+        for ($i = 255; $i -ge 0; $i--) {
+            $Q = EdPAdd $Q $Q
+            $j = $i -shr 3; $m = 1 -shl ($i -band 7)
+            $bi = 0
+            if ($j -lt $sb.Length -and ($sb[$j] -band $m)) { $bi += 1 }
+            if ($j -lt $kb.Length -and ($kb[$j] -band $m)) { $bi += 2 }
+            if ($bi) { $Q = EdPAdd $Q $tab[$bi] }
+        }
+        $enc = EdEncode $Q
+        for ($i = 0; $i -lt 32; $i++) { if ($enc[$i] -ne $sig[$i]) { return $false } }
+        return $true
+    }
+
+    # 'ok:<key id>' or 'fail:<reason>'; compat.json.sig = 'v3x-sig 1 <key id> <base64 signature>'
+    function Test-ReleaseSignature([string]$compatPath, [string]$sigPath) {
+        $keys = @(@($ReleaseKeyCurrent, $ReleaseKeyNext) | Where-Object { $_ -match '^[0-9a-f]{64}$' })
+        if (-not $keys.Count) { return 'fail:this installer has no release key yet' }
+        if (-not (Test-Path -LiteralPath $sigPath -PathType Leaf)) { return 'fail:the release has no compat.json.sig' }
+        $line = [IO.File]::ReadAllText($sigPath)
+        $m = [regex]::Match($line, '^v3x-sig 1 ([0-9a-f]{16}) ([A-Za-z0-9+/]{86}==)\r?\n?$')
+        if (-not $m.Success) { return 'fail:malformed compat.json.sig' }
+        $sig = [Convert]::FromBase64String($m.Groups[2].Value)
+        $msg = [IO.File]::ReadAllBytes($compatPath)
+        $sha = [Security.Cryptography.SHA512]::Create()
+        foreach ($k in $keys) {
+            $pub = [byte[]]( ($k -split '(..)' | Where-Object { $_ }) | ForEach-Object { [Convert]::ToByte($_, 16) } )
+            $kid = -join ($sha.ComputeHash($pub)[0..7] | ForEach-Object { $_.ToString('x2') })
+            if ($kid -ne $m.Groups[1].Value) { continue }
+            if (Test-Ed25519 $pub $msg $sig) { return ('ok:' + $kid) }
+            return 'fail:BAD signature'
+        }
+        return ('fail:signed with an unknown key ' + $m.Groups[1].Value)
+    }
+
     # ------------------------------------------------------------------ download + run
     function Get-ReleaseFile([string]$name, [string]$dest) {
         $src = "$env:V3X_SOURCE"
@@ -461,22 +576,34 @@ $v3xInstallRc = & {
             Say ''
             Say (S 'downloading')
             $exe = Join-Path $tmp 'V3X-Setup.exe'
-            $sums = Join-Path $tmp 'SHA256SUMS.txt'
+            $compat = Join-Path $tmp 'compat.json'
+            $csig = Join-Path $tmp 'compat.json.sig'
             try {
-                Get-ReleaseFile 'SHA256SUMS.txt' $sums
+                Get-ReleaseFile 'compat.json' $compat
                 Get-ReleaseFile 'V3X-Setup.exe' $exe
             } catch {
                 Say (S 'dlFail' $_.Exception.Message) 'Red'; Say (S 'dlFail2'); return 1
             }
+            try { Get-ReleaseFile 'compat.json.sig' $csig } catch { }   # missing = unsigned, refused below
             Say (S 'checking')
-            $expect = $null
-            foreach ($l in [IO.File]::ReadAllLines($sums)) {
-                $m = [regex]::Match($l, '^\s*([0-9a-fA-F]{64})\s+\*?V3X-Setup\.exe\s*$')
-                if ($m.Success) { $expect = $m.Groups[1].Value.ToLowerInvariant() }
-            }
-            if (-not $expect) { Say (S 'hashMissing') 'Red'; return 1 }
+            # (1) signature over compat.json, verified here (H1)
+            $sv = Test-ReleaseSignature $compat $csig
+            if (-not $sv.StartsWith('ok:')) { Say (S 'sigBad' $sv.Substring(5)) 'Red'; Say (S 'sigBad2'); return 8 }
+            Say (S 'sigOk' $sv.Substring(3)) 'Green'
+            # (2) the setup must be the one the signed compat.json names (size + SHA-256)
+            $cj = $null
+            try { $cj = [Text.Encoding]::UTF8.GetString([IO.File]::ReadAllBytes($compat)) | ConvertFrom-Json } catch { }
+            $entry = $null
+            if ($cj -and ($cj.PSObject.Properties.Name -contains 'assets')) { $entry = @($cj.assets | Where-Object { $_.name -eq 'V3X-Setup.exe' }) | Select-Object -First 1 }
+            if (-not $entry -or -not ("$($entry.sha256)" -match '^[0-9a-f]{64}$')) { Say (S 'hashMissing') 'Red'; return 8 }
             $got = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToLowerInvariant()
-            if ($got -ne $expect) { Say (S 'hashBad') 'Red'; return 1 }
+            if ($got -ne "$($entry.sha256)" -or (Get-Item -LiteralPath $exe).Length -ne [long]$entry.size) { Say (S 'hashBad') 'Red'; return 8 }
+            # (3) the (now trusted) setup re-checks the whole folder with its embedded keys
+            try { $vr = Invoke-Setup $exe ('--verify-release "' + $tmp + '"') } catch { Say (S 'cantRun' $_.Exception.Message) 'Red'; Say (S 'cantRun2'); return 1 }
+            if ($vr.rc -ne 0) {
+                $why = ($vr.out -split "`r?`n" | Where-Object { $_ -match 'FAILED' } | Select-Object -First 1)
+                Say (S 'verifyFail' "$why") 'Red'; return 8
+            }
 
             # 5. run the tested installer
             $gd = '--game-dir "' + $game + '"'

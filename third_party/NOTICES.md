@@ -78,3 +78,9 @@ SOFTWARE.
 Victoria 3 is (c) Paradox Interactive. No game files are part of this repository; files derived
 from the user's own game install (e.g. `mods/v3x_lowspec_shaders/gfx/`) are generated locally and
 ignored by git.
+
+## Monocypher 4.0.3
+
+https://monocypher.org - vendored unmodified in third_party/monocypher/ (Ed25519 signature
+verification of releases). Dual-licensed: CC0-1.0 or BSD 2-Clause; full text in
+third_party/monocypher/LICENCE.md.

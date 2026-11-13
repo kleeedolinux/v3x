@@ -3,8 +3,14 @@
     python installer/test_install_ps1.py [--dist build/dist] [--root D:/v3x_tmp/install_ps1] [--shell powershell,pwsh]
                                          [--real-exe <game>/binaries/victoria3.exe] [--keep]
 
-The release folder (--dist, from make_dist.py) must hold install.ps1, V3X-Setup.exe and
-SHA256SUMS.txt. Every case runs once per shell found (Windows PowerShell 5.1 = powershell, 7 = pwsh).
+The release folder (--dist, from make_dist.py) must hold install.ps1, V3X-Setup.exe,
+SHA256SUMS.txt and compat.json; its files are checked as release assets. The install cases need a
+SIGNED release that the tested install.ps1 trusts, so the test builds one: make_dist.py --trust-key
+<public TEST key of tools/sign_release.py> into <root>/sdist, signs its compat.json with the test
+key, and runs a copy of installer/install.ps1 whose $ReleaseKeyNext slot holds the test key (the
+repo file itself never trusts it). Signature cases: tampered compat.json / signature / setup, no
+signature, unknown key, and the unmodified install.ps1 (no release key yet) are all refused, rc=8.
+Every case runs once per shell found (Windows PowerShell 5.1 = powershell, 7 = pwsh).
 Questions are answered through V3X_ANSWERS, Steam is faked with V3X_STEAM_PATH (a folder with
 steamapps/libraryfolders.vdf + appmanifest_529340.acf), downloads come from V3X_SOURCE (a folder,
 or a local HTTP server for the real "irm <url> | iex" path). Never touches the real game.
@@ -64,11 +70,11 @@ def main():
     for f in ("install.ps1", "V3X-Setup.exe", "SHA256SUMS.txt"):
         if not os.path.isfile(os.path.join(dist, f)):
             sys.exit("missing %s (run python installer/make_dist.py)" % os.path.join(dist, f))
-    ps1 = os.path.join(dist, "install.ps1")
+    ps1_dist = os.path.join(dist, "install.ps1")
     check("dist install.ps1 is the repo's installer/install.ps1",
-          open(ps1, "rb").read() == open(os.path.join(HERE, "install.ps1"), "rb").read())
+          open(ps1_dist, "rb").read() == open(os.path.join(HERE, "install.ps1"), "rb").read())
     check("install.ps1 is pure ASCII (irm | iex on PowerShell 5.1 may decode as Latin-1)",
-          all(b < 128 for b in open(ps1, "rb").read()))
+          all(b < 128 for b in open(ps1_dist, "rb").read()))
     sums = open(os.path.join(dist, "SHA256SUMS.txt")).read()
     check("SHA256SUMS.txt lists V3X-Setup.exe, the zip, install.ps1 and compat.json with the right hashes",
           all(("%s  %s" % (ti.sha(os.path.join(dist, n)), n)) in sums
@@ -104,23 +110,48 @@ def main():
     src = os.path.join(root, "sleeper.c")
     open(src, "w").write("#include <windows.h>\nint main(void){Sleep(120000);return 0;}\n")
     have_sleeper = subprocess.call([sys.executable, "-m", "ziglang", "cc", "-target", "x86_64-windows-gnu", src, "-o", sleeper]) == 0
-    # a release folder with a wrong checksum
-    badsrc = os.path.join(root, "bad_release")
-    os.makedirs(badsrc)
-    shutil.copy(os.path.join(dist, "V3X-Setup.exe"), badsrc)
-    open(os.path.join(badsrc, "SHA256SUMS.txt"), "w").write("%s  V3X-Setup.exe\n" % ("0" * 64))
-    srv_bin = serve(dist, "application/octet-stream")
-    srv_txt = serve(dist, "text/plain")
+    # the signed test release (see the docstring) and the install.ps1 copy that trusts its key
+    sd = ti.signed_dist(root)
+    web = os.path.join(root, "web")
+    shutil.copytree(sd, web)
+    src_ps1 = open(os.path.join(HERE, "install.ps1"), "rb").read()
+    patched = src_ps1.replace(b"$ReleaseKeyNext = ''", b"$ReleaseKeyNext = '" + ti.TEST_PUB.encode() + b"'")
+    check("test copy of install.ps1 trusts the test key (one line changed)", patched != src_ps1 and patched.count(ti.TEST_PUB.encode()) == 1)
+    open(os.path.join(web, "install.ps1"), "wb").write(patched)
+    ps1 = os.path.join(web, "install.ps1")
+    plain_ps1 = os.path.join(root, "plain_install.ps1")
+    open(plain_ps1, "wb").write(src_ps1)
 
-    def run(shell, env_extra, iex_url=None):
+    def variant(name, fn):
+        d = os.path.join(root, "rel_" + name)
+        shutil.copytree(web, d)
+        fn(d)
+        return d
+
+    def flip(path, off):
+        bb = bytearray(open(path, "rb").read())
+        bb[off] ^= 1
+        open(path, "wb").write(bb)
+    bad_releases = [
+        ("tampered compat.json", variant("compat", lambda d: flip(os.path.join(d, "compat.json"), 30)), "NOT signed", "BAD signature"),
+        ("tampered signature", variant("sig", lambda d: flip(os.path.join(d, "compat.json.sig"), 40)), "NOT signed", ""),
+        ("no signature", variant("nosig", lambda d: os.remove(os.path.join(d, "compat.json.sig"))), "NOT signed", "no compat.json.sig"),
+        ("unknown key", variant("unknown", lambda d: ti.sign_dir(d, seed=os.urandom(32))), "NOT signed", "unknown key"),
+        ("tampered setup", variant("setup", lambda d: flip(os.path.join(d, "V3X-Setup.exe"), 0x50)), "damaged", ""),
+        ("other setup", variant("other", lambda d: shutil.copy(os.path.join(dist, "V3X-Setup.exe"), d)), "damaged", ""),
+    ]
+    srv_bin = serve(web, "application/octet-stream")
+    srv_txt = serve(web, "text/plain")
+
+    def run(shell, env_extra, iex_url=None, script=None):
         env = {k: v for k, v in os.environ.items() if not k.startswith("V3X_")}
-        env.update({"TEMP": tmp, "TMP": tmp, "V3X_SOURCE": dist, "V3X_LANG": "en"})
+        env.update({"TEMP": tmp, "TMP": tmp, "V3X_SOURCE": web, "V3X_LANG": "en"})
         env.update(env_extra)
         if iex_url:
             cmd = ("[Console]::OutputEncoding=[Text.Encoding]::UTF8; irm '%s' | iex; "
                    "Write-Output ('STILL-ALIVE rc=' + $v3xInstallRc)" % iex_url)
         else:
-            cmd = "[Console]::OutputEncoding=[Text.Encoding]::UTF8; & '%s'; exit $LASTEXITCODE" % ps1.replace("'", "''")
+            cmd = "[Console]::OutputEncoding=[Text.Encoding]::UTF8; & '%s'; exit $LASTEXITCODE" % (script or ps1).replace("'", "''")
         p = subprocess.run([shell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", cmd],
                            capture_output=True, timeout=180, env=env, stdin=subprocess.DEVNULL)
         return p.returncode, (p.stdout + p.stderr).decode("utf-8", "replace")
@@ -144,7 +175,7 @@ def main():
               rc == 0 and "Found your game at:" in out and g in out and "Done! V3X" in out and os.path.isfile(V(g)), out)
         check("[%s] steam: tells how to uninstall" % sh, "choose Uninstall" in out and "irm https://v3extender.pages.dev/install.ps1 | iex" in out, out)
         check("[%s] install: installed file equals the payload's version.dll" % sh,
-              ti.sha(V(g)) == dict((r, h) for k, r, h, _ in ti.payload(os.path.join(dist, "V3X-Setup.exe")) if k == "bin")["version.dll"])
+              ti.sha(V(g)) == dict((r, h) for k, r, h, _ in ti.payload(os.path.join(sd, "V3X-Setup.exe")) if k == "bin")["version.dll"])
         check("[%s] install: temp download folder removed" % sh, not [d for d in os.listdir(tmp) if d.startswith("v3x-install-")])
 
         # 2. installed -> menu: 1 = repair
@@ -195,8 +226,15 @@ def main():
             check("[%s] running: sleeper built" % sh, False)
 
         # 6. damaged download
-        rc, out = run(sh, {"V3X_GAME_DIR": g, "V3X_SOURCE": badsrc, "V3X_ACTION": "uninstall", "V3X_YES": "1"})
-        check("[%s] bad checksum: rc=1, 'damaged', nothing removed" % sh, rc == 1 and "damaged" in out and os.path.isfile(V(g)), out)
+        for what, d, want, why in bad_releases:
+            rc, out = run(sh, {"V3X_GAME_DIR": g, "V3X_SOURCE": d, "V3X_ACTION": "uninstall", "V3X_YES": "1"})
+            check("[%s] %s: refused rc=8 ('%s'), setup not run, nothing removed" % (sh, what, want),
+                  rc == 8 and want in out and why in out and "Uninstalling" not in out and os.path.isfile(V(g)), out)
+        rc, out = run(sh, {"V3X_GAME_DIR": g, "V3X_ACTION": "uninstall", "V3X_YES": "1"}, script=plain_ps1)
+        check("[%s] the repo install.ps1 (no release key yet) refuses even a test-signed release rc=8" % sh,
+              rc == 8 and "no release key yet" in out and os.path.isfile(V(g)), out)
+        rc, out = run(sh, {"V3X_GAME_DIR": g, "V3X_ACTION": "status"})
+        check("[%s] good signed release: 'Signature OK' then the setup runs" % sh, rc == 0 and "Signature OK" in out and "game folder:" in out, out)
         rc, out = run(sh, {"V3X_GAME_DIR": g, "V3X_SOURCE": os.path.join(root, "nowhere"), "V3X_YES": "1"})
         check("[%s] missing download: rc=1, 'download failed'" % sh, rc == 1 and "download failed" in out, out)
 

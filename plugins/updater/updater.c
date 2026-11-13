@@ -3,15 +3,23 @@
  *
  * One background thread (never the main thread, never blocks the game): at most one automatic check
  * per 6 h (sooner when the game build / V3X version changed), result cached in v3x/update_cache.json.
- * Selection and parsing are pure (up_logic.c, test/updater_test.c). With [update] auto = 1 the chosen
- * V3X-Setup.exe is downloaded to v3x/update/, SHA-256 verified, and at process_exit started detached as
+ * Selection and parsing are pure (up_logic.c, test/updater_test.c).
+ * Trust (docs/security-audit.md H1/M4): a release counts as SIGNED only when its compat.json.sig is an
+ * Ed25519 signature by a key of installer/release_keys.h (up_sig.c); the setup's hash and size then come
+ * from that signed compat.json. Only signed releases are downloaded and installed automatically
+ * ([update] auto = 1); an unsigned one is only announced, and installed only after `update now`.
+ * The download goes to v3x/update/V3X-Setup.exe (fixed name), is SHA-256 verified, and at
+ * process_exit the file is opened without write/delete sharing, hashed again through that handle and
+ * started while the handle is held (no swap between check and start), detached as
  * `V3X-Setup.exe --update --silent --game-dir <dir> --wait-pid <pid>`, so files are swapped only after
- * the game is gone. Any verification failure = nothing is started.
+ * the game is gone. update/floor.txt keeps the highest V3X version that ran here or was started by the
+ * updater; nothing below it is ever offered (rollback floor). Any verification failure = nothing is started.
  *
  * v3x.ini:
  *   [update]
  *   check = 1         ; automatic checks (0 = only `update check`)
- *   auto = 1          ; install a compatible update when the game exits (0 = notify only; `update now`)
+ *   auto = 1          ; install a compatible SIGNED update when the game exits (0 = notify only;
+ *                     ; `update now`). Unsigned releases are never installed automatically.
  *   channel = stable  ; beta = pre-releases too
  * env V3X_NO_UPDATE=1 disables network use and installing entirely; automatic checks run only inside
  * victoria3.exe (or with env V3X_UPDATER_FORCE=1), so test harnesses stay offline. env V3X_UPDATER_NO_NET=1
@@ -60,6 +68,8 @@ static long long g_last_attempt;
 /* the verified setup on disk */
 static volatile LONG g_ready, g_armed, g_spawned;
 static char g_ready_path[MAX_PATH], g_ready_ver[48], g_ready_sha[65];
+static int g_ready_signed;
+static char g_floor[48];          /* rollback floor (update/floor.txt), >= g_ver */
 
 static HANDLE g_wake;
 static volatile LONG g_req;       /* REQ_* */
@@ -86,8 +96,8 @@ static struct {
 static int winhttp_init(void)
 {
     if (W.session) return 0;
-    if (!W.m) W.m = LoadLibraryExA("winhttp.dll", NULL, 0x800 /* LOAD_LIBRARY_SEARCH_SYSTEM32 */);
-    if (!W.m) W.m = LoadLibraryA("winhttp.dll");
+    /* System32 only (M4): no search-path fallback, a winhttp.dll next to the game is never loaded */
+    if (!W.m) W.m = LoadLibraryExW(L"winhttp.dll", NULL, 0x800 /* LOAD_LIBRARY_SEARCH_SYSTEM32 */);
     if (!W.m) return -1;
 #define LD(f) if (!(*(FARPROC *)&W.f = GetProcAddress(W.m, "WinHttp" #f))) return -1
     LD(Open); LD(Connect); LD(OpenRequest); LD(SendRequest); LD(ReceiveResponse); LD(QueryHeaders);
@@ -123,8 +133,9 @@ static int win_get(void *ctx, const char *url, size_t max, char **body, size_t *
     wchar_t extra[512];
     uc.lpszExtraInfo = extra; uc.dwExtraInfoLength = 512;
     if (!W.CrackUrl(wurl, 0, 0, &uc) || uc.nScheme != INTERNET_SCHEME_HTTPS) return -12;
-    if (wcslen(path) + wcslen(extra) >= 1024) return -12;
-    wcscat(path, extra);
+    size_t pl = wcslen(path), el = wcslen(extra);
+    if (pl + el >= 1024) return -12;
+    memcpy(path + pl, extra, (el + 1) * sizeof(wchar_t));
     int api_host = !wcscmp(host, L"api.github.com");
     int st = -13;
     HINTERNET c = W.Connect(W.session, host, uc.nPort, 0), r = NULL;
@@ -188,7 +199,7 @@ static int read_file(const char *path, char **out, size_t *n, size_t max)
 
 static void save_cache(void)
 {
-    static char buf[1 << 18];
+    static char buf[1 << 20];
     char path[MAX_PATH];
     size_t n = up_cache_write(&g_cat, buf, sizeof buf);
     if (n && v3x_path(api, path, sizeof path, "update_cache.json")) v3x_file_write_atomic(path, buf, n);
@@ -198,7 +209,7 @@ static void load_cache(void)
 {
     char path[MAX_PATH], *b;
     size_t n;
-    if (!v3x_path(api, path, sizeof path, "update_cache.json") || read_file(path, &b, &n, 1 << 20)) return;
+    if (!v3x_path(api, path, sizeof path, "update_cache.json") || read_file(path, &b, &n, 2 << 20)) return;
     if (up_cache_read(b, n, &g_cat)) memset(&g_cat, 0, sizeof g_cat);
     free(b);
 }
@@ -229,6 +240,30 @@ static void attempts_set(const char *ver, int n)
     v3x_file_write_atomic(p, t, (size_t)k);
 }
 
+/* rollback floor: update/floor.txt = the highest V3X version that ran here or that the updater
+ * started; raised, never lowered (an edited lower value is ignored: g_ver is always part of it) */
+static void floor_load(void)
+{
+    char p[MAX_PATH], v[48] = "";
+    snprintf(g_floor, sizeof g_floor, "%s", g_ver);
+    if (!v3x_path(api, p, sizeof p, "update\\floor.txt")) return;
+    FILE *f = fopen(p, "rb");
+    if (f) {
+        if (fscanf(f, "%47s", v) != 1) v[0] = 0;
+        fclose(f);
+    }
+    if (v[0] && up_version_cmp(v, g_floor) > 0) snprintf(g_floor, sizeof g_floor, "%s", v);
+}
+static void floor_raise(const char *ver)
+{
+    char p[MAX_PATH], t[64];
+    if (up_version_cmp(ver, g_floor) > 0) snprintf(g_floor, sizeof g_floor, "%s", ver);
+    update_dir(p, sizeof p);
+    if (!v3x_path(api, p, sizeof p, "update\\floor.txt")) return;
+    int k = snprintf(t, sizeof t, "%s\n", g_floor);
+    if (k > 0 && (size_t)k < sizeof t) v3x_file_write_atomic(p, t, (size_t)k);
+}
+
 /* After an automatic install: report install.log's last update-result line once. */
 static void report_last_install(void)
 {
@@ -250,7 +285,7 @@ static void remove_stale_setup(void)
 {
     char dir[MAX_PATH], p[MAX_PATH];
     update_dir(dir, sizeof dir);
-    snprintf(p, sizeof p, "%s\\V3X-Setup.exe", dir);
+    snprintf(p, sizeof p, "%s\\" UP_SETUP_NAME, dir);
     if (GetFileAttributesA(p) != INVALID_FILE_ATTRIBUTES && DeleteFileA(p)) api->log(TAG, "removed an old downloaded setup");
 }
 
@@ -345,18 +380,28 @@ static void do_check(int forced)
 }
 
 /* Downloads + verifies the chosen setup (or reuses a verified one on disk). */
-static void ensure_download(void)
+static void ensure_download(int asked)
 {
-    up_release r;
+    static up_release r;   /* large (signed compat.json kept verbatim); updater thread only */
     EnterCriticalSection(&g_lock);
     r = g_best;
     int have = g_choice.state == UP_AVAILABLE || g_choice.state == UP_URGENT;
     LeaveCriticalSection(&g_lock);
     if (!have || !r.version[0]) return;
     if (g_ready && !strcmp(g_ready_ver, r.version)) return;
+    int signed_ok = up_release_auto_ok(&r);
+    if (!signed_ok && !asked) {   /* H1: unsigned = announce only, never fetched or armed on its own */
+        static char said[48];
+        if (strcmp(said, r.version)) {
+            snprintf(said, sizeof said, "%s", r.version);
+            V3X_LOGW(api, TAG, "V3X %s is NOT signed (no valid compat.json.sig): it is not installed automatically; "
+                     "type 'update now' to install it anyway", r.version);
+        }
+        return;
+    }
     char dir[MAX_PATH], path[MAX_PATH], hex[65];
     update_dir(dir, sizeof dir);
-    snprintf(path, sizeof path, "%s\\%s", dir, r.setup_name[0] ? r.setup_name : "V3X-Setup.exe");
+    snprintf(path, sizeof path, "%s\\" UP_SETUP_NAME, dir);   /* M4: never a name from the network / cache */
     if (up_sha256_file(path, hex) || !up_hex_eq(hex, r.setup_sha)) {
         char *data, err[160];
         size_t n;
@@ -377,11 +422,16 @@ static void ensure_download(void)
     snprintf(g_ready_path, sizeof g_ready_path, "%s", path);
     snprintf(g_ready_ver, sizeof g_ready_ver, "%s", r.version);
     snprintf(g_ready_sha, sizeof g_ready_sha, "%s", r.setup_sha);
+    g_ready_signed = signed_ok;
     InterlockedExchange(&g_ready, 1);
-    if (cfg.autoapply) InterlockedExchange(&g_armed, 1);
+    if (cfg.autoapply && signed_ok) InterlockedExchange(&g_armed, 1);
     LeaveCriticalSection(&g_lock);
-    api->log(TAG, "V3X %s setup downloaded and verified (SHA-256 %.16s...); %s", r.version, r.setup_sha,
-             g_armed ? "it is installed when the game exits" : "type 'update now' to install it when the game exits");
+    if (signed_ok)
+        api->log(TAG, "V3X %s setup downloaded and verified (signed, key %s; SHA-256 %.16s...); %s", r.version, r.key_id,
+                 r.setup_sha, g_armed ? "it is installed when the game exits" : "type 'update now' to install it when the game exits");
+    else
+        V3X_LOGW(api, TAG, "V3X %s setup downloaded (SHA-256 %.16s... matches, but the release is NOT signed); "
+                 "installed when the game exits because you typed 'update now'", r.version, r.setup_sha);
     maybe_emit();
 }
 
@@ -398,7 +448,7 @@ static DWORD WINAPI updater_thread(void *u)
         if (first || (req & REQ_CHECK)) do_check((req & REQ_CHECK) != 0);
         first = 0;
         maybe_emit();
-        if ((cfg.autoapply && cfg.allowed) || (req & REQ_DOWNLOAD) || g_armed) ensure_download();
+        if ((cfg.autoapply && cfg.allowed) || (req & REQ_DOWNLOAD) || g_armed) ensure_download((req & REQ_DOWNLOAD) != 0 || g_armed);
         WaitForSingleObject(g_wake, INFINITE);
     }
     return 0;
@@ -416,18 +466,46 @@ static void on_exit(const char *name, void *data, void *u)
     snprintf(ver, sizeof ver, "%s", g_ready_ver);
     snprintf(sha, sizeof sha, "%s", g_ready_sha);
     LeaveCriticalSection(&g_lock);
-    if (up_version_cmp(ver, g_ver) <= 0) return;   /* never downgrade */
-    if (up_sha256_file(path, hex) || !up_hex_eq(hex, sha)) {
-        V3X_LOGE(api, TAG, "update NOT started: %s changed on disk (SHA-256 mismatch)", path);
+    if (up_version_cmp(ver, g_ver) <= 0 || up_version_cmp(ver, g_floor) < 0) return;   /* never downgrade */
+    /* M4: open without write/delete sharing and hash through this handle; it stays open until the
+     * process is created, so the file that runs is the file that was checked */
+    HANDLE hf = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hf == INVALID_HANDLE_VALUE) {
+        V3X_LOGE(api, TAG, "update NOT started: cannot open %s (error %lu)", path, GetLastError());
         return;
+    }
+    {
+        static unsigned char buf[1 << 16];
+        up_sha256 hs;
+        uint8_t dg[32];
+        DWORD got = 0;
+        unsigned long long total = 0;
+        int rd = 1;
+        up_sha256_init(&hs);
+        while ((rd = ReadFile(hf, buf, sizeof buf, &got, NULL) != 0) && got) {
+            up_sha256_update(&hs, buf, got);
+            total += got;
+            if (total > UP_MAX_SETUP) { rd = 0; break; }
+        }
+        up_sha256_final(&hs, dg);
+        static const char hx[] = "0123456789abcdef";
+        for (int i = 0; i < 32; i++) { hex[2 * i] = hx[dg[i] >> 4]; hex[2 * i + 1] = hx[dg[i] & 15]; }
+        hex[64] = 0;
+        if (!rd || !up_hex_eq(hex, sha)) {
+            CloseHandle(hf);
+            V3X_LOGE(api, TAG, "update NOT started: %s changed on disk (SHA-256 mismatch)", path);
+            return;
+        }
     }
     int tries = attempts_get(ver);
     if (tries >= MAX_ATTEMPTS) {
+        CloseHandle(hf);
         V3X_LOGW(api, TAG, "update to %s NOT started: it failed %d times (see install.log; run %s by hand)", ver, tries, path);
         return;
     }
     if (up_game_root(api->game_dir(), root, sizeof root) ||
         up_build_cmdline(cmd, sizeof cmd, path, root, GetCurrentProcessId())) {
+        CloseHandle(hf);
         V3X_LOGE(api, TAG, "update NOT started: path too long");
         return;
     }
@@ -441,14 +519,18 @@ static void on_exit(const char *name, void *data, void *u)
     DWORD fl = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP;
     BOOL ok = CreateProcessA(path, cmd, NULL, NULL, FALSE, fl | CREATE_BREAKAWAY_FROM_JOB, NULL, dir, &si, &pi);
     if (!ok) ok = CreateProcessA(path, cmd, NULL, NULL, FALSE, fl, NULL, dir, &si, &pi);
+    DWORD cerr = ok ? 0 : GetLastError();
+    CloseHandle(hf);   /* the image section now holds the file */
     if (!ok) {
-        V3X_LOGE(api, TAG, "update NOT started: CreateProcess failed (error %lu)", GetLastError());
+        V3X_LOGE(api, TAG, "update NOT started: CreateProcess failed (error %lu)", cerr);
         return;
     }
     CloseHandle(pi.hThread);
     CloseHandle(pi.hProcess);
     attempts_set(ver, tries + 1);
-    api->log(TAG, "started the V3X %s setup (pid %lu); it installs after the game has exited: %s", ver, pi.dwProcessId, cmd);
+    floor_raise(ver);
+    api->log(TAG, "started the V3X %s setup (pid %lu, %s); it installs after the game has exited: %s", ver, pi.dwProcessId,
+             g_ready_signed ? "signed release" : "UNSIGNED release, started because you typed 'update now'", cmd);
 }
 
 /* ------------------------------------------------------------------ console */
@@ -483,6 +565,10 @@ static void cmd_update(const char *args, void *u)
         api->print("update: checking GitHub in the background; type 'update' for the result.");
     } else if (!_stricmp(a, "now")) {
         if (!offer) { api->print("update: nothing to install. %s", status); return; }
+        EnterCriticalSection(&g_lock);
+        int sgn = up_release_auto_ok(&g_best);
+        LeaveCriticalSection(&g_lock);
+        if (!sgn) api->print("update: WARNING: V3X %s is not signed by the V3X release key; installing it because you asked.", bestv);
         InterlockedExchange(&g_armed, 1);
         if (ready) api->print("update: V3X %s will be installed when you quit the game.", bestv);
         else {
@@ -499,7 +585,7 @@ static void cmd_update(const char *args, void *u)
                    cfg.beta ? "beta" : "stable", cfg.autoapply ? "on" : "off",
                    !cfg.allowed ? "off (not victoria3.exe / V3X_NO_UPDATE)" : cfg.check ? "every 6 h" : "manual");
         if (offer)
-            api->print("  V3X %s: %s%s", bestv, ready ? "downloaded and verified" : "not downloaded yet",
+            api->print("  V3X %s (%s): %s%s", bestv, up_release_auto_ok(&g_best) ? "signed" : "NOT signed", ready ? "downloaded and verified" : "not downloaded yet",
                        g_armed && ready ? ", installed when you quit the game" : g_armed ? ", will be installed when you quit" : "");
         if (err[0]) api->print("  last check failed: %s", err);
     } else {
@@ -572,6 +658,9 @@ V3X_EXPORT int v3x_plugin_load(const V3X_API *a)
     g_local.branch = g_branch;
     g_local.beta = cfg.beta;
     g_local.build_supported = build_known(g_build);
+    floor_load();
+    floor_raise(g_ver);   /* the running version is part of the floor from now on */
+    g_local.floor = g_floor;
     if (a->api_version >= 2) a->register_command("update", "V3X updates: update [status|check|now|cancel]", cmd_update, NULL);
     if (a->api_version >= 3) a->on_event(V3X_EVENT_PROCESS_EXIT, on_exit, NULL);
     g_wake = CreateEventA(NULL, FALSE, FALSE, NULL);

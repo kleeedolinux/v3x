@@ -10,7 +10,10 @@ admin rights. Player guide: [docs/install.md](../docs/install.md).
 | `profile.txt` | which plugins ship on (1), ship off (0) or are not shipped (-), with the reason. Edit this to change the player set |
 | `builds.txt` | supported game builds (`game_build_id` + `caligula_branch.txt`); setup refuses (CLI) or warns (GUI) on others |
 | `make_dist.py` | builds `build/dist/V3X-Setup.exe`, `v3x-<version>.zip` (manual install), a copy of `install.ps1` and `SHA256SUMS.txt` (all three) |
-| `install.ps1` | the one-line installer `irm https://v3extender.pages.dev/install.ps1 \| iex`: finds the game, downloads + checks `V3X-Setup.exe`, runs it `--silent`. Options and exit codes: its header |
+| `install.ps1` | the one-line installer `irm https://v3extender.pages.dev/install.ps1 \| iex`: finds the game, downloads `V3X-Setup.exe` + `compat.json` + `compat.json.sig`, verifies the Ed25519 signature itself (PowerShell, `Test-Ed25519`) and the setup's hash, runs `--verify-release`, then the setup `--silent`. Options and exit codes: its header |
+| `release_keys.h` | the release signing public keys (CURRENT + NEXT rotation slot); same values as `$ReleaseKeyCurrent` / `$ReleaseKeyNext` in `install.ps1` |
+| `release_sig.h` | header-only signature check (Monocypher Ed25519, `third_party/monocypher`), used by `setup.c` and `plugins/updater/up_sig.c` |
+| `requirements-ci.txt` | hash-locked `ziglang==0.17.1` for the CI workflows (`pip install --require-hashes`) |
 | `test_installer.py` | end-to-end test of `V3X-Setup.exe` against fake game folders |
 | `test_install_ps1.py` | end-to-end test of `install.ps1` (Windows PowerShell 5.1 and pwsh 7) against fake games, a fake Steam and a local release |
 
@@ -27,8 +30,12 @@ exit 0/1, last `install.log` line `update-result: ...`; `V3X_WAIT_TIMEOUT_SEC` s
 10-minute wait for tests). `make_dist.py` also writes `compat.json` (schema 1: v3x_version,
 loader_semver, api_version, game_builds from `builds.txt`, assets with size + sha256).
 
-Releases: `.github/workflows/release.yml` builds, tests and publishes these files (+ compat.json) on a `v*`
-tag; `ci.yml` does the same on every push / pull request and uploads them as an artifact. The site
+Releases: `.github/workflows/release.yml` builds and tests these files on a `v*` tag (job `build`,
+read-only), then job `publish` (environment `release`) signs `compat.json` with
+`tools/sign_release.py` (secret `V3X_SIGNING_KEY`), records build provenance and creates the release
+(never replaces an existing one). `ci.yml` builds and tests on every push / pull request and uploads
+the files as an artifact. `make_dist.py --trust-key <hex>` builds a setup that also trusts a dev/test
+key (dry runs and `test_installer.py`; never published). Signing: docs/updating.md "Release signing". The site
 (v3extender.pages.dev) serves a copy of `install.ps1`.
 
 ## Build

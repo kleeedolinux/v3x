@@ -25,6 +25,18 @@ static int up_starts(const char *s, const char *prefix)
     return s && !strncmp(s, prefix, strlen(prefix));
 }
 
+int up_name_ok(const char *name)
+{
+    if (!name) return 0;
+    size_t n = strlen(name);
+    if (n == 0 || n > 63 || strstr(name, "..") || name[0] == '.' || name[n - 1] == '.') return 0;
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)name[i];
+        if (!(isalnum(c) || c == '.' || c == '-' || c == '_')) return 0;
+    }
+    return 1;
+}
+
 /* ================================================================ JSON scanner */
 
 const char *up_js_ws(const char *p, const char *e)
@@ -397,6 +409,7 @@ int up_parse_releases(const char *json, size_t n, up_catalog *cat)
                     continue;
                 if (!up_url_allowed(url)) continue;
                 if (!strcmp(name, "compat.json")) up_copy(r->compat_url, sizeof r->compat_url, url);
+                else if (!strcmp(name, "compat.json.sig")) up_copy(r->sig_url, sizeof r->sig_url, url);
                 else if (!strcmp(name, "SHA256SUMS.txt") || !strcmp(name, "SHA256SUMS"))
                     up_copy(r->sums_url, sizeof r->sums_url, url);
                 else if (r->nassets < UP_MAX_ASSETS) {
@@ -450,20 +463,43 @@ int up_parse_compat(const char *json, size_t n, up_release *r)
         if (x->branch[0] || x->build_id[0]) r->nbuilds++;
     }
     if (it.err) return compat_fail(r, "compat.json: malformed game_builds");
-    /* assets: {"setup": "V3X-Setup.exe", "sha256": {"V3X-Setup.exe": "<hex>", ...}} */
-    char setup[64] = "V3X-Setup.exe";
+    /* assets, two layouts:
+     *   installer/make_dist.py: [{"name": "V3X-Setup.exe", "size": N, "sha256": "<hex>"}, ...]
+     *   older drafts:           {"setup": "V3X-Setup.exe", "sha256": {"V3X-Setup.exe": "<hex>", ...}} */
+    char setup[64] = UP_SETUP_NAME;
     const char *as, *sh, *hv;
+    long long csize = 0;
     r->setup_sha[0] = 0;
-    if (up_js_get(p, e, "assets", &as) == 1 && *as == '{') {
+    int ha = up_js_get(p, e, "assets", &as);
+    if (ha == 1 && *as == '{') {
         char s2[64];
-        if (!js_get_str(as, e, "setup", s2, sizeof s2) && s2[0]) up_copy(setup, sizeof setup, s2);
+        if (!js_get_str(as, e, "setup", s2, sizeof s2) && s2[0]) {
+            if (!up_name_ok(s2)) return compat_fail(r, "compat.json: bad setup name");
+            up_copy(setup, sizeof setup, s2);
+        } else if (up_js_get(as, e, "setup", &hv) == 1) {
+            return compat_fail(r, "compat.json: bad setup name");
+        }
         if (up_js_get(as, e, "sha256", &sh) == 1 && *sh == '{' && up_js_get(sh, e, setup, &hv) == 1) {
             char hex[80];
             if (up_js_string(hv, e, hex, sizeof hex) == 64 && up_hex_valid(hex)) up_copy(r->setup_sha, sizeof r->setup_sha, hex);
             else return compat_fail(r, "compat.json: bad sha256");
         }
+    } else if (ha == 1 && *as == '[') {
+        up_js_it ai;
+        const char *a;
+        up_js_begin(&ai, as, e, '[');
+        while (up_js_next(&ai, NULL, 0, &a)) {
+            char nm[64], hex[80];
+            if (*a != '{' || js_get_str(a, e, "name", nm, sizeof nm) || strcmp(nm, setup)) continue;
+            if (js_get_str(a, e, "sha256", hex, sizeof hex) || strlen(hex) != 64 || !up_hex_valid(hex))
+                return compat_fail(r, "compat.json: bad sha256");
+            up_copy(r->setup_sha, sizeof r->setup_sha, hex);
+            csize = js_get_int(a, e, "size", 0);
+            if (csize < 0 || csize > (long long)UP_MAX_SETUP) return compat_fail(r, "compat.json: bad size");
+        }
+        if (ai.err) return compat_fail(r, "compat.json: malformed assets");
     }
-    if (strchr(setup, '/') || strchr(setup, '\\') || strstr(setup, "..")) return compat_fail(r, "compat.json: bad setup name");
+    if (!up_name_ok(setup)) return compat_fail(r, "compat.json: bad setup name");
     up_copy(r->setup_name, sizeof r->setup_name, setup);
     r->setup_url[0] = 0;
     r->setup_size = 0;
@@ -472,9 +508,42 @@ int up_parse_compat(const char *json, size_t n, up_release *r)
             up_copy(r->setup_url, sizeof r->setup_url, r->assets[i].url);
             r->setup_size = r->assets[i].size;
         }
+    if (csize > 0) {   /* the (possibly signed) compat.json's size wins over the GitHub listing */
+        if (r->setup_size > 0 && r->setup_size != csize) return compat_fail(r, "compat.json: size differs from the release asset");
+        r->setup_size = csize;
+    }
     r->compat = 1;
     r->compat_err[0] = 0;
     return 0;
+}
+
+int up_apply_compat(up_release *r, const char *json, size_t n, const char *sig, size_t sn)
+{
+    r->sig = 0;
+    r->key_id[0] = 0;
+    r->sig_line[0] = 0;
+    r->compat_raw_n = 0;
+    if (sig) {
+        const char *why = "";
+        char kid[17] = "";
+        if (up_sig_check(json, n, sig, sn, kid, &why) < 0) {
+            char m[64];
+            snprintf(m, sizeof m, "compat.json signature: %s", why);
+            return compat_fail(r, m);
+        }
+        if (n >= sizeof r->compat_raw || sn >= sizeof r->sig_line) return compat_fail(r, "compat.json: too large");
+        if (up_parse_compat(json, n, r)) return -1;
+        if (!r->setup_sha[0]) return compat_fail(r, "signed compat.json names no setup sha256");
+        memcpy(r->compat_raw, json, n);
+        r->compat_raw[n] = 0;
+        r->compat_raw_n = n;
+        memcpy(r->sig_line, sig, sn);
+        r->sig_line[sn] = 0;
+        memcpy(r->key_id, kid, sizeof kid);
+        r->sig = 1;
+        return 0;
+    }
+    return up_parse_compat(json, n, r);
 }
 
 int up_sums_find(const char *text, size_t n, const char *name, char out_hex[65])
@@ -534,8 +603,14 @@ int up_release_candidate(const up_release *r, const up_local *l)
 
 int up_release_eligible(const up_release *r, const up_local *l)
 {
+    if (l->floor && l->floor[0] && up_version_cmp(r->version, l->floor) < 0) return 0;   /* rollback floor */
     return up_release_candidate(r, l) && r->compat == 1 && r->api_version >= l->api_version &&
            up_release_supports(r, l->build_id, l->branch) && r->setup_url[0] && up_hex_valid(r->setup_sha);
+}
+
+int up_release_auto_ok(const up_release *r)
+{
+    return r && r->compat == 1 && r->sig == 1 && up_hex_valid(r->setup_sha);
 }
 
 up_choice up_select(const up_catalog *cat, const up_local *l)
@@ -598,7 +673,8 @@ size_t up_status_text(const up_catalog *cat, const up_local *l, up_choice c, cha
         n = snprintf(out, cap, "V3X %s is available for your game (%s); you have %s.", best->version, game, l->loader_version);
         if (newest && newest != best && n > 0 && (size_t)n < cap) {
             builds_list(newest, builds, sizeof builds);
-            n += snprintf(out + n, cap - (size_t)n, " (V3X %s exists too, but it supports only %s.)", newest->version, builds);
+            int m = snprintf(out + n, cap - (size_t)n, " (V3X %s exists too, but it supports only %s.)", newest->version, builds);
+            n = m < 0 ? n : (size_t)m >= cap - (size_t)n ? (int)cap - 1 : n + m;   /* clamp: never past cap */
         }
         break;
     case UP_NEWER_INCOMPATIBLE:
@@ -651,7 +727,7 @@ int up_force_allowed(long long last_attempt, long long now)
 /* ================================================================ cache file */
 
 typedef struct { char *o; size_t cap, k; int of; } wbuf;
-static void wb_printf(wbuf *w, const char *fmt, ...)
+__attribute__((format(printf, 2, 3))) static void wb_printf(wbuf *w, const char *fmt, ...)
 {
     if (w->of) return;
     va_list ap;
@@ -695,7 +771,15 @@ size_t up_cache_write(const up_catalog *c, char *out, size_t cap)
         wb_str(&w, r->setup_url);
         wb_printf(&w, ",\"setup_sha\":");
         wb_str(&w, r->setup_sha);
-        wb_printf(&w, ",\"setup_size\":%lld,\"game_builds\":[", r->setup_size);
+        wb_printf(&w, ",\"setup_size\":%lld,\"sig_url\":", r->setup_size);
+        wb_str(&w, r->sig_url);
+        if (r->sig == 1) {   /* re-verified on every read; the cache never says "signed" by itself */
+            wb_printf(&w, ",\"compat_raw\":");
+            wb_str(&w, r->compat_raw);
+            wb_printf(&w, ",\"compat_sig\":");
+            wb_str(&w, r->sig_line);
+        }
+        wb_printf(&w, ",\"game_builds\":[");
         for (int j = 0; j < r->nbuilds; j++) {
             wb_printf(&w, "%s{\"branch\":", j ? "," : "");
             wb_str(&w, r->builds[j].branch);
@@ -737,9 +821,12 @@ int up_cache_read(const char *json, size_t n, up_catalog *c)
         js_get_str(v, e, "setup_name", r->setup_name, sizeof r->setup_name);
         js_get_str(v, e, "setup_url", r->setup_url, sizeof r->setup_url);
         js_get_str(v, e, "setup_sha", r->setup_sha, sizeof r->setup_sha);
+        js_get_str(v, e, "sig_url", r->sig_url, sizeof r->sig_url);
         r->setup_size = js_get_int(v, e, "setup_size", 0);
         if (r->setup_url[0] && !up_url_allowed(r->setup_url)) r->setup_url[0] = 0;
+        if (r->sig_url[0] && !up_url_allowed(r->sig_url)) r->sig_url[0] = 0;
         if (!up_hex_valid(r->setup_sha)) r->setup_sha[0] = 0;
+        if (!up_name_ok(r->setup_name)) up_copy(r->setup_name, sizeof r->setup_name, UP_SETUP_NAME);   /* M4 */
         const char *gb, *b;
         if (up_js_get(v, e, "game_builds", &gb) == 1 && *gb == '[') {
             up_js_it bi;
@@ -751,6 +838,25 @@ int up_cache_read(const char *json, size_t n, up_catalog *c)
                 js_get_str(b, e, "build_id", x->build_id, sizeof x->build_id);
                 if (x->branch[0] || x->build_id[0]) r->nbuilds++;
             }
+        }
+        /* a cached signed compat.json counts only if its signature still verifies; then every field
+         * that matters (builds, api, hash, size) comes from it, not from the editable cache */
+        static char raw[UP_MAX_COMPAT_RAW], sg[128];
+        int rn = js_get_str(v, e, "compat_raw", raw, sizeof raw) ? -1 : (int)strlen(raw);
+        int sn = js_get_str(v, e, "compat_sig", sg, sizeof sg) ? -1 : (int)strlen(sg);
+        if (rn > 0 && sn > 0) {
+            char url[400];
+            long long lsize = r->setup_size;
+            up_copy(url, sizeof url, r->setup_url);
+            r->nbuilds = 0;
+            r->setup_sha[0] = 0;
+            r->setup_size = 0;
+            if (up_apply_compat(r, raw, (size_t)rn, sg, (size_t)sn) == 0) {
+                if (!r->setup_url[0]) up_copy(r->setup_url, sizeof r->setup_url, url);
+                if (lsize > 0 && r->setup_size > 0 && lsize != r->setup_size) r->setup_url[0] = 0;
+            }
+        } else {
+            r->sig = 0;
         }
         c->n++;
     }
@@ -769,7 +875,7 @@ int up_url_allowed(const char *url)
     return up_starts(url, UP_ASSET_PREFIX) || up_starts(url, "https://api.github.com/repos/kleeedolinux/v3x/");
 }
 
-static void errf(char *err, size_t cap, const char *fmt, ...)
+__attribute__((format(printf, 3, 4))) static void errf(char *err, size_t cap, const char *fmt, ...)
 {
     if (!err || !cap) return;
     va_list ap;
@@ -823,9 +929,20 @@ int up_fetch_catalog(up_http_fn get, void *ctx, const up_local *l, long long now
         fetched++;
         st = http_get(get, ctx, r->compat_url, UP_MAX_JSON, &body, &len);
         if (st != 200) { compat_fail(r, st < 0 ? "compat.json: network error" : "compat.json: HTTP error"); continue; }
-        up_parse_compat(body, len, r);
+        char *sbody = NULL;
+        size_t slen = 0;
+        if (r->sig_url[0]) {
+            int ss = http_get(get, ctx, r->sig_url, 4096, &sbody, &slen);
+            if (ss != 200) {   /* listed but not readable: do not fall back to "unsigned" */
+                free(body);
+                compat_fail(r, "compat.json.sig: download failed");
+                continue;
+            }
+        }
+        up_apply_compat(r, body, len, sbody, slen);
         free(body);
-        if (r->compat == 1 && !r->setup_sha[0] && r->sums_url[0]) {
+        free(sbody);
+        if (r->compat == 1 && !r->sig && !r->setup_sha[0] && r->sums_url[0]) {
             st = http_get(get, ctx, r->sums_url, UP_MAX_JSON, &body, &len);
             if (st == 200) up_sums_find(body, len, r->setup_name, r->setup_sha);
             free(body);

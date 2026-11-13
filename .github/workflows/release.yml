@@ -1,43 +1,56 @@
-# On a tag v* (for example v0.5.0): the same build and tests as ci.yml, then a GitHub Release with
-# V3X-Setup.exe, v3x-<version>.zip, install.ps1, compat.json (read by the in-game updater:
-# releases/latest/download/compat.json) and SHA256SUMS.txt.
+# On a tag v* (for example v0.5.0): build + the same tests as ci.yml, then a GitHub Release with
+# V3X-Setup.exe, v3x-<version>.zip, install.ps1, compat.json, compat.json.sig and SHA256SUMS.txt.
 # "irm https://github.com/kleeedolinux/v3x/releases/latest/download/install.ps1 | iex" and install.ps1's
 # own download use the latest release, so a tag with a '-' (v0.6.0-rc1) is published as a prerelease
 # and does not become "latest".
+#
+# Two jobs (docs/security-audit.md H1/H3):
+#   build    read-only token, no secrets: builds, tests, uploads the files as an artifact.
+#   publish  needs build; runs in the protected environment "release" (required reviewer, tag rule
+#            v*, holds the secret V3X_SIGNING_KEY): signs compat.json (tools/sign_release.py, Ed25519;
+#            refuses a key that is not in installer/release_keys.h), records build provenance
+#            (actions/attest-build-provenance) and creates the release. Releases are immutable here:
+#            if the tag already has a release the job fails; nothing is ever replaced (no --clobber).
+# Every action is pinned by full commit SHA (tag in the comment, looked up 2026-11-13); pip installs
+# only hash-locked packages (installer/requirements-ci.txt).
 name: Release
 
 on:
   push:
     tags: ["v*"]
 
-permissions:
-  contents: write
+permissions: {}
 
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  release:
+  build:
     runs-on: windows-latest
     timeout-minutes: 45
+    permissions:
+      contents: read
     defaults:
       run:
         shell: bash
-    env:
-      ZIGLANG_VERSION: "0.17.1"
+    outputs:
+      tag: ${{ steps.ver.outputs.tag }}
+      version: ${{ steps.ver.outputs.version }}
+      prerelease: ${{ steps.ver.outputs.prerelease }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
+          persist-credentials: false
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.12"
 
-      - name: Install zig (ziglang from PyPI)
+      - name: Install zig (ziglang from PyPI, hash-locked)
         run: |
-          python -m pip install --disable-pip-version-check "ziglang==${ZIGLANG_VERSION}"
+          python -m pip install --disable-pip-version-check --require-hashes --no-deps -r installer/requirements-ci.txt
           python -m ziglang version
 
       - name: Version from the tag
@@ -45,10 +58,21 @@ jobs:
         run: |
           tag="${GITHUB_REF_NAME}"
           ver="${tag#v}"
-          [[ "$ver" =~ ^[0-9A-Za-z.+-]+$ ]] || { echo "::error::tag $tag is not a version"; exit 1; }
+          [[ "$ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || { echo "::error::tag $tag is not v<semver>"; exit 1; }
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "version=$ver" >> "$GITHUB_OUTPUT"
           if [[ "$ver" == *-* ]]; then echo "prerelease=--prerelease" >> "$GITHUB_OUTPUT"; else echo "prerelease=" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Release key configured
+        run: |
+          grep -Eq '#define V3X_RELEASE_KEY_CURRENT "[0-9a-f]{64}"' installer/release_keys.h \
+            || { echo "::error::installer/release_keys.h has no V3X_RELEASE_KEY_CURRENT: install.ps1 and the updater would refuse this release (docs/updating.md, Release signing)"; exit 1; }
+
+      - name: Unsafe C idioms (tools/check_unsafe.sh)
+        run: bash tools/check_unsafe.sh
+
+      - name: Release signing self-test (RFC 8032 vectors)
+        run: python tools/sign_release.py selftest
 
       - name: Build
         run: bash build.sh
@@ -67,27 +91,103 @@ jobs:
 
       - name: Check release files
         working-directory: build/dist
+        env:
+          VER: ${{ steps.ver.outputs.version }}
         run: |
-          ls -l V3X-Setup.exe "v3x-${{ steps.ver.outputs.version }}.zip" install.ps1 compat.json SHA256SUMS.txt
-          python -c "import json; d=json.load(open('compat.json', encoding='utf-8')); print(d); assert d['schema'] == 1 and d['v3x_version'] == '${{ steps.ver.outputs.version }}' and d['game_builds']"
+          ls -l V3X-Setup.exe "v3x-${VER}.zip" install.ps1 compat.json SHA256SUMS.txt
+          python -c "import json, os; d = json.load(open('compat.json', encoding='utf-8')); print(d); assert d['schema'] == 1 and d['v3x_version'] == os.environ['VER'] and d['game_builds']"
           sha256sum -c SHA256SUMS.txt
           cat SHA256SUMS.txt
 
-      - name: Publish the GitHub Release
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-files
+          path: |
+            build/dist/V3X-Setup.exe
+            build/dist/v3x-${{ steps.ver.outputs.version }}.zip
+            build/dist/install.ps1
+            build/dist/compat.json
+            build/dist/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: release
+    permissions:
+      contents: write        # create the release
+      id-token: write        # provenance (Sigstore)
+      attestations: write    # provenance
+    defaults:
+      run:
+        shell: bash
+    env:
+      TAG: ${{ needs.build.outputs.tag }}
+      VER: ${{ needs.build.outputs.version }}
+      PRE: ${{ needs.build.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false   # only tools/sign_release.py and installer/release_keys.h are used
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-files
+          path: dist
+
+      - name: Re-check the built files
+        working-directory: dist
+        run: |
+          sha256sum -c SHA256SUMS.txt
+          python -c "import json, os; d = json.load(open('compat.json', encoding='utf-8')); assert d['v3x_version'] == os.environ['VER']"
+
+      - name: Refuse to touch an existing release (immutable releases)
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ steps.ver.outputs.tag }}
-          VER: ${{ steps.ver.outputs.version }}
-          PRE: ${{ steps.ver.outputs.prerelease }}
-        working-directory: build/dist
         run: |
-          files=(V3X-Setup.exe "v3x-${VER}.zip" install.ps1 compat.json SHA256SUMS.txt)
-          if gh release view "$TAG" > /dev/null 2>&1; then
-            gh release upload "$TAG" "${files[@]}" --clobber
-          else
-            notes="Install (Windows, no admin): close Victoria 3, open PowerShell and run
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            echo "::error::release $TAG already exists; published files are never replaced. Tag a new version."
+            exit 1
+          fi
+
+      - name: Sign compat.json (Ed25519, secret V3X_SIGNING_KEY)
+        env:
+          V3X_SIGNING_KEY: ${{ secrets.V3X_SIGNING_KEY }}
+        run: |
+          [[ -n "$V3X_SIGNING_KEY" ]] || { echo "::error::secret V3X_SIGNING_KEY is not set in the environment 'release'"; exit 1; }
+          python tools/sign_release.py sign dist/compat.json
+          python tools/sign_release.py verify dist/compat.json
+          cat dist/compat.json.sig
+
+      - name: Build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            dist/V3X-Setup.exe
+            dist/v3x-${{ needs.build.outputs.version }}.zip
+            dist/install.ps1
+            dist/compat.json
+            dist/compat.json.sig
+
+      - name: Publish the GitHub Release (new release only)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        working-directory: dist
+        run: |
+          files=(V3X-Setup.exe "v3x-${VER}.zip" install.ps1 compat.json compat.json.sig SHA256SUMS.txt)
+          notes="Install (Windows, no admin): close Victoria 3, open PowerShell and run
           \`irm https://v3extender.pages.dev/install.ps1 | iex\`
           or download and run V3X-Setup.exe. Player guide: https://github.com/${GITHUB_REPOSITORY}/blob/${TAG}/docs/install.md
-          Check the files with SHA256SUMS.txt. Single player only."
-            gh release create "$TAG" "${files[@]}" --verify-tag --title "V3X ${VER}" --notes "$notes" --generate-notes $PRE
-          fi
+          compat.json is signed (compat.json.sig, Ed25519; install.ps1 and the in-game updater check it).
+          Provenance: gh attestation verify V3X-Setup.exe --repo ${GITHUB_REPOSITORY}. Single player only."
+          pre=()
+          if [[ -n "$PRE" ]]; then pre=("$PRE"); fi
+          # gh release create fails if the release exists (checked above too); assets are never replaced
+          gh release create "$TAG" "${files[@]}" --repo "$GITHUB_REPOSITORY" --verify-tag --title "V3X ${VER}" \
+            --notes "$notes" --generate-notes "${pre[@]}"

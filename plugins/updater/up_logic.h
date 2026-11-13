@@ -43,11 +43,22 @@ int up_version_cmp(const char *a, const char *b);   /* both must parse; unparsab
 /* ---- catalog (the release list + each candidate's compat.json) */
 typedef struct up_build { char branch[64]; char build_id[40]; } up_build;
 typedef struct up_asset { char name[64]; char url[400]; long long size; } up_asset;
+#define UP_MAX_COMPAT_RAW 8192           /* signed compat.json kept verbatim (cache re-verifies it) */
+#define UP_SETUP_NAME "V3X-Setup.exe"     /* the only setup file name ever used on disk */
 typedef struct up_release {
     char tag[48], version[48];
     int draft, prerelease;
     int compat;            /* 1 = compat.json parsed and valid, 0 = not fetched, -1 = missing / invalid */
     char compat_err[64];
+    /* release signature (H1): 1 = compat.json.sig verified with a key of installer/release_keys.h
+     * (every hash below then comes from the signed compat.json), 0 = unsigned (notify / manual
+     * `update now` only, never automatic). Never read from the cache: recomputed from compat_raw. */
+    int sig;
+    char key_id[17];
+    char sig_url[400];
+    char sig_line[128];             /* the compat.json.sig line, for the cache */
+    char compat_raw[UP_MAX_COMPAT_RAW];
+    size_t compat_raw_n;
     int api_version;
     int nbuilds;
     up_build builds[UP_MAX_BUILDS];
@@ -67,6 +78,14 @@ typedef struct up_catalog {
 
 int up_parse_releases(const char *json, size_t n, up_catalog *cat);   /* GitHub list; count or -1 */
 int up_parse_compat(const char *json, size_t n, up_release *r);       /* 0 ok, -1 (r->compat_err) */
+/* compat.json + compat.json.sig text: verifies the signature (up_sig.c) and, if valid, parses the
+ * compat and keeps both verbatim in r (r->sig = 1). sig == NULL: unsigned (r->sig = 0, parsed).
+ * A signature that is present but does not verify: -1 (fail closed, r->compat = -1). */
+int up_apply_compat(up_release *r, const char *json, size_t n, const char *sig, size_t sn);
+/* up_sig.c: slot (>= 0) of the release key that signed json, -1 = not verified (why = reason) */
+int up_sig_check(const char *json, size_t n, const char *sig, size_t sn, char key_id[17], const char **why);
+int up_sig_keys(void);                 /* number of trusted release keys compiled in */
+int up_name_ok(const char *name);      /* a plain file name: [A-Za-z0-9._-], 1..63, no "..", not "." */
 int up_sums_find(const char *text, size_t n, const char *name, char out_hex[65]);   /* 0 ok */
 
 /* ---- selection */
@@ -77,6 +96,8 @@ typedef struct up_local {
     const char *branch;           /* api->game_version() */
     int beta;                     /* [update] channel = beta: pre-releases too */
     int build_supported;          /* 1 = the running loader declares this game build (not gated) */
+    const char *floor;            /* persisted minimum version (update/floor.txt); NULL = none.
+                                     A release below it is never eligible (rollback protection). */
 } up_local;
 typedef enum up_state {
     UP_UNKNOWN = 0,          /* not checked yet */
@@ -91,7 +112,9 @@ typedef enum up_state {
 typedef struct up_choice { up_state state; int best, newest; } up_choice;   /* indexes into the catalog, -1 = none */
 int up_release_supports(const up_release *r, const char *build_id, const char *branch);
 int up_release_candidate(const up_release *r, const up_local *l);   /* newer than local, channel ok */
-int up_release_eligible(const up_release *r, const up_local *l);    /* candidate + compatible + verifiable */
+int up_release_eligible(const up_release *r, const up_local *l);    /* candidate + compatible + verifiable,
+                                                                      not below l->floor */
+int up_release_auto_ok(const up_release *r);   /* may be installed without asking: signed (r->sig == 1) */
 up_choice up_select(const up_catalog *cat, const up_local *l);
 const char *up_state_name(up_state s);
 size_t up_status_text(const up_catalog *cat, const up_local *l, up_choice c, char *out, size_t cap);

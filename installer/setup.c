@@ -33,10 +33,22 @@
  *                       last line appended to binaries/v3x/install.log is
  *                       "update-result: ok version=<ver>" or "update-result: failed code=<n> <reason>"
  *                       (n = the exit codes below, reason = error|unsupported|running|timeout|nogame|payload)
+ *   --verify-release <dir>  checks a downloaded release folder (installer/install.ps1 runs it before
+ *                       installing): <dir>/compat.json.sig must be a valid Ed25519 signature over
+ *                       <dir>/compat.json by a key of installer/release_keys.h, compat.json's
+ *                       v3x_version must be this setup's version, and every asset of compat.json
+ *                       present in <dir> (V3X-Setup.exe required) AND this running exe must match
+ *                       its size + sha256. Changes nothing. Exit 0 = verified, 8 = not verified.
  * Language: the GUI is English or Brazilian Portuguese (GetUserDefaultUILanguage; env V3X_LANG=en|pt
  *   overrides). --silent / --status output stays English so scripts and tests can parse it.
+ * Trust (docs/security-audit.md H2/L3/L4): every path read from install_manifest.txt or the payload
+ *   index must be a plain relative path (sdk/v3x_safe.h v3x_path_rel_ok: no '..', ':', leading
+ *   separator, trailing dot/space, device names); a backup line may only name
+ *   v3x/backup/version.dll or v3x/backup/version.<1-99>.dll; nothing is written or deleted through a
+ *   reparse point (junction / symlink) below binaries\, and binaries\v3x itself must not be one;
+ *   --purge deletes files outside binaries\v3x only when their hash matches the manifest.
  * Exit codes: 0 ok, 1 error, 2 unsupported game build, 3 game running, 4 game not found,
- *   5 not installed (uninstall without manifest), 6 damaged payload, 7 usage. */
+ *   5 not installed (uninstall without manifest), 6 damaged payload, 7 usage, 8 release not verified. */
 #define WIN32_LEAN_AND_MEAN
 #ifndef UNICODE
 #define UNICODE
@@ -57,8 +69,12 @@
 #include <string.h>
 #include <wchar.h>
 
+#include "v3x_safe.h"          /* sdk/: V3xStr bounded builder, v3x_path_rel_ok */
+#define V3X_RELEASE_SIG_IMPL   /* this unit compiles Monocypher (Ed25519) */
+#include "release_sig.h"
+
 enum { RC_OK = 0, RC_ERR = 1, RC_UNSUPPORTED = 2, RC_RUNNING = 3, RC_NOGAME = 4, RC_NOTINST = 5,
-       RC_PAYLOAD = 6, RC_USAGE = 7 };
+       RC_PAYLOAD = 6, RC_USAGE = 7, RC_UNVERIFIED = 8 };
 
 #define MANIFEST_REL L"v3x\\install_manifest.txt"
 #define BACKUP_DIR_REL L"v3x\\backup"
@@ -80,13 +96,41 @@ static void pick_language(void)
     g_pt = PRIMARYLANGID(GetUserDefaultUILanguage()) == LANG_PORTUGUESE;
 }
 
+/* _snwprintf that always terminates (truncates; never writes past cap); returns the length */
+static int wfmt(wchar_t *buf, size_t cap, const wchar_t *fmt, ...)
+{
+    if (!cap) return 0;
+    va_list ap; va_start(ap, fmt);
+    int n = _vsnwprintf(buf, cap - 1, fmt, ap);
+    va_end(ap);
+    buf[cap - 1] = 0;
+    if (n < 0 || (size_t)n >= cap) n = (int)wcslen(buf);
+    return n;
+}
+
+/* wide bounded append: *len stays < cap, buf always terminated */
+static void wcat(wchar_t *buf, size_t cap, size_t *len, const wchar_t *fmt, ...)
+{
+    if (!cap || *len >= cap - 1) return;
+    va_list ap; va_start(ap, fmt);
+    int n = _vsnwprintf(buf + *len, cap - 1 - *len, fmt, ap);
+    va_end(ap);
+    buf[cap - 1] = 0;
+    if (n < 0 || (size_t)n >= cap - 1 - *len) *len = wcslen(buf);
+    else *len += (size_t)n;
+}
+
+/* bounded wide copy into an ARRAY destination */
+#define WCOPY(dst, src) wfmt((dst), sizeof(dst) / sizeof((dst)[0]), L"%s", (src))
+
 static void say(const wchar_t *fmt, ...)
 {
     wchar_t line[2048];
     va_list ap; va_start(ap, fmt);
-    int n = _vsnwprintf(line, 2046, fmt, ap);
+    int n = _vsnwprintf(line, 2045, fmt, ap);
     va_end(ap);
-    if (n < 0) n = 2046;
+    line[2045] = 0;
+    if (n < 0 || n > 2045) n = (int)wcslen(line);
     /* manifest paths use '/': show them Windows-style after every "binaries\" */
     for (wchar_t *q = line; (q = wcsstr(q, L"binaries\\")) != NULL;)
         for (q += 9; *q && *q != L' ' && *q != L'('; q++) if (*q == L'/') *q = L'\\';
@@ -119,17 +163,22 @@ static void flush_stdout(void)
 
 /* ------------------------------------------------------------------ small helpers */
 
-static void sha256(const void *data, size_t n, uint8_t out[32])
+/* 1 = ok. Fail closed: on any BCrypt error out is filled with 0xff and 0 is returned, and every
+ * caller treats that as "cannot verify" (never as a match). */
+static int sha256(const void *data, size_t n, uint8_t out[32])
 {
     BCRYPT_ALG_HANDLE alg = NULL; BCRYPT_HASH_HANDLE h = NULL;
-    memset(out, 0, 32);
-    if (BCryptOpenAlgorithmProvider(&alg, BCRYPT_SHA256_ALGORITHM, NULL, 0)) return;
+    int ok = 0;
+    memset(out, 0xff, 32);
+    if (n > 0xffffffffu) return 0;
+    if (BCryptOpenAlgorithmProvider(&alg, BCRYPT_SHA256_ALGORITHM, NULL, 0)) return 0;
     if (!BCryptCreateHash(alg, &h, NULL, 0, NULL, 0, 0)) {
-        BCryptHashData(h, (PUCHAR)data, (ULONG)n, 0);
-        BCryptFinishHash(h, out, 32, 0);
+        ok = !BCryptHashData(h, (PUCHAR)data, (ULONG)n, 0) && !BCryptFinishHash(h, out, 32, 0);
         BCryptDestroyHash(h);
     }
     BCryptCloseAlgorithmProvider(alg, 0);
+    if (!ok) memset(out, 0xff, 32);
+    return ok;
 }
 
 static void hex32(const uint8_t h[32], char out[65])
@@ -178,8 +227,12 @@ static int dir_exists(const wchar_t *p)
 static int hash_file(const wchar_t *path, char hex[65])
 {
     uint8_t *b; size_t n; uint8_t h[32];
+    hex[0] = 0;
     if (!read_all(path, &b, &n)) return 0;
-    sha256(b, n, h); free(b); hex32(h, hex);
+    int ok = sha256(b, n, h);
+    free(b);
+    if (!ok) return 0;
+    hex32(h, hex);
     return 1;
 }
 
@@ -195,9 +248,12 @@ static void mkdirs_for(const wchar_t *file)
 /* write via temp file + rename so a crash never leaves half a DLL */
 static int write_all(const wchar_t *path, const void *data, size_t n)
 {
+    if (!path[0]) return 0;
     mkdirs_for(path);
     wchar_t tmp[MAX_PATH * 2];
-    _snwprintf(tmp, MAX_PATH * 2, L"%s.v3xtmp", path);
+    int tn = _snwprintf(tmp, MAX_PATH * 2 - 1, L"%s.v3xtmp", path);
+    tmp[MAX_PATH * 2 - 1] = 0;
+    if (tn < 0 || tn >= MAX_PATH * 2 - 1) return 0;
     HANDLE f = CreateFileW(tmp, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (f == INVALID_HANDLE_VALUE) return 0;
     DWORD w = 0; BOOL ok = n ? WriteFile(f, data, (DWORD)n, &w, NULL) && w == n : TRUE;
@@ -210,24 +266,70 @@ static int write_all(const wchar_t *path, const void *data, size_t n)
     return 1;
 }
 
-static void join(wchar_t *out, const wchar_t *a, const wchar_t *b)
+/* out = a\b (MAX_PATH * 2 wide chars). A result that does not fit is never truncated into another
+ * path: out becomes "" (every file operation on "" fails) and 0 is returned. */
+static int join(wchar_t *out, const wchar_t *a, const wchar_t *b)
 {
-    _snwprintf(out, MAX_PATH * 2, L"%s\\%s", a, b);
+    int n = _snwprintf(out, MAX_PATH * 2 - 1, L"%s\\%s", a, b);
     out[MAX_PATH * 2 - 1] = 0;
+    if (n < 0 || n >= MAX_PATH * 2 - 1) { out[0] = 0; return 0; }
+    return 1;
 }
 
 static void utf8_to_w(const char *s, wchar_t *out, int cap)
 {
-    int n = MultiByteToWideChar(CP_UTF8, 0, s, -1, out, cap);
+    int n = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, s, -1, out, cap);
     if (n <= 0) out[0] = 0;
 }
 
-static void rel_to_path(const wchar_t *bin_dir, const char *rel, wchar_t *out)
+static int is_reparse(const wchar_t *p)
 {
+    DWORD a = GetFileAttributesW(p);
+    return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_REPARSE_POINT);
+}
+
+/* manifest / payload path check (H2): sdk/v3x_safe.h rules, plus '/' as the only separator */
+static int rel_ok(const char *rel)
+{
+    return rel && !strchr(rel, '\\') && v3x_path_rel_ok(rel) == V3X_R_OK;
+}
+
+/* v3x/backup/version.dll or v3x/backup/version.<1..99>.dll, nothing else */
+static int backup_rel_ok(const char *rel)
+{
+    if (!rel || strncmp(rel, "v3x/backup/version.", 19)) return 0;
+    const char *t = rel + 19;
+    if (!strcmp(t, "dll")) return 1;
+    if (t[0] < '1' || t[0] > '9') return 0;
+    size_t k = 1;
+    if (t[1] >= '0' && t[1] <= '9') k = 2;
+    return !strcmp(t + k, ".dll");
+}
+
+/* binaries\<rel> for a checked rel. 0 (out = "") when rel is not a plain relative path, the
+ * result does not fit, or any existing component below bin_dir (including the file) is a reparse
+ * point, so nothing is ever written or deleted through a junction or symlink. */
+static int rel_to_path(const wchar_t *bin_dir, const char *rel, wchar_t *out)
+{
+    out[0] = 0;
+    if (!rel_ok(rel)) return 0;
     wchar_t w[MAX_PATH];
     utf8_to_w(rel, w, MAX_PATH);
+    if (!w[0]) return 0;
     for (wchar_t *s = w; *s; s++) if (*s == L'/') *s = L'\\';
-    join(out, bin_dir, w);
+    if (!join(out, bin_dir, w)) return 0;
+    size_t base = wcslen(bin_dir) + 1;
+    for (size_t i = base;; i++) {
+        if (out[i] == L'\\' || out[i] == 0) {
+            wchar_t keep = out[i];
+            out[i] = 0;
+            int rp = is_reparse(out);
+            out[i] = keep;
+            if (rp) { out[0] = 0; return 0; }
+            if (!keep) break;
+        }
+    }
+    return 1;
 }
 
 static void trim(char *s)
@@ -261,24 +363,33 @@ static int load_payload(void)
     if (memcmp(ft, "V3XPAYL1", 8) || memcmp(ft + 56, "V3XEND\0\0", 8)) return 0;
     uint64_t ioff; uint32_t isz, cnt;
     memcpy(&ioff, ft + 8, 8); memcpy(&isz, ft + 16, 4); memcpy(&cnt, ft + 20, 4);
-    if (ioff + isz > g_self_n - 64 || cnt > 4096) return 0;
+    const uint64_t body = (uint64_t)g_self_n - 64;   /* bytes before the footer */
+    if (ioff > body || isz > body - ioff || cnt > 4096) return 0;   /* no wrap (L3) */
     uint8_t h[32];
-    sha256(g_self + ioff, isz, h);
-    if (memcmp(h, ft + 24, 32)) return 0;
-    char *idx = malloc(isz + 1);
+    if (!sha256(g_self + ioff, isz, h) || memcmp(h, ft + 24, 32)) return 0;
+    char *idx = malloc((size_t)isz + 1);
+    if (!idx) return 0;
     memcpy(idx, g_self + ioff, isz); idx[isz] = 0;
     g_ent = calloc(cnt ? cnt : 1, sizeof(Entry));
+    if (!g_ent) { free(idx); return 0; }
     g_nent = 0;
     for (char *line = strtok(idx, "\n"); line; line = strtok(NULL, "\n")) {
+        if (g_nent >= (int)cnt) { free(idx); return 0; }
         Entry *e = &g_ent[g_nent];
         unsigned long long off, size;
-        if (g_nent >= (int)cnt || sscanf(line, "%7s %llu %llu %64s %259s", e->kind, &off, &size, e->sha, e->rel) != 5) {
+        if (sscanf(line, "%7s %llu %llu %64s %259s", e->kind, &off, &size, e->sha, e->rel) != 5) {
             free(idx); return 0;
         }
         e->off = off; e->size = size;
-        if (off + size > ioff) { free(idx); return 0; }
+        if (off > ioff || size > ioff - off) { free(idx); return 0; }   /* inside the file area, no wrap */
+        if (strcmp(e->kind, "bin") && strcmp(e->kind, "ini") && strcmp(e->kind, "v3xini") && strcmp(e->kind, "meta")) {
+            free(idx); return 0;
+        }
+        if (!rel_ok(e->rel)) { free(idx); return 0; }   /* the payload names only plain relative paths */
         e->data = g_self + off;
-        char hx[65]; sha256(e->data, (size_t)size, h); hex32(h, hx);
+        char hx[65];
+        if (!sha256(e->data, (size_t)size, h)) { free(idx); return 0; }
+        hex32(h, hx);
         if (strcmp(hx, e->sha)) { free(idx); return 0; }
         g_nent++;
     }
@@ -286,7 +397,8 @@ static int load_payload(void)
     if (g_nent != (int)cnt) return 0;
     for (int i = 0; i < g_nent; i++) {
         if (strcmp(g_ent[i].kind, "meta")) continue;
-        char *m = malloc(g_ent[i].size + 1);
+        char *m = malloc((size_t)g_ent[i].size + 1);
+        if (!m) return 0;
         memcpy(m, g_ent[i].data, g_ent[i].size); m[g_ent[i].size] = 0;
         for (char *line = strtok(m, "\n"); line; line = strtok(NULL, "\n")) {
             char a[64], b[64], c[64];
@@ -324,10 +436,10 @@ static int normalize_game_dir(const wchar_t *in, wchar_t *out)
     size_t n = wcslen(p);
     while (n > 3 && (p[n - 1] == L'\\' || p[n - 1] == L'/')) p[--n] = 0;
     if (n > 14 && !_wcsicmp(p + n - 14, L"\\victoria3.exe")) { p[n - 14] = 0; n -= 14; }
-    if (is_game_dir(p)) { wcscpy(out, p); return 1; }
+    if (is_game_dir(p)) { wfmt(out, MAX_PATH * 2, L"%s", p); return 1; }
     if (n > 9 && !_wcsicmp(p + n - 9, L"\\binaries")) {
         p[n - 9] = 0;
-        if (is_game_dir(p)) { wcscpy(out, p); return 1; }
+        if (is_game_dir(p)) { wfmt(out, MAX_PATH * 2, L"%s", p); return 1; }
     }
     return 0;
 }
@@ -336,7 +448,7 @@ static int try_library(const wchar_t *lib, wchar_t *out)
 {
     wchar_t g[MAX_PATH * 2];
     join(g, lib, L"steamapps\\common\\Victoria 3");
-    if (is_game_dir(g)) { wcscpy(out, g); return 1; }
+    if (is_game_dir(g)) { wfmt(out, MAX_PATH * 2, L"%s", g); return 1; }
     return 0;
 }
 
@@ -393,7 +505,7 @@ static int find_game(wchar_t *out)
         const wchar_t *libs[] = {L"SteamLibrary", L"Steam", L"Program Files (x86)\\Steam", L"Games\\Steam",
                                  L"Games\\SteamLibrary"};
         for (int i = 0; i < 5; i++) {
-            wchar_t lib[MAX_PATH]; _snwprintf(lib, MAX_PATH, L"%c:\\%s", d, libs[i]);
+            wchar_t lib[MAX_PATH]; wfmt(lib, MAX_PATH, L"%c:\\%s", d, libs[i]);
             if (try_library(lib, out)) return 1;
         }
     }
@@ -403,7 +515,7 @@ static int find_game(wchar_t *out)
 /* "<TimeDateStamp>-<SizeOfImage>" exactly like src/core.c read_module_layout (game_build_id) */
 static int pe_build_id(const wchar_t *exe, char out[40])
 {
-    strcpy(out, "unknown");
+    snprintf(out, 40, "unknown");
     HANDLE f = CreateFileW(exe, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
                            OPEN_EXISTING, 0, NULL);
     if (f == INVALID_HANDLE_VALUE) return 0;
@@ -423,7 +535,7 @@ static int pe_build_id(const wchar_t *exe, char out[40])
 static void read_branch(const wchar_t *game, char out[128])
 {
     wchar_t p[MAX_PATH * 2]; uint8_t *b; size_t n;
-    strcpy(out, "unknown");
+    snprintf(out, 128, "unknown");
     join(p, game, L"caligula_branch.txt");
     if (!read_all(p, &b, &n)) return;
     snprintf(out, 128, "%s", (char *)b);
@@ -447,7 +559,7 @@ static int game_running(const wchar_t *game)
 {
     wchar_t want[MAX_PATH * 2], wfull[MAX_PATH * 2];
     join(want, game, L"binaries\\victoria3.exe");
-    if (!GetFullPathNameW(want, MAX_PATH * 2, wfull, NULL)) wcscpy(wfull, want);
+    if (!GetFullPathNameW(want, MAX_PATH * 2, wfull, NULL)) WCOPY(wfull, want);
     HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (snap == INVALID_HANDLE_VALUE) return 0;
     PROCESSENTRY32W pe = {sizeof pe};
@@ -465,21 +577,69 @@ static int game_running(const wchar_t *game)
     return running;
 }
 
-/* a version.dll built from this repo: src/core.c checks the env var V3X_DISABLE and resolves the
- * plugin entry point v3x_plugin_load by name, so both strings are in every V3X loader */
+/* PE helpers for is_v3x_dll: every read is bounds-checked against the file size */
+static int pe_u32(const uint8_t *b, size_t n, uint64_t off, uint32_t *v)
+{
+    if (off > n || n - off < 4) return 0;
+    memcpy(v, b + off, 4);
+    return 1;
+}
+
+/* file offset of an RVA through the section table; 0 = not mapped */
+static int pe_rva(const uint8_t *b, size_t n, uint32_t sec_off, uint16_t nsec, uint32_t rva, uint64_t *off)
+{
+    for (uint32_t i = 0; i < nsec; i++) {
+        uint64_t s = (uint64_t)sec_off + 40ull * i;
+        uint32_t vsz, va, rsz, raw;
+        if (!pe_u32(b, n, s + 8, &vsz) || !pe_u32(b, n, s + 12, &va) || !pe_u32(b, n, s + 16, &rsz) ||
+            !pe_u32(b, n, s + 20, &raw))
+            return 0;
+        uint32_t span = vsz > rsz ? vsz : rsz;
+        if (rva >= va && (uint64_t)rva < (uint64_t)va + span) {
+            uint64_t o = (uint64_t)raw + (rva - va);
+            if (o >= n || rva - va >= rsz) return 0;
+            *off = o;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* A V3X loader (L4): a valid x64 PE whose export table names both data exports src/core.c has had
+ * since 0.5.0, v3x_loader_api and v3x_loader_semver. A string anywhere in the file is not enough. */
 static int is_v3x_dll(const wchar_t *path)
 {
-    uint8_t *b; size_t n; int hit = 0;
+    uint8_t *b; size_t n;
     if (!read_all(path, &b, &n)) return 0;
-    static const char m1[] = "V3X_DISABLE", m2[] = "v3x_plugin_load";
-    int h1 = 0, h2 = 0;
-    for (size_t i = 0; i + sizeof m2 <= n && !(h1 && h2); i++) {
-        if (b[i] == 'V' && !memcmp(b + i, m1, sizeof m1)) h1 = 1;
-        if (b[i] == 'v' && !memcmp(b + i, m2, sizeof m2)) h2 = 1;
+    int have_api = 0, have_semver = 0;
+    uint32_t lfanew, sig, ndir, exp_rva, nnames, names_rva;
+    uint64_t exp_off, names_off;
+    if (n < 0x40 || b[0] != 'M' || b[1] != 'Z' || !pe_u32(b, n, 0x3c, &lfanew) || !pe_u32(b, n, lfanew, &sig) ||
+        sig != 0x00004550u || (uint64_t)lfanew + 24 + 112 + 8 > n)
+        goto out;
+    {
+        uint16_t machine, nsec, optsz, magic;
+        memcpy(&machine, b + lfanew + 4, 2); memcpy(&nsec, b + lfanew + 6, 2);
+        memcpy(&optsz, b + lfanew + 20, 2); memcpy(&magic, b + lfanew + 24, 2);
+        if (machine != 0x8664 || magic != 0x20b || nsec == 0 || nsec > 96 || optsz < 112 + 8) goto out;
+        if (!pe_u32(b, n, (uint64_t)lfanew + 24 + 108, &ndir) || ndir < 1) goto out;
+        if (!pe_u32(b, n, (uint64_t)lfanew + 24 + 112, &exp_rva) || !exp_rva) goto out;
+        uint32_t sec_off = lfanew + 24 + optsz;
+        if (!pe_rva(b, n, sec_off, nsec, exp_rva, &exp_off)) goto out;
+        if (!pe_u32(b, n, exp_off + 24, &nnames) || !pe_u32(b, n, exp_off + 32, &names_rva) || nnames > 65536) goto out;
+        if (!nnames || !pe_rva(b, n, sec_off, nsec, names_rva, &names_off)) goto out;
+        for (uint32_t i = 0; i < nnames && !(have_api && have_semver); i++) {
+            uint32_t nrva; uint64_t noff;
+            if (!pe_u32(b, n, names_off + 4ull * i, &nrva) || !pe_rva(b, n, sec_off, nsec, nrva, &noff)) goto out;
+            size_t max = n - (size_t)noff;
+            const char *s = (const char *)b + noff;
+            if (max >= 15 && !memcmp(s, "v3x_loader_api", 15)) have_api = 1;
+            if (max >= 18 && !memcmp(s, "v3x_loader_semver", 18)) have_semver = 1;
+        }
     }
-    hit = h1 && h2;
+out:
     free(b);
-    return hit;
+    return have_api && have_semver;
 }
 
 /* ------------------------------------------------------------------ manifest */
@@ -490,13 +650,29 @@ typedef struct {
     char version[64];
     char backup_rel[260], backup_sha[65];
     MFile *f; int n, cap;
+    int rejected;   /* lines ignored because their kind, hash or path is not acceptable */
 } Manifest;
+
+static int g_oom;   /* an allocation failed: the operation reports an error instead of half-working */
+
+static int hex64_ok(const char *h)
+{
+    if (!h || strlen(h) != 64) return 0;
+    for (int i = 0; i < 64; i++)
+        if (!((h[i] >= '0' && h[i] <= '9') || (h[i] >= 'a' && h[i] <= 'f'))) return 0;
+    return 1;
+}
 
 static void mf_add(Manifest *m, const char *kind, const char *sha, const char *rel)
 {
     for (int i = 0; i < m->n; i++)
         if (!_stricmp(m->f[i].rel, rel)) { snprintf(m->f[i].kind, 8, "%s", kind); snprintf(m->f[i].sha, 65, "%s", sha); return; }
-    if (m->n == m->cap) { m->cap = m->cap ? m->cap * 2 : 32; m->f = realloc(m->f, (size_t)m->cap * sizeof(MFile)); }
+    if (m->n == m->cap) {
+        int nc = m->cap ? m->cap * 2 : 32;
+        MFile *nf = nc > 0 && nc < (1 << 20) ? realloc(m->f, (size_t)nc * sizeof(MFile)) : NULL;
+        if (!nf) { g_oom = 1; return; }
+        m->f = nf; m->cap = nc;
+    }
     MFile *e = &m->f[m->n++];
     snprintf(e->kind, 8, "%s", kind); snprintf(e->sha, 65, "%s", sha); snprintf(e->rel, 260, "%s", rel);
 }
@@ -519,28 +695,36 @@ static void mf_load(const wchar_t *bin, Manifest *m)
         int k = sscanf(line, "%15s %259s %259s %259s", a, x, y, z);
         if (k >= 2 && !strcmp(a, "v3x_manifest")) m->valid = 1;
         else if (k >= 2 && !strcmp(a, "version")) snprintf(m->version, 64, "%s", x);
-        else if (k >= 3 && !strcmp(a, "backup")) { snprintf(m->backup_sha, 65, "%s", x); snprintf(m->backup_rel, 260, "%s", y); }
-        else if (k >= 4 && !strcmp(a, "file")) mf_add(m, x, y, z);
+        else if (k >= 3 && !strcmp(a, "backup")) {
+            /* H2: only our own backup names; anything else would move an arbitrary file to version.dll */
+            if (hex64_ok(x) && backup_rel_ok(y)) { snprintf(m->backup_sha, 65, "%s", x); snprintf(m->backup_rel, 260, "%s", y); }
+            else m->rejected++;
+        } else if (k >= 4 && !strcmp(a, "file")) {
+            /* H2: kind, hash and path checked; a line that fails is ignored (never followed) */
+            if ((!strcmp(x, "bin") || !strcmp(x, "config")) && hex64_ok(y) && rel_ok(z)) mf_add(m, x, y, z);
+            else m->rejected++;
+        }
     }
     free(b);
 }
 
 static int mf_save(const wchar_t *bin, Manifest *m, const char *build, const char *branch)
 {
-    size_t cap = 4096 + (size_t)m->n * 360, n = 0;
+    size_t cap = 4096 + (size_t)m->n * 360;
     char *s = malloc(cap);
+    if (!s) return 0;
+    V3xStr w; v3x_str_init(&w, s, cap);
     SYSTEMTIME t; GetLocalTime(&t);
-    n += (size_t)snprintf(s + n, cap - n,
+    v3x_str_appendf(&w,
         "# V3X install manifest, written by V3X-Setup.exe. Repair and uninstall use it: do not edit.\n"
         "# file <kind> <sha256> <path relative to binaries/>   kind: bin = program file, config = settings file we created\n"
         "v3x_manifest 1\nversion %s\ninstalled %04d-%02d-%02d %02d:%02d\ngame_build %s %s\n",
         m->version, t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, build, branch);
-    if (m->backup_rel[0]) n += (size_t)snprintf(s + n, cap - n, "backup %s %s\n", m->backup_sha, m->backup_rel);
+    if (m->backup_rel[0]) v3x_str_appendf(&w, "backup %s %s\n", m->backup_sha, m->backup_rel);
     for (int i = 0; i < m->n; i++)
-        n += (size_t)snprintf(s + n, cap - n, "file %s %s %s\n", m->f[i].kind, m->f[i].sha, m->f[i].rel);
+        v3x_str_appendf(&w, "file %s %s %s\n", m->f[i].kind, m->f[i].sha, m->f[i].rel);
     wchar_t p[MAX_PATH * 2];
-    join(p, bin, MANIFEST_REL);
-    int ok = write_all(p, s, n);
+    int ok = !w.truncated && join(p, bin, MANIFEST_REL) && write_all(p, s, w.len);
     free(s);
     return ok;
 }
@@ -575,17 +759,24 @@ static int ini_has_plugin_key(const char *txt, const char *name)
 /* existing v3x.ini: add "<plugin>=0" for every shipped-but-disabled plugin that has no line yet,
  * directly under the first [plugins] header (or a new section at the end). Existing lines are
  * never changed. Returns the number of lines added (-1 = write error). */
-static int merge_v3x_ini(const wchar_t *path)
+static int merge_v3x_ini_locked(const wchar_t *path)
 {
     uint8_t *b; size_t n;
     if (!read_all(path, &b, &n)) return -1;
-    char add[4096]; size_t an = 0; int count = 0;
+    /* M1: sized for every profile name (each < 64 bytes + "=0\r\n"); a truncated list = error */
+    size_t acap = (size_t)g_nprof * 72 + 16;
+    char *add = malloc(acap);
+    if (!add) { free(b); return -1; }
+    V3xStr as; v3x_str_init(&as, add, acap);
+    int count = 0;
     for (int i = 0; i < g_nprof; i++) {
         if (g_prof[i].enabled || ini_has_plugin_key((char *)b, g_prof[i].name)) continue;
-        an += (size_t)snprintf(add + an, sizeof add - an, "%s=0\r\n", g_prof[i].name);
+        v3x_str_appendf(&as, "%s=0\r\n", g_prof[i].name);
         count++;
     }
-    if (!count) { free(b); return 0; }
+    size_t an = as.len;
+    if (as.truncated) { free(add); free(b); return -1; }
+    if (!count) { free(add); free(b); return 0; }
     /* find the first [plugins] header line */
     char *hdr_end = NULL;
     for (char *p = (char *)b; *p;) {
@@ -599,6 +790,7 @@ static int merge_v3x_ini(const wchar_t *path)
     }
     size_t cap = n + an + 64, k = 0;
     char *out = malloc(cap);
+    if (!out) { free(add); free(b); return -1; }
     if (hdr_end) {
         size_t pre = (size_t)(hdr_end - (char *)b);
         memcpy(out, b, pre); k = pre;
@@ -608,12 +800,23 @@ static int merge_v3x_ini(const wchar_t *path)
     } else {
         memcpy(out, b, n); k = n;
         if (n && out[n - 1] != '\n') { out[k++] = '\r'; out[k++] = '\n'; }
-        k += (size_t)snprintf(out + k, cap - k, "\r\n[plugins]\r\n");
+        memcpy(out + k, "\r\n[plugins]\r\n", 13); k += 13;
         memcpy(out + k, add, an); k += an;
     }
     int ok = write_all(path, out, k);
-    free(out); free(b);
+    free(out); free(add); free(b);
     return ok ? count : -1;
+}
+
+/* the other v3x.ini writers (plugins mod_menu, doctor) hold the same named mutex around their
+ * read-modify-write (mem chat #4457); a timeout writes anyway, like they do */
+static int merge_v3x_ini(const wchar_t *path)
+{
+    HANDLE mx = CreateMutexW(NULL, FALSE, L"Local\\v3x_ini");
+    DWORD w = mx ? WaitForSingleObject(mx, 10000) : WAIT_FAILED;
+    int r = merge_v3x_ini_locked(path);
+    if (mx) { if (w == WAIT_OBJECT_0 || w == WAIT_ABANDONED) ReleaseMutex(mx); CloseHandle(mx); }
+    return r;
 }
 
 /* ------------------------------------------------------------------ install / uninstall */
@@ -628,7 +831,7 @@ typedef struct {
 static void state_read(State *s, const wchar_t *game)
 {
     memset(s, 0, sizeof *s);
-    wcscpy(s->game, game);
+    WCOPY(s->game, game);
     join(s->bin, game, L"binaries");
     wchar_t exe[MAX_PATH * 2];
     join(exe, game, L"binaries\\victoria3.exe");
@@ -641,9 +844,11 @@ static void state_read(State *s, const wchar_t *game)
 
 static const char *supported_list(void)
 {
-    static char buf[512]; size_t n = 0; buf[0] = 0;
+    /* M1: 16 builds x (64 + 40 + 5) bytes fit; V3xStr cuts (never overruns) if that ever changes */
+    static char buf[2048];
+    V3xStr s; v3x_str_init(&s, buf, sizeof buf);
     for (int i = 0; i < g_nbuilds; i++)
-        n += (size_t)snprintf(buf + n, sizeof buf - n, "%s%s (%s)", i ? ", " : "", g_builds[i].branch, g_builds[i].id);
+        v3x_str_appendf(&s, "%s%s (%s)", i ? ", " : "", g_builds[i].branch, g_builds[i].id);
     return buf;
 }
 
@@ -665,12 +870,38 @@ static void append_log(const wchar_t *bin)
     CloseHandle(f);
 }
 
+/* H2: binaries\v3x (and the folders / version.dll we write) must be real folders and files, not
+ * junctions or symlinks that point somewhere else. 1 = refused (said why). */
+static int links_refused(State *s)
+{
+    static const wchar_t *const rels[] = {L"v3x", L"v3x\\plugins", L"v3x\\backup", L"v3x\\update", L"version.dll"};
+    wchar_t p[MAX_PATH * 2];
+    for (size_t i = 0; i < sizeof rels / sizeof *rels; i++) {
+        if (!join(p, s->bin, rels[i])) { say(L"ERROR: the game folder path is too long. Nothing was changed."); return 1; }
+        if (is_reparse(p)) {
+            say(L"ERROR: binaries\\%s is a link (junction or symbolic link) to another place. Setup does not write "
+                L"or delete through links. Replace it with a normal folder or file, then run setup again. Nothing was changed.", rels[i]);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void say_rejected(State *s)
+{
+    if (s->mf.rejected)
+        say(L"warning: %d line(s) of binaries\\v3x\\install_manifest.txt were ignored (not a V3X path or hash; edited by hand or by another program)",
+            s->mf.rejected);
+}
+
 static int do_install(State *s, int force)
 {
     if (game_running(s->game)) {
         say(L"Victoria 3 is running from this folder. Close the game, then run setup again.");
         return RC_RUNNING;
     }
+    if (links_refused(s)) return RC_ERR;
+    say_rejected(s);
     if (!s->supported) {
         say(L"Game build %hs (%hs) is not supported. This V3X was made for: %hs.", s->build, s->branch, supported_list());
         if (!force) { say(L"Nothing was changed."); return RC_UNSUPPORTED; }
@@ -701,11 +932,11 @@ static int do_install(State *s, int force)
                 for (int i = 0; i < 100; i++) {
                     if (i) snprintf(rel, sizeof rel, "v3x/backup/version.%d.dll", i);
                     else snprintf(rel, sizeof rel, "v3x/backup/version.dll");
-                    rel_to_path(s->bin, rel, bp);
+                    if (!rel_to_path(s->bin, rel, bp)) break;
                     if (!file_exists(bp)) break;
                 }
-                mkdirs_for(bp);
-                if (!CopyFileW(p, bp, TRUE)) {
+                if (bp[0]) mkdirs_for(bp);
+                if (!bp[0] || file_exists(bp) || !CopyFileW(p, bp, TRUE)) {
                     say(L"ERROR: could not back up the existing version.dll (error %lu). Nothing was changed.", GetLastError());
                     return RC_ERR;
                 }
@@ -721,7 +952,9 @@ static int do_install(State *s, int force)
     for (int i = 0; i < g_nent; i++) {
         Entry *e = &g_ent[i];
         if (strcmp(e->kind, "bin")) continue;
-        rel_to_path(s->bin, e->rel, p);
+        if (!rel_to_path(s->bin, e->rel, p)) {
+            say(L"ERROR: binaries\\%hs: path refused (a link below binaries, or too long)", e->rel); errors++; continue;
+        }
         char h[65] = "";
         if (file_exists(p) && hash_file(p, h) && !strcmp(h, e->sha)) { same++; }
         else {
@@ -740,7 +973,9 @@ static int do_install(State *s, int force)
     for (int i = 0; i < g_nent; i++) {
         Entry *e = &g_ent[i];
         if (strcmp(e->kind, "ini") && strcmp(e->kind, "v3xini")) continue;
-        rel_to_path(s->bin, e->rel, p);
+        if (!rel_to_path(s->bin, e->rel, p)) {
+            say(L"ERROR: binaries\\%hs: path refused (a link below binaries, or too long)", e->rel); errors++; continue;
+        }
         MFile *of = mf_find(old, e->rel);
         if (!file_exists(p)) {
             if (!write_all(p, e->data, (size_t)e->size)) { say(L"ERROR: could not write binaries\\%hs", e->rel); errors++; continue; }
@@ -768,7 +1003,7 @@ static int do_install(State *s, int force)
     for (int i = 0; i < old->n; i++) {
         MFile *of = &old->f[i];
         if (strcmp(of->kind, "bin") || mf_find(&nm, of->rel)) continue;
-        rel_to_path(s->bin, of->rel, p);
+        if (!rel_to_path(s->bin, of->rel, p)) continue;   /* never followed */
         char h[65] = "";
         if (file_exists(p) && hash_file(p, h) && !strcmp(h, of->sha)) {
             if (DeleteFileW(p)) say(L"removed   binaries\\%hs (no longer part of V3X)", of->rel);
@@ -776,7 +1011,9 @@ static int do_install(State *s, int force)
         }
     }
 
+    if (g_oom) { say(L"ERROR: out of memory"); errors++; }
     if (!mf_save(s->bin, &nm, s->build, s->branch)) { say(L"ERROR: could not write binaries\\v3x\\install_manifest.txt"); errors++; }
+    free(nm.f);
     say(L"%d file(s) written, %d already up to date, %d settings file(s) created.", written, same, cfg_new);
     if (errors) { say(L"%d error(s). Close the game and run setup again (Repair).", errors); append_log(s->bin); return RC_ERR; }
     say(L"V3X %hs is installed in %s", g_version, s->bin);
@@ -816,16 +1053,24 @@ static int do_uninstall(State *s, int purge)
         say(L"Manual removal: delete binaries\\version.dll and the binaries\\v3x folder.");
         return RC_NOTINST;
     }
+    if (links_refused(s)) return RC_ERR;
+    say_rejected(s);
     wchar_t p[MAX_PATH * 2];
     int removed = 0, kept = 0, errors = 0;
     for (int i = 0; i < s->mf.n; i++) {
         MFile *f = &s->mf.f[i];
-        rel_to_path(s->bin, f->rel, p);
+        if (!rel_to_path(s->bin, f->rel, p)) {
+            say(L"kept      binaries\\%hs (path refused: a link below binaries, or too long)", f->rel);
+            kept++; continue;
+        }
         if (!file_exists(p)) continue;
-        char h[65] = ""; hash_file(p, h);
-        int match = !strcmp(h, f->sha);
+        char h[65] = "";
+        int match = hash_file(p, h) && !strcmp(h, f->sha);
         if (!match && !strcmp(f->kind, "bin") && !_stricmp(f->rel, "version.dll") && is_v3x_dll(p)) match = 1;
-        if (!match && !purge) {
+        /* --purge removes changed files only inside binaries\v3x; outside it (version.dll) the
+         * file must still be V3X's (hash match or a V3X loader) */
+        int inside_v3x = !_strnicmp(f->rel, "v3x/", 4);
+        if (!match && (!purge || !inside_v3x)) {
             say(L"kept      binaries\\%hs (%s)", f->rel, strcmp(f->kind, "config") ? L"changed since install, not V3X's file any more" : L"you changed it");
             kept++; continue;
         }
@@ -835,9 +1080,10 @@ static int do_uninstall(State *s, int purge)
     say(L"removed %d V3X file(s)", removed);
     if (s->mf.backup_rel[0]) {
         wchar_t bp[MAX_PATH * 2], vp[MAX_PATH * 2];
-        rel_to_path(s->bin, s->mf.backup_rel, bp);
+        int bok = rel_to_path(s->bin, s->mf.backup_rel, bp);
         join(vp, s->bin, L"version.dll");
-        if (!file_exists(bp)) say(L"note: backup binaries\\%hs is missing, nothing to restore", s->mf.backup_rel);
+        if (!bok) { say(L"ERROR: backup path binaries\\%hs refused (a link below binaries)", s->mf.backup_rel); errors++; }
+        else if (!file_exists(bp)) say(L"note: backup binaries\\%hs is missing, nothing to restore", s->mf.backup_rel);
         else if (file_exists(vp)) say(L"note: binaries\\version.dll exists (not V3X's), the backup stays in binaries\\%hs", s->mf.backup_rel);
         else if (MoveFileExW(bp, vp, MOVEFILE_WRITE_THROUGH)) say(L"restored  binaries\\version.dll (the file that was there before V3X)");
         else { say(L"ERROR: could not restore binaries\\version.dll from binaries\\%hs", s->mf.backup_rel); errors++; }
@@ -848,6 +1094,7 @@ static int do_uninstall(State *s, int purge)
     join(p, s->bin, L"v3x\\plugins"); RemoveDirectoryW(p);
     join(p, s->bin, L"v3x");
     if (purge) {
+        if (is_reparse(p)) { say(L"ERROR: binaries\\v3x is a link; not deleted"); return RC_ERR; }
         if (dir_exists(p) && delete_tree(p)) { say(L"ERROR: some files in binaries\\v3x could not be deleted"); return RC_ERR; }
         say(L"deleted binaries\\v3x (logs, reports and settings)");
     } else if (RemoveDirectoryW(p)) {
@@ -916,14 +1163,14 @@ static void do_doctor_checks(State *s)
     /* D001 game build */
     if (s->supported) {
         c = dr_add("D001", "game_build", DR_OK, NULL, NULL);
-        _snwprintf(c->msg_en, 400, L"Game version %hs is supported.", s->branch);
-        _snwprintf(c->msg_pt, 400, L"A versão do jogo %hs é compatível.", s->branch);
+        wfmt(c->msg_en, 400, L"Game version %hs is supported.", s->branch);
+        wfmt(c->msg_pt, 400, L"A versão do jogo %hs é compatível.", s->branch);
     } else {
         c = dr_add("D001", "game_build", s->branch_ok ? DR_WARN : DR_PROBLEM,
                    L"Wait for a V3X update for this game version, or uninstall V3X until then.",
                    L"Espere uma atualização do V3X para esta versão do jogo, ou desinstale o V3X até lá.");
-        _snwprintf(c->msg_en, 400, L"Game version %hs (build %hs) is not one this V3X was made for (%hs).", s->branch, s->build, supported_list());
-        _snwprintf(c->msg_pt, 400, L"A versão do jogo %hs (build %hs) não é a que este V3X conhece (%hs).", s->branch, s->build, supported_list());
+        wfmt(c->msg_en, 400, L"Game version %hs (build %hs) is not one this V3X was made for (%hs).", s->branch, s->build, supported_list());
+        wfmt(c->msg_pt, 400, L"A versão do jogo %hs (build %hs) não é a que este V3X conhece (%hs).", s->branch, s->build, supported_list());
     }
     snprintf(c->detail, 400, "build=%s branch=%s", s->build, s->branch);
 
@@ -931,53 +1178,53 @@ static void do_doctor_checks(State *s)
     join(p, s->bin, L"version.dll");
     int have_dll = file_exists(p), dll_v3x = have_dll && is_v3x_dll(p);
     if (s->installed) {
-        int missing = 0, bad = 0, n = 0; char list[300] = ""; size_t ln = 0;
+        int missing = 0, bad = 0, n = 0; char list[300] = ""; V3xStr ls; v3x_str_init(&ls, list, sizeof list);
         for (int i = 0; i < s->mf.n; i++) {
             MFile *f = &s->mf.f[i];
             if (strcmp(f->kind, "bin")) continue;
             n++;
-            wchar_t fp[MAX_PATH * 2]; rel_to_path(s->bin, f->rel, fp);
+            wchar_t fp[MAX_PATH * 2];
             char h[65] = "";
-            int st = !file_exists(fp) ? 1 : (!hash_file(fp, h) || strcmp(h, f->sha)) ? 2 : 0;
+            int st = !rel_to_path(s->bin, f->rel, fp) ? 2 : !file_exists(fp) ? 1 : (!hash_file(fp, h) || strcmp(h, f->sha)) ? 2 : 0;
             if (st == 2 && !_stricmp(f->rel, "version.dll") && is_v3x_dll(fp)) st = 0;  /* a self-built loader */
             if (!st) continue;
             if (st == 1) missing++; else bad++;
             const char *b = strrchr(f->rel, '/'); b = b ? b + 1 : f->rel;
-            if (ln < sizeof list - 40) ln += (size_t)snprintf(list + ln, sizeof list - ln, "%s%s(%s)", ln ? "," : "", b, st == 1 ? "missing" : "changed");
+            v3x_str_appendf(&ls, "%s%s(%s)", ls.len ? "," : "", b, st == 1 ? "missing" : "changed");
         }
         if (missing || bad) {
             g_dr_repair = 1;
             c = dr_add("D002", "loader_files", DR_PROBLEM, L"Choose Repair: it copies the missing or damaged V3X files back.",
                        L"Escolha Reparar: ele copia de volta os arquivos do V3X que faltam ou estão danificados.");
-            _snwprintf(c->msg_en, 400, L"%d V3X file(s) missing and %d damaged or changed: %hs", missing, bad, list);
-            _snwprintf(c->msg_pt, 400, L"%d arquivo(s) do V3X faltando e %d danificado(s) ou alterado(s): %hs", missing, bad, list);
+            wfmt(c->msg_en, 400, L"%d V3X file(s) missing and %d damaged or changed: %hs", missing, bad, list);
+            wfmt(c->msg_pt, 400, L"%d arquivo(s) do V3X faltando e %d danificado(s) ou alterado(s): %hs", missing, bad, list);
         } else {
             c = dr_add("D002", "loader_files", DR_OK, NULL, NULL);
-            _snwprintf(c->msg_en, 400, L"All %d V3X files are present and intact (V3X %hs).", n, s->mf.version);
-            _snwprintf(c->msg_pt, 400, L"Os %d arquivos do V3X estão presentes e intactos (V3X %hs).", n, s->mf.version);
+            wfmt(c->msg_en, 400, L"All %d V3X files are present and intact (V3X %hs).", n, s->mf.version);
+            wfmt(c->msg_pt, 400, L"Os %d arquivos do V3X estão presentes e intactos (V3X %hs).", n, s->mf.version);
         }
-        snprintf(c->detail, 400, "files=%d missing=%d changed=%d%s%s", n, missing, bad, ln ? " list=" : "", list);
+        snprintf(c->detail, 400, "files=%d missing=%d changed=%d%s%s", n, missing, bad, ls.len ? " list=" : "", list);
     } else if (dll_v3x) {
         c = dr_add("D002", "loader_files", DR_WARN, L"Run Install once: V3X then keeps a list of its files and can check and repair them.",
                    L"Rode Instalar uma vez: assim o V3X guarda a lista dos arquivos e consegue conferir e reparar.");
-        wcscpy(c->msg_en, L"V3X was copied in by hand (no install list), so its files cannot be checked.");
-        wcscpy(c->msg_pt, L"O V3X foi copiado à mão (sem lista de instalação), então os arquivos não podem ser conferidos.");
+        WCOPY(c->msg_en, L"V3X was copied in by hand (no install list), so its files cannot be checked.");
+        WCOPY(c->msg_pt, L"O V3X foi copiado à mão (sem lista de instalação), então os arquivos não podem ser conferidos.");
         snprintf(c->detail, 400, "manifest=no version_dll=v3x");
     } else {
         c = dr_add("D002", "loader_files", DR_PROBLEM, L"Choose Install to install V3X.", L"Escolha Instalar para instalar o V3X.");
-        wcscpy(c->msg_en, L"V3X is not installed in this game folder.");
-        wcscpy(c->msg_pt, L"O V3X não está instalado nesta pasta do jogo.");
+        WCOPY(c->msg_en, L"V3X is not installed in this game folder.");
+        WCOPY(c->msg_pt, L"O V3X não está instalado nesta pasta do jogo.");
         snprintf(c->detail, 400, "manifest=no version_dll=%s", have_dll ? "foreign" : "none");
     }
 
     /* D003 other proxy DLLs / a foreign version.dll */
     {
-        char found[300] = ""; size_t fn = 0; int nf = 0;
-        if (have_dll && !dll_v3x) { fn += (size_t)snprintf(found + fn, sizeof found - fn, "version.dll(not V3X)"); nf++; }
+        char found[300] = ""; V3xStr fs; v3x_str_init(&fs, found, sizeof found); int nf = 0;
+        if (have_dll && !dll_v3x) { v3x_str_append(&fs, "version.dll(not V3X)"); nf++; }
         for (size_t i = 0; i < sizeof PROXY_DLLS / sizeof *PROXY_DLLS; i++) {
             wchar_t w[64]; utf8_to_w(PROXY_DLLS[i], w, 64);
             join(p, s->bin, w);
-            if (file_exists(p)) { fn += (size_t)snprintf(found + fn, sizeof found - fn, "%s%s", fn ? "," : "", PROXY_DLLS[i]); nf++; }
+            if (file_exists(p)) { v3x_str_appendf(&fs, "%s%s", fs.len ? "," : "", PROXY_DLLS[i]); nf++; }
         }
         if (nf) {
             int foreign = have_dll && !dll_v3x;
@@ -987,12 +1234,12 @@ static void do_doctor_checks(State *s)
                        foreign ? L"Outra ferramenta trocou o version.dll do V3X: escolha Reparar (o outro arquivo vai para o backup) ou remova essa ferramenta."
                                : L"Se o jogo travar ou o V3X falhar, tire esses arquivos da pasta binaries e teste de novo.");
             if (foreign) g_dr_repair = 1;
-            _snwprintf(c->msg_en, 400, L"Other mod loaders or overlays next to the game: %hs", found);
-            _snwprintf(c->msg_pt, 400, L"Outros carregadores de mods ou overlays ao lado do jogo: %hs", found);
+            wfmt(c->msg_en, 400, L"Other mod loaders or overlays next to the game: %hs", found);
+            wfmt(c->msg_pt, 400, L"Outros carregadores de mods ou overlays ao lado do jogo: %hs", found);
         } else {
             c = dr_add("D003", "foreign_proxy", DR_OK, NULL, NULL);
-            wcscpy(c->msg_en, L"No other mod loader DLL next to the game.");
-            wcscpy(c->msg_pt, L"Nenhuma outra DLL de carregador de mods ao lado do jogo.");
+            WCOPY(c->msg_en, L"No other mod loader DLL next to the game.");
+            WCOPY(c->msg_pt, L"Nenhuma outra DLL de carregador de mods ao lado do jogo.");
         }
         snprintf(c->detail, 400, "found=%s", nf ? found : "none");
     }
@@ -1007,11 +1254,11 @@ static void do_doctor_checks(State *s)
                    low ? L"Let Windows manage the page file: Settings > System > About > Advanced system settings > Performance > Advanced > Virtual memory." : NULL,
                    low ? L"Deixe o Windows gerenciar o arquivo de paginação: Configurações > Sistema > Sobre > Configurações avançadas do sistema > Desempenho > Avançado > Memória virtual." : NULL);
         if (low) {
-            _snwprintf(c->msg_en, 400, L"Windows memory limit is %.1f GB with %.1f GB RAM: the page file is small or off, the game can run out of memory.", lim, ram);
-            _snwprintf(c->msg_pt, 400, L"O limite de memória do Windows é %.1f GB com %.1f GB de RAM: o arquivo de paginação é pequeno ou está desligado, o jogo pode ficar sem memória.", lim, ram);
+            wfmt(c->msg_en, 400, L"Windows memory limit is %.1f GB with %.1f GB RAM: the page file is small or off, the game can run out of memory.", lim, ram);
+            wfmt(c->msg_pt, 400, L"O limite de memória do Windows é %.1f GB com %.1f GB de RAM: o arquivo de paginação é pequeno ou está desligado, o jogo pode ficar sem memória.", lim, ram);
         } else {
-            _snwprintf(c->msg_en, 400, L"Windows memory limit %.1f GB for %.1f GB RAM is fine.", lim, ram);
-            _snwprintf(c->msg_pt, 400, L"Limite de memória do Windows de %.1f GB para %.1f GB de RAM está bom.", lim, ram);
+            wfmt(c->msg_en, 400, L"Windows memory limit %.1f GB for %.1f GB RAM is fine.", lim, ram);
+            wfmt(c->msg_pt, 400, L"Limite de memória do Windows de %.1f GB para %.1f GB de RAM está bom.", lim, ram);
         }
         snprintf(c->detail, 400, "commit_limit_gb=%.1f ram_gb=%.1f", lim, ram);
     }
@@ -1019,23 +1266,23 @@ static void do_doctor_checks(State *s)
     /* D010 free disk space: game drive and C: */
     {
         wchar_t drives[2][MAX_PATH * 2]; int nd = 0;
-        if (!GetVolumePathNameW(s->game, drives[0], MAX_PATH * 2)) wcscpy(drives[0], L"C:\\");
+        if (!GetVolumePathNameW(s->game, drives[0], MAX_PATH * 2)) WCOPY(drives[0], L"C:\\");
         nd = 1;
-        if (_wcsnicmp(drives[0], L"C:\\", 3)) { wcscpy(drives[1], L"C:\\"); nd = 2; }
-        int worst = DR_OK; char det[200] = ""; size_t dn = 0; wchar_t lst[200] = L""; size_t wn = 0;
+        if (_wcsnicmp(drives[0], L"C:\\", 3)) { WCOPY(drives[1], L"C:\\"); nd = 2; }
+        int worst = DR_OK; char det[200] = ""; V3xStr ds; v3x_str_init(&ds, det, sizeof det); wchar_t lst[200] = L""; size_t wn = 0;
         for (int i = 0; i < nd; i++) {
             ULARGE_INTEGER fr; double gb = -1;
             if (GetDiskFreeSpaceExW(drives[i], &fr, NULL, NULL)) gb = (double)fr.QuadPart / (1 << 30);
             int lv = gb < 0 ? DR_OK : gb < 1 ? DR_PROBLEM : gb < 5 ? DR_WARN : DR_OK;
             if (lv > worst) worst = lv;
-            dn += (size_t)snprintf(det + dn, sizeof det - dn, "%s%c=%.1fGB", dn ? " " : "", (char)drives[i][0], gb);
-            wn += (size_t)_snwprintf(lst + wn, 200 - wn, L"%s%c: %.1f GB", wn ? L", " : L"", drives[i][0], gb);
+            v3x_str_appendf(&ds, "%s%c=%.1fGB", ds.len ? " " : "", (char)drives[i][0], gb);
+            wcat(lst, 200, &wn, L"%s%c: %.1f GB", wn ? L", " : L"", drives[i][0], gb);
         }
         c = dr_add("D010", "disk_free", worst,
                    worst ? L"Free some space (at least 5 GB): Windows and the game need it for saves, logs and memory." : NULL,
                    worst ? L"Libere espaço (pelo menos 5 GB): o Windows e o jogo precisam dele para saves, logs e memória." : NULL);
-        _snwprintf(c->msg_en, 400, L"Free disk space: %s%s", lst, worst ? L" - low" : L"");
-        _snwprintf(c->msg_pt, 400, L"Espaço livre em disco: %s%s", lst, worst ? L" - pouco" : L"");
+        wfmt(c->msg_en, 400, L"Free disk space: %s%s", lst, worst ? L" - low" : L"");
+        wfmt(c->msg_pt, 400, L"Espaço livre em disco: %s%s", lst, worst ? L" - pouco" : L"");
         snprintf(c->detail, 400, "%s", det);
     }
 
@@ -1043,18 +1290,18 @@ static void do_doctor_checks(State *s)
     {
         uint8_t *b; size_t n; char stem[64] = "";
         join(p, s->bin, L"v3x\\loading.marker");
-        if (!running && read_all(p, &b, &n)) { snprintf(stem, sizeof stem, "%s", (char *)b); free(b); trim(stem); if (!stem[0]) strcpy(stem, "?"); }
+        if (!running && read_all(p, &b, &n)) { snprintf(stem, sizeof stem, "%s", (char *)b); free(b); trim(stem); if (!stem[0]) snprintf(stem, sizeof stem, "?"); }
         if (stem[0]) {
             c = dr_add("D012", "crash_loop", DR_PROBLEM,
                        L"Turn that plugin off (main menu > V3X, or <plugin>=0 under [plugins] in binaries\\v3x\\v3x.ini) and send binaries\\v3x\\v3x.log to the V3X developers.",
                        L"Desligue esse plugin (menu principal > V3X, ou <plugin>=0 em [plugins] no binaries\\v3x\\v3x.ini) e mande o binaries\\v3x\\v3x.log para quem faz o V3X.");
-            _snwprintf(c->msg_en, 400, L"The game stopped while V3X was loading the plugin \"%hs\" at the last start.", stem);
-            _snwprintf(c->msg_pt, 400, L"O jogo parou enquanto o V3X carregava o plugin \"%hs\" na última vez.", stem);
+            wfmt(c->msg_en, 400, L"The game stopped while V3X was loading the plugin \"%hs\" at the last start.", stem);
+            wfmt(c->msg_pt, 400, L"O jogo parou enquanto o V3X carregava o plugin \"%hs\" na última vez.", stem);
             snprintf(c->detail, 400, "plugin=%s", stem);
         } else {
             c = dr_add("D012", "crash_loop", DR_OK, NULL, NULL);
-            wcscpy(c->msg_en, running ? L"The game is running, the last-start check is skipped." : L"The last start loaded every plugin.");
-            wcscpy(c->msg_pt, running ? L"O jogo está aberto, a checagem da última abertura foi pulada." : L"A última abertura carregou todos os plugins.");
+            WCOPY(c->msg_en, running ? L"The game is running, the last-start check is skipped." : L"The last start loaded every plugin.");
+            WCOPY(c->msg_pt, running ? L"O jogo está aberto, a checagem da última abertura foi pulada." : L"A última abertura carregou todos os plugins.");
             snprintf(c->detail, 400, "marker=%s", running ? "skipped" : "none");
         }
     }
@@ -1079,13 +1326,13 @@ static void do_doctor_checks(State *s)
             c = dr_add("D013", "last_crash", DR_WARN,
                        L"Send binaries\\v3x\\crash.log to the V3X developers. If the module is a V3X plugin, turn that plugin off.",
                        L"Mande o binaries\\v3x\\crash.log para quem faz o V3X. Se o módulo for um plugin do V3X, desligue esse plugin.");
-            _snwprintf(c->msg_en, 400, L"The game crashed last time, in %hs.", mod[0] ? mod : "?");
-            _snwprintf(c->msg_pt, 400, L"O jogo travou na última vez, em %hs.", mod[0] ? mod : "?");
+            wfmt(c->msg_en, 400, L"The game crashed last time, in %hs.", mod[0] ? mod : "?");
+            wfmt(c->msg_pt, 400, L"O jogo travou na última vez, em %hs.", mod[0] ? mod : "?");
             snprintf(c->detail, 400, "module=%s line=%s", mod[0] ? mod : "?", line);
         } else {
             c = dr_add("D013", "last_crash", DR_OK, NULL, NULL);
-            wcscpy(c->msg_en, L"No crash recorded in crash.log.");
-            wcscpy(c->msg_pt, L"Nenhum travamento registrado no crash.log.");
+            WCOPY(c->msg_en, L"No crash recorded in crash.log.");
+            WCOPY(c->msg_pt, L"Nenhum travamento registrado no crash.log.");
             snprintf(c->detail, 400, "crash=none");
         }
     }
@@ -1099,29 +1346,29 @@ static void do_doctor_checks(State *s)
             c = dr_add("D014", "ini_syntax", inst ? DR_WARN : DR_OK,
                        inst ? L"Choose Repair to create it again (every plugin's default applies until then)." : NULL,
                        inst ? L"Escolha Reparar para criar de novo (até lá vale o padrão de cada plugin)." : NULL);
-            wcscpy(c->msg_en, inst ? L"binaries\\v3x\\v3x.ini is missing: every plugin found is loaded." : L"No v3x.ini (V3X is not installed).");
-            wcscpy(c->msg_pt, inst ? L"Falta o binaries\\v3x\\v3x.ini: todo plugin encontrado é carregado." : L"Sem v3x.ini (o V3X não está instalado).");
+            WCOPY(c->msg_en, inst ? L"binaries\\v3x\\v3x.ini is missing: every plugin found is loaded." : L"No v3x.ini (V3X is not installed).");
+            WCOPY(c->msg_pt, inst ? L"Falta o binaries\\v3x\\v3x.ini: todo plugin encontrado é carregado." : L"Sem v3x.ini (o V3X não está instalado).");
             snprintf(c->detail, 400, "ini=missing");
             if (inst) g_dr_repair = 1;
         } else {
-            char unk[200] = "", miss[200] = "", bad[120] = ""; size_t un = 0, mn = 0, bn = 0; int nu = 0, nm = 0, nb = 0, in = 0;
+            char unk[200] = "", miss[200] = "", bad[120] = ""; V3xStr us, ms, bs; v3x_str_init(&us, unk, sizeof unk); v3x_str_init(&ms, miss, sizeof miss); v3x_str_init(&bs, bad, sizeof bad); int nu = 0, nm = 0, nb = 0, in = 0;
             for (char *line = strtok((char *)b, "\n"); line; line = strtok(NULL, "\n")) {
                 trim(line);
                 if (!line[0] || line[0] == '#' || line[0] == ';') continue;
                 if (line[0] == '[') { char *c2 = line + 1; while (*c2 == ' ') c2++; in = !_strnicmp(c2, "plugins", 7) && (c2[7] == ']' || c2[7] == ' '); continue; }
                 if (!in) continue;
                 char *eq = strchr(line, '=');
-                if (!eq) { if (bn < sizeof bad - 30) bn += (size_t)snprintf(bad + bn, sizeof bad - bn, "%s%.24s", bn ? "," : "", line); nb++; continue; }
+                if (!eq) { v3x_str_appendf(&bs, "%s%.24s", bs.len ? "," : "", line); nb++; continue; }
                 char key[64]; size_t kl = (size_t)(eq - line); while (kl && (line[kl - 1] == ' ' || line[kl - 1] == '\t')) kl--;
                 if (kl >= sizeof key) kl = sizeof key - 1;
                 memcpy(key, line, kl); key[kl] = 0;
                 char *v = eq + 1; while (*v == ' ' || *v == '\t') v++;
                 int on = !(!_stricmp(v, "0") || !_stricmp(v, "off") || !_stricmp(v, "no") || !_stricmp(v, "false"));
                 wchar_t wk[64], dp[MAX_PATH * 2]; utf8_to_w(key, wk, 64);
-                _snwprintf(dp, MAX_PATH * 2, L"%s\\v3x\\plugins\\%s.dll", s->bin, wk);
+                wfmt(dp, MAX_PATH * 2, L"%s\\v3x\\plugins\\%s.dll", s->bin, wk);
                 int has = file_exists(dp);
-                if (!has && !plugin_known(key)) { if (un < sizeof unk - 40) un += (size_t)snprintf(unk + un, sizeof unk - un, "%s%s", un ? "," : "", key); nu++; }
-                else if (!has && on) { if (mn < sizeof miss - 40) mn += (size_t)snprintf(miss + mn, sizeof miss - mn, "%s%s", mn ? "," : "", key); nm++; }
+                if (!has && !plugin_known(key)) { v3x_str_appendf(&us, "%s%s", us.len ? "," : "", key); nu++; }
+                else if (!has && on) { v3x_str_appendf(&ms, "%s%s", ms.len ? "," : "", key); nm++; }
             }
             free(b);
             int lv = nm ? DR_PROBLEM : (nu || nb) ? DR_WARN : DR_OK;
@@ -1131,11 +1378,11 @@ static void do_doctor_checks(State *s)
                        nm ? L"Escolha Reparar para trazer os arquivos dos plugins de volta, ou ponha esses plugins em 0 no binaries\\v3x\\v3x.ini."
                           : lv ? L"Confira a escrita no binaries\\v3x\\v3x.ini em [plugins]: uma linha por plugin, como keep_history=1." : NULL);
             if (nm) g_dr_repair = 1;
-            if (lv == DR_OK) { wcscpy(c->msg_en, L"v3x.ini looks fine."); wcscpy(c->msg_pt, L"O v3x.ini parece certo."); }
+            if (lv == DR_OK) { WCOPY(c->msg_en, L"v3x.ini looks fine."); WCOPY(c->msg_pt, L"O v3x.ini parece certo."); }
             else {
-                _snwprintf(c->msg_en, 400, L"v3x.ini: %d plugin(s) turned on but their file is missing (%hs), %d unknown name(s) (%hs), %d line(s) without '=' (%hs).",
+                wfmt(c->msg_en, 400, L"v3x.ini: %d plugin(s) turned on but their file is missing (%hs), %d unknown name(s) (%hs), %d line(s) without '=' (%hs).",
                            nm, nm ? miss : "-", nu, nu ? unk : "-", nb, nb ? bad : "-");
-                _snwprintf(c->msg_pt, 400, L"v3x.ini: %d plugin(s) ligado(s) sem o arquivo (%hs), %d nome(s) desconhecido(s) (%hs), %d linha(s) sem '=' (%hs).",
+                wfmt(c->msg_pt, 400, L"v3x.ini: %d plugin(s) ligado(s) sem o arquivo (%hs), %d nome(s) desconhecido(s) (%hs), %d linha(s) sem '=' (%hs).",
                            nm, nm ? miss : "-", nu, nu ? unk : "-", nb, nb ? bad : "-");
             }
             snprintf(c->detail, 400, "enabled_missing=%s unknown=%s no_equals=%d", nm ? miss : "none", nu ? unk : "none", nb);
@@ -1146,8 +1393,8 @@ static void do_doctor_checks(State *s)
     c = dr_add("D015", "game_running", running ? DR_WARN : DR_OK,
                running ? L"Close the game before Repair, Update or Uninstall." : NULL,
                running ? L"Feche o jogo antes de Reparar, Atualizar ou Desinstalar." : NULL);
-    wcscpy(c->msg_en, running ? L"Victoria 3 is running from this folder." : L"Victoria 3 is not running.");
-    wcscpy(c->msg_pt, running ? L"O Victoria 3 está aberto a partir desta pasta." : L"O Victoria 3 não está aberto.");
+    WCOPY(c->msg_en, running ? L"Victoria 3 is running from this folder." : L"Victoria 3 is not running.");
+    WCOPY(c->msg_pt, running ? L"O Victoria 3 está aberto a partir desta pasta." : L"O Victoria 3 não está aberto.");
     snprintf(c->detail, 400, "running=%d", running);
 }
 
@@ -1237,7 +1484,7 @@ static int task(HWND owner, PCWSTR icon, const wchar_t *main, const wchar_t *con
     int btn = IDCANCEL;
     if (FAILED(TaskDialogIndirect(&c, &btn, NULL, verified))) {
         /* very old comctl32: plain message box */
-        wchar_t msg[4096]; _snwprintf(msg, 4096, L"%s\n\n%s", main, content ? content : L"");
+        wchar_t msg[4096]; wfmt(msg, 4096, L"%s\n\n%s", main, content ? content : L"");
         btn = MessageBoxW(owner, msg, g_title_ver, MB_OKCANCEL) == IDOK ? (nb ? btns[0].nButtonID : IDOK) : IDCANCEL;
     }
     return btn;
@@ -1256,7 +1503,7 @@ static int gui(const wchar_t *game_arg)
     INITCOMMONCONTROLSEX icc = {sizeof icc, ICC_STANDARD_CLASSES};
     InitCommonControlsEx(&icc);
     CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
-    _snwprintf(g_title_ver, 128, L"%s %hs", TITLE, g_version);
+    wfmt(g_title_ver, 128, L"%s %hs", TITLE, g_version);
     wchar_t game[MAX_PATH * 2] = L"";
     if (game_arg && !normalize_game_dir(game_arg, game)) game[0] = 0;
     if (!game[0] && !find_game(game)) {
@@ -1271,7 +1518,7 @@ static int gui(const wchar_t *game_arg)
     for (;;) {
         State s; state_read(&s, game);
         wchar_t content[4096];
-        _snwprintf(content, 4096,
+        wfmt(content, 4096,
                    TR(L"Game folder:\n%s\n\nGame version: %hs  (%s)\nV3X: %s%hs",
                       L"Pasta do jogo:\n%s\n\nVersão do jogo: %hs  (%s)\nV3X: %s%hs"),
                    s.game, s.branch,
@@ -1283,10 +1530,10 @@ static int gui(const wchar_t *game_arg)
         int en = 0, dis = 0;
         for (int i = 0; i < g_nprof; i++) { if (g_prof[i].enabled) en++; else dis++; }
         wchar_t inst[256], rep[256];
-        _snwprintf(inst, 256, TR(L"Install V3X\nAdds version.dll and %d plugins (%d on, %d off). No game file is changed.",
+        wfmt(inst, 256, TR(L"Install V3X\nAdds version.dll and %d plugins (%d on, %d off). No game file is changed.",
                                  L"Instalar o V3X\nAdiciona version.dll e %d plugins (%d ligados, %d desligados). Nenhum arquivo do jogo é alterado."),
                    en + dis, en, dis);
-        _snwprintf(rep, 256, L"%s", TR(L"Repair / update V3X\nRe-copies missing or changed V3X files. Your settings stay as they are.",
+        wfmt(rep, 256, L"%s", TR(L"Repair / update V3X\nRe-copies missing or changed V3X files. Your settings stay as they are.",
                                        L"Reparar / atualizar o V3X\nCopia de novo os arquivos do V3X que faltam ou mudaram. Suas configurações ficam como estão."));
         TASKDIALOG_BUTTON b[5]; int nb = 0;
         b[nb].nButtonID = 100; b[nb++].pszButtonText = s.installed ? rep : inst;
@@ -1304,7 +1551,7 @@ static int gui(const wchar_t *game_arg)
                                    : TR(L"Install V3X for Victoria 3", L"Instalar o V3X no Victoria 3"),
                        content, b, nb, 100, NULL, NULL,
                        NULL, SP_NOTE, TDCBF_CLOSE_BUTTON);
-        if (btn == 103) { wchar_t g2[MAX_PATH * 2]; if (pick_folder(NULL, g2)) wcscpy(game, g2); continue; }
+        if (btn == 103) { wchar_t g2[MAX_PATH * 2]; if (pick_folder(NULL, g2)) WCOPY(game, g2); continue; }
         if (btn == 104) {
             g_out_n = 0; if (g_out) g_out[0] = 0;
             int np = do_doctor(&s);   /* fills g_dr, writes doctor_offline.txt */
@@ -1312,13 +1559,13 @@ static int gui(const wchar_t *game_arg)
             for (int i = 0; i < g_ndr && k < 8000; i++) {
                 DrCheck *c = &g_dr[i];
                 const wchar_t *todo = g_pt ? c->todo_pt : c->todo_en;
-                k += (size_t)_snwprintf(body + k, 8192 - k, L"%s%s: %s%s%s", k ? L"\n\n" : L"", dr_word_tr(c->level),
+                wcat(body, 8192, &k, L"%s%s: %s%s%s", k ? L"\n\n" : L"", dr_word_tr(c->level),
                                         g_pt ? c->msg_pt : c->msg_en, todo ? TR(L"\n    What to do: ", L"\n    O que fazer: ") : L"",
                                         todo ? todo : L"");
             }
             wchar_t head[128];
-            if (np) _snwprintf(head, 128, TR(L"%d problem(s) found", L"%d problema(s) encontrado(s)"), np);
-            else _snwprintf(head, 128, L"%s", TR(L"No problems found", L"Nenhum problema encontrado"));
+            if (np) wfmt(head, 128, TR(L"%d problem(s) found", L"%d problema(s) encontrado(s)"), np);
+            else wfmt(head, 128, L"%s", TR(L"No problems found", L"Nenhum problema encontrado"));
             TASKDIALOG_BUTTON rb[] = {{105, TR(L"Repair now\nCopies missing or damaged V3X files back.",
                                                L"Reparar agora\nCopia de volta os arquivos do V3X que faltam ou estão danificados.")}};
             int r = task(NULL, np ? TD_WARNING_ICON : TD_INFORMATION_ICON, head, body, rb, g_dr_repair ? 1 : 0, 0,
@@ -1337,7 +1584,7 @@ static int gui(const wchar_t *game_arg)
         int rc, force = 0, purge = 0;
         if (btn == 100 && !s.supported) {
             wchar_t w[1024];
-            _snwprintf(w, 1024, TR(L"Your game is %hs (build %hs). This V3X was made and tested for %hs.\n\n"
+            wfmt(w, 1024, TR(L"Your game is %hs (build %hs). This V3X was made and tested for %hs.\n\n"
                                    L"Plugins check the engine code and switch themselves off where it changed, but this "
                                    L"combination was never tested. The usual fix is to wait for a V3X update.",
                                    L"Seu jogo é %hs (build %hs). Este V3X foi feito e testado para %hs.\n\n"
@@ -1369,7 +1616,7 @@ static int gui(const wchar_t *game_arg)
         wchar_t body[1024];
         if (rc == RC_OK && btn == 100) {
             head = TR(L"V3X is installed", L"O V3X está instalado");
-            _snwprintf(body, 1024, L"%s", TR(
+            wfmt(body, 1024, L"%s", TR(
                        L"Start Victoria 3 as usual (Steam or the Paradox launcher). A small \"V3X console\" "
                        L"window opens next to the game and lists what loaded.\n\nMost plugins are installed but off. "
                        L"Turn them on or off: main menu > V3X button, or binaries\\v3x\\v3x.ini. "
@@ -1380,15 +1627,139 @@ static int gui(const wchar_t *game_arg)
                        L"Rode este instalador de novo para reparar ou desinstalar."));
         } else if (rc == RC_OK) {
             head = TR(L"V3X is uninstalled", L"O V3X foi desinstalado");
-            _snwprintf(body, 1024, L"%s", TR(L"The game starts without V3X now.", L"Agora o jogo abre sem o V3X."));
+            wfmt(body, 1024, L"%s", TR(L"The game starts without V3X now.", L"Agora o jogo abre sem o V3X."));
         } else {
             head = TR(L"Setup did not finish", L"A instalação não terminou");
-            _snwprintf(body, 1024, L"%s", g_out ? g_out : L"");
+            wfmt(body, 1024, L"%s", g_out ? g_out : L"");
         }
         task(NULL, rc == RC_OK ? TD_INFORMATION_ICON : TD_ERROR_ICON, head, body, NULL, 0, 0, NULL, NULL,
              rc == RC_OK ? g_out : NULL, rc == RC_OK && btn == 100 ? SP_NOTE : NULL, TDCBF_OK_BUTTON);
         return rc;
     }
+}
+
+/* ------------------------------------------------------------------ --verify-release (H1)
+ * compat.json is written by installer/make_dist.py and signed by tools/sign_release.py, so its
+ * layout is fixed: {"schema":1,"v3x_version":"..",...,"assets":[{"name":"..","size":N,"sha256":".."},..]}.
+ * The scanner below reads only that shape (strings without escapes, objects without nesting) and
+ * fails closed on anything else; it never reads past the buffer. */
+
+/* value of "key": "<string>" in p..e (first occurrence); 1 ok */
+static int cj_str(const char *p, const char *e, const char *key, char *out, size_t cap)
+{
+    size_t kn = strlen(key);
+    for (const char *q = p; q + kn + 2 < e; q++) {
+        if (*q != '"' || memcmp(q + 1, key, kn) || q[kn + 1] != '"') continue;
+        const char *v = q + kn + 2;
+        while (v < e && (*v == ' ' || *v == '\t' || *v == '\r' || *v == '\n')) v++;
+        if (v >= e || *v != ':') return 0;
+        v++;
+        while (v < e && (*v == ' ' || *v == '\t' || *v == '\r' || *v == '\n')) v++;
+        if (v >= e || *v != '"') return 0;
+        v++;
+        size_t k = 0;
+        while (v < e && *v != '"') {
+            if (*v == '\\' || (unsigned char)*v < 0x20 || k + 1 >= cap) return 0;
+            out[k++] = *v++;
+        }
+        if (v >= e) return 0;
+        out[k] = 0;
+        return 1;
+    }
+    return 0;
+}
+
+static int cj_int(const char *p, const char *e, const char *key, unsigned long long *out)
+{
+    size_t kn = strlen(key);
+    for (const char *q = p; q + kn + 2 < e; q++) {
+        if (*q != '"' || memcmp(q + 1, key, kn) || q[kn + 1] != '"') continue;
+        const char *v = q + kn + 2;
+        while (v < e && (*v == ' ' || *v == '\t' || *v == '\r' || *v == '\n')) v++;
+        if (v >= e || *v != ':') return 0;
+        v++;
+        while (v < e && (*v == ' ' || *v == '\t' || *v == '\r' || *v == '\n')) v++;
+        unsigned long long x = 0;
+        int digits = 0;
+        while (v < e && *v >= '0' && *v <= '9') {
+            if (++digits > 15) return 0;
+            x = x * 10 + (unsigned)(*v++ - '0');
+        }
+        if (!digits) return 0;
+        *out = x;
+        return 1;
+    }
+    return 0;
+}
+
+static int verify_release(const wchar_t *dir)
+{
+    wchar_t cp[MAX_PATH * 2], sp[MAX_PATH * 2], fp[MAX_PATH * 2];
+    uint8_t *cj = NULL, *sig = NULL;
+    size_t cn = 0, sn = 0;
+    int rc = RC_UNVERIFIED;
+    if (!join(cp, dir, L"compat.json") || !join(sp, dir, L"compat.json.sig")) { say(L"verify-release: FAILED path too long"); return rc; }
+    if (!read_all(cp, &cj, &cn) || cn > (1u << 20)) { say(L"verify-release: FAILED cannot read %s", cp); goto out; }
+    if (!read_all(sp, &sig, &sn) || sn > 4096) { say(L"verify-release: FAILED no signature (%s): the release is not signed", sp); goto out; }
+    V3xSigResult vr;
+    if (!v3x_release_verify(cj, cn, (const char *)sig, sn, &vr)) {
+        say(L"verify-release: FAILED signature: %hs (key id %hs; this setup trusts %d key(s))", vr.why,
+            vr.key_id[0] ? vr.key_id : "-", v3x_release_keys_configured());
+        goto out;
+    }
+    const char *slot = vr.slot == V3X_SIG_SLOT_CURRENT ? "current" : vr.slot == V3X_SIG_SLOT_NEXT ? "next" : "DEV TEST";
+    say(L"verify-release: signature ok (key id %hs, %hs key)", vr.key_id, slot);
+    const char *p = (const char *)cj, *e = p + cn;
+    char ver[64];
+    if (!cj_str(p, e, "v3x_version", ver, sizeof ver) || strcmp(ver, g_version)) {
+        say(L"verify-release: FAILED compat.json is for V3X %hs, this setup is %hs", cj_str(p, e, "v3x_version", ver, sizeof ver) ? ver : "?", g_version);
+        goto out;
+    }
+    const char *as = NULL;
+    for (const char *q = p; q + 8 < e; q++)
+        if (!memcmp(q, "\"assets\"", 8)) { as = q + 8; break; }
+    while (as && as < e && *as != '[') { if (*as != ' ' && *as != ':' && *as != '\r' && *as != '\n' && *as != '\t') as = NULL; else as++; }
+    if (!as || as >= e) { say(L"verify-release: FAILED compat.json has no assets list"); goto out; }
+    int checked = 0, self_ok = 0, bad = 0;
+    for (const char *q = as + 1; q < e && *q != ']';) {
+        if (*q != '{') { q++; continue; }
+        const char *oe = q + 1;
+        while (oe < e && *oe != '}' && *oe != '{' && *oe != '[') oe++;
+        if (oe >= e || *oe != '}') { say(L"verify-release: FAILED malformed assets list"); goto out; }
+        char name[96], hex[80];
+        unsigned long long size = 0;
+        if (!cj_str(q, oe, "name", name, sizeof name) || !cj_str(q, oe, "sha256", hex, sizeof hex) || !hex64_ok(hex) ||
+            !cj_int(q, oe, "size", &size) || v3x_path_rel_ok_ex(name, V3X_PATH_SINGLE) != V3X_R_OK) {
+            say(L"verify-release: FAILED malformed asset entry"); goto out;
+        }
+        wchar_t wn[96];
+        utf8_to_w(name, wn, 96);
+        if (!wn[0] || !join(fp, dir, wn)) { say(L"verify-release: FAILED bad asset name"); goto out; }
+        int is_setup = !strcmp(name, "V3X-Setup.exe");
+        if (is_setup) {   /* this exe itself must be the signed one (chain: signature -> hash -> code) */
+            uint8_t h[32]; char hx[65];
+            if (sha256(g_self, g_self_n, h)) { hex32(h, hx); self_ok = !strcmp(hx, hex) && (unsigned long long)g_self_n == size; }
+            if (!self_ok) { say(L"verify-release: FAILED this V3X-Setup.exe is not the one compat.json names"); bad++; }
+        }
+        if (file_exists(fp)) {
+            char hx[65] = "";
+            WIN32_FILE_ATTRIBUTE_DATA fa;
+            unsigned long long fsz = GetFileAttributesExW(fp, GetFileExInfoStandard, &fa)
+                                         ? ((unsigned long long)fa.nFileSizeHigh << 32) | fa.nFileSizeLow : ~0ull;
+            if (fsz != size || !hash_file(fp, hx) || strcmp(hx, hex)) { say(L"verify-release: FAILED %hs does not match compat.json", name); bad++; }
+            else { say(L"verify-release: %hs ok", name); checked++; }
+        } else if (is_setup) {
+            say(L"verify-release: FAILED %hs is missing in %s", name, dir); bad++;
+        }
+        q = oe + 1;
+    }
+    if (!self_ok && !bad) { say(L"verify-release: FAILED compat.json does not list V3X-Setup.exe"); bad++; }
+    if (bad) goto out;
+    say(L"verify-release: ok version=%hs files=%d key=%hs", g_version, checked, vr.key_id);
+    rc = RC_OK;
+out:
+    free(cj); free(sig);
+    return rc;
 }
 
 /* ------------------------------------------------------------------ main */
@@ -1401,6 +1772,7 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE prev, PWSTR cmdline, int show)
     pick_language();
     const wchar_t *game_arg = NULL;
     int uninstall = 0, purge = 0, force = 0, status = 0, update = 0, doctor = 0;
+    const wchar_t *verify_dir = NULL;
     DWORD wait_pid = 0;
     for (int i = 1; i < argc; i++) {
         if (!wcscmp(argv[i], L"--silent")) g_silent = 1;
@@ -1412,11 +1784,12 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE prev, PWSTR cmdline, int show)
         else if (!wcscmp(argv[i], L"--game-dir") && i + 1 < argc) game_arg = argv[++i];
         else if (!wcscmp(argv[i], L"--update")) { update = 1; g_silent = 1; }
         else if (!wcscmp(argv[i], L"--doctor")) { doctor = 1; g_silent = 1; }
+        else if (!wcscmp(argv[i], L"--verify-release") && i + 1 < argc) { verify_dir = argv[++i]; g_silent = 1; }
         else if (!wcscmp(argv[i], L"--wait-pid") && i + 1 < argc && (wait_pid = wcstoul(argv[i + 1], NULL, 10)) != 0) i++;
         else {
             g_silent = 1;
             say(L"usage: V3X-Setup.exe [--silent] [--game-dir <Victoria 3 folder>] [--install|--repair|--uninstall [--purge]] [--force] [--status]"
-                L" [--wait-pid <pid>] [--update] [--doctor]");
+                L" [--wait-pid <pid>] [--update] [--doctor] [--verify-release <dir>]");
             flush_stdout();
             return RC_USAGE;
         }
@@ -1437,6 +1810,11 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE prev, PWSTR cmdline, int show)
         else MessageBoxW(NULL, TR(L"This setup file is damaged or incomplete. Please download it again.",
                                   L"Este instalador está danificado ou incompleto. Baixe de novo."), TITLE, MB_OK | MB_ICONERROR);
         return RC_PAYLOAD;
+    }
+    if (verify_dir && !update) {
+        int vrc = verify_release(verify_dir);
+        flush_stdout();
+        return vrc;
     }
     if (wait_pid) {
         /* the updater starts us and then the game exits: wait for it (version.dll is locked while it runs) */

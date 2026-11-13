@@ -22,9 +22,13 @@ rights and changes no game file. Em português: [mais abaixo](#português-pt-br)
    Steam: right-click Victoria 3 > **Manage** > **Browse local files** shows that folder.
 5. Wait for `Done! V3X ... is installed.` Start the game as usual.
 
-What it does: it finds the game through Steam, downloads `V3X-Setup.exe` from the latest
-[release](https://github.com/kleeedolinux/v3x/releases), checks its SHA-256 against
-`SHA256SUMS.txt`, and runs it. Nothing is changed if the download is damaged or the game is open.
+What it does: it finds the game through Steam, downloads `V3X-Setup.exe`, `compat.json` and
+`compat.json.sig` from the latest [release](https://github.com/kleeedolinux/v3x/releases), checks
+that `compat.json` is **signed by the V3X developers** (Ed25519 signature, checked by the script
+itself) and that the setup's SHA-256 is the one in that signed file, lets the setup confirm the same
+(`--verify-release`), and only then runs it. Nothing is run or changed if the signature or the
+checksum is wrong (message *"This download is NOT signed by the V3X developers"*, exit code 8), if the
+download is damaged, or if the game is open.
 It speaks English or Portuguese, following your Windows language (`$env:V3X_LANG="en"` or `"pt"`
 before the line overrides it).
 
@@ -41,8 +45,11 @@ missing it offers **Repair**. The result is also saved in `binaries\v3x\doctor_o
 ## 2. The other way: V3X-Setup.exe
 
 Get `V3X-Setup.exe` from the [Releases page](https://github.com/kleeedolinux/v3x/releases) (or from
-whoever sent it to you). The release also lists its SHA-256 checksum (`SHA256SUMS.txt`) if you want
-to check the file.
+whoever sent it to you). To check a downloaded file: put `V3X-Setup.exe`, `compat.json` and
+`compat.json.sig` of the same release in one folder and run
+`V3X-Setup.exe --verify-release <that folder>`; it must end with `verify-release: ok`. (The one-line
+installer does this for you. `SHA256SUMS.txt` is there too, but only the signed `compat.json` proves
+who made the file.)
 
 Windows SmartScreen or your antivirus may warn, because the file is new and not signed: choose
 **More info > Run anyway** if you trust the source. The [FAQ](faq.md) explains why tools like V3X
@@ -157,7 +164,16 @@ More: [troubleshooting.md](troubleshooting.md), [faq.md](faq.md).
 
 `V3X-Setup.exe --silent [--game-dir "<...>\Victoria 3"] [--repair | --uninstall [--purge]] [--force] [--status]`
 prints to stdout (always English) and returns 0 ok, 1 error, 2 unsupported game build, 3 game
-running, 4 game not found, 5 not installed, 6 damaged setup file, 7 bad arguments.
+running, 4 game not found, 5 not installed, 6 damaged setup file, 7 bad arguments, 8 release not
+verified.
+
+* `--verify-release <dir>` checks a downloaded release folder and changes nothing: `compat.json.sig`
+  must be a valid Ed25519 signature over `compat.json` by a key of `installer/release_keys.h`,
+  `compat.json`'s version must be this setup's, and this exe plus every listed asset present in the
+  folder (`V3X-Setup.exe` required) must match its size and SHA-256. Exit 0 = verified, 8 = not.
+* Setup refuses to write or delete through a junction or symbolic link below `binaries\` (for example
+  `binaries\v3x` pointing elsewhere), ignores `install_manifest.txt` lines whose path is not a plain
+  relative path inside `binaries\`, and `--purge` deletes changed files only inside `binaries\v3x`.
 
 * `--doctor` runs the offline checks (ids `D001`... shared with the in-game doctor plugin): one
   English line per check plus a machine line `doctor: <id> <name> OK|WARN|PROBLEM <detail>` and
@@ -167,12 +183,13 @@ running, 4 game not found, 5 not installed, 6 damaged setup file, 7 bad argument
   unsupported game build. Exit 0 ok, 1 anything else; the last line of `binaries\v3x\install.log` is
   `update-result: ok version=<ver>` or `update-result: failed code=<n> <reason>`.
 * Each release also has `compat.json` (version, loader API, supported game builds from
-  `installer/builds.txt`, asset sizes and SHA-256) for the updater.
+  `installer/builds.txt`, asset sizes and SHA-256) and its signature `compat.json.sig`, read by
+  `install.ps1` and the updater ([updating.md](updating.md): format, keys, release signing).
 
 `install.ps1` takes environment variables instead of parameters (`iex` cannot pass any):
 `V3X_ACTION=install|repair|uninstall|status|doctor`, `V3X_GAME_DIR`, `V3X_LANG=en|pt`, `V3X_PURGE=1`,
-`V3X_YES=1` (never ask), `V3X_SOURCE=<folder or URL>` (where to download from), `V3X_VERSION=v0.5.0`
-(a specific release). Example: `$env:V3X_ACTION="uninstall"; irm https://v3extender.pages.dev/install.ps1 | iex`.
+`V3X_YES=1` (never ask), `V3X_SOURCE=<folder or URL>` (where to download from; the signature check
+still applies), `V3X_VERSION=v0.5.0` (a specific release). Example: `$env:V3X_ACTION="uninstall"; irm https://v3extender.pages.dev/install.ps1 | iex`.
 Details: [installer/README.md](../installer/README.md).
 
 ---
@@ -200,8 +217,11 @@ administrador e não altera nenhum arquivo do jogo.
    botão direito em Victoria 3 > **Gerenciar** > **Ver arquivos locais** mostra essa pasta.
 5. Espere aparecer `Pronto! O V3X ... está instalado.` Abra o jogo como sempre.
 
-Ele acha o jogo pela Steam, baixa o `V3X-Setup.exe` da última versão no GitHub, confere o SHA-256
-e roda. Se o download vier com defeito ou o jogo estiver aberto, nada é alterado. O texto sai em
+Ele acha o jogo pela Steam, baixa o `V3X-Setup.exe`, o `compat.json` e o `compat.json.sig` da
+última versão no GitHub, confere que o `compat.json` tem a **assinatura dos desenvolvedores do V3X**
+e que o SHA-256 do instalador é o desse arquivo assinado, e só então roda. Se a assinatura ou o
+checksum não baterem (*"Este download NÃO tem a assinatura dos desenvolvedores do V3X"*), se o
+download vier com defeito ou se o jogo estiver aberto, nada é executado nem alterado. O texto sai em
 português quando o Windows está em português.
 
 **Atualizar, reparar ou desinstalar:** rode a mesma linha de novo e escolha `1 Atualizar ou

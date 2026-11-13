@@ -6,12 +6,16 @@
     --out DIR      output folder (default: <repo>/build/dist)
     --version VER  version shown by the installer (default: dev-YYYYMMDD)
     --cc "CMD"     compiler (default: env V3X_CC, else "<python> -m ziglang cc")
+    --trust-key HEX  ALSO trust this Ed25519 public key in V3X-Setup.exe --verify-release (dev dry
+                   runs and tests with a dev key; tools/sign_release.py). Never for a published
+                   release: CI does not pass it; the exe then says "DEV TEST key" when it verifies.
 
 Outputs in --out: V3X-Setup.exe, v3x-<version>.zip (the same files for a manual install: copy into
 the game's binaries folder; + install.ps1 + README.txt), install.ps1 (the one-line installer) and
 SHA256SUMS.txt (all four), and compat.json (version, loader API, supported game builds from
-installer/builds.txt, asset names + SHA-256) for the in-game updater. install.ps1 checks
-V3X-Setup.exe against SHA256SUMS.txt.
+installer/builds.txt, asset names + SHA-256) for the in-game updater. The release workflow then
+signs compat.json (tools/sign_release.py -> compat.json.sig); install.ps1 and the updater verify that
+signature and take every hash from the signed compat.json.
 
 Steps: ./build.sh (loader + every plugin into build/), compile installer/setup.c with zig into a
 stub exe, then append the payload: build/version.dll, the plugins marked 1 or 0 in
@@ -135,7 +139,10 @@ def main():
     ap.add_argument("--out", default=os.path.join(REPO, "build", "dist"))
     ap.add_argument("--version", default="dev-" + datetime.date.today().strftime("%Y%m%d"))
     ap.add_argument("--cc", default=os.environ.get("V3X_CC", "%s -m ziglang cc" % shlex.quote(sys.executable)))
+    ap.add_argument("--trust-key", default="")
     a = ap.parse_args()
+    if a.trust_key and (len(a.trust_key) != 64 or any(c not in "0123456789abcdef" for c in a.trust_key)):
+        die("--trust-key must be 64 lowercase hex digits (an Ed25519 public key)")
     if " " in a.version:
         die("--version must not contain spaces")
 
@@ -189,7 +196,11 @@ def main():
     os.makedirs(a.out, exist_ok=True)
     stub = os.path.join(a.out, "V3X-Setup.stub.exe")
     cmd = shlex.split(a.cc) + ["-target", "x86_64-windows-gnu", "-O2", "-Wall", "-municode",
-                               "setup.c", "setup.rc", "-o", stub, "-Wl,--subsystem,windows",
+                               "-I" + os.path.join(REPO, "include"), "-I" + os.path.join(REPO, "sdk")]
+    if a.trust_key:
+        print("make_dist: NOTE: V3X-Setup.exe also trusts the DEV TEST key %s... (not for publishing)" % a.trust_key[:16])
+        cmd += ['-DV3X_RELEASE_KEY_DEVTEST="%s"' % a.trust_key]
+    cmd += ["setup.c", "setup.rc", "-o", stub, "-Wl,--subsystem,windows",
                                "-lcomctl32", "-lbcrypt", "-lshell32", "-lole32", "-ladvapi32", "-luser32"]
     print("make_dist: compiling installer stub")
     if subprocess.call(cmd, cwd=HERE):

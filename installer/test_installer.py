@@ -67,6 +67,63 @@ EXPECT_UNSHIPPED = {"devtools", "devbridge", "devconsole", "tick_profiler", "hel
 PENDING = {"updater", "doctor"}
 
 
+sys.path.insert(0, os.path.join(REPO, "tools"))
+import sign_release as sr  # noqa: E402  (pure-Python Ed25519, TEST_SEED)
+
+TEST_PUB = sr.public_key(sr.TEST_SEED).hex()
+
+
+def sign_dir(d, seed=sr.TEST_SEED):
+    """compat.json.sig for d/compat.json with seed (default: the public test key)"""
+    data = open(os.path.join(d, "compat.json"), "rb").read()
+    open(os.path.join(d, "compat.json.sig"), "w", newline="\n").write(sr.sig_line(sr.public_key(seed), sr.sign(seed, data)))
+
+
+def signed_dist(root, version="0.0.1-sigtest"):
+    """make_dist.py --no-build --trust-key <test key> into root/sdist, compat.json signed with the test key"""
+    out = os.path.join(root, "sdist")
+    shutil.rmtree(out, ignore_errors=True)
+    r = subprocess.run([sys.executable, os.path.join(HERE, "make_dist.py"), "--no-build", "--out", out, "--version", version,
+                        "--trust-key", TEST_PUB], capture_output=True, text=True)
+    if r.returncode:
+        raise SystemExit("make_dist --trust-key failed:\n" + r.stdout + r.stderr)
+    sign_dir(out)
+    return out
+
+
+def repack(exe, out, entries=None, meta_extra="", raw_index=None, mutate=None):
+    """copy of the setup exe with a rewritten payload. entries: [(kind, rel, data)] (default: the
+    exe's own); meta_extra: lines added to meta.txt; raw_index: bytes used as the index verbatim;
+    mutate(list of index lines) -> list, applied before hashing the index."""
+    b = open(exe, "rb").read()
+    magic, ioff, isz, cnt, ish, end = struct.unpack("<8sQII32s8s", b[-64:])
+    lines = b[ioff:ioff + isz].decode().splitlines()
+    first = min(int(l.split()[1]) for l in lines)
+    stub = bytearray(b[:first])
+    if entries is None:
+        entries = [(k, rel, data) for k, rel, h, data in payload(exe)]
+    if meta_extra:
+        entries = [(k, rel, data + meta_extra.encode() if k == "meta" else data) for k, rel, data in entries]
+    blob = bytearray(stub)
+    index = []
+    for kind, rel, data in entries:
+        index.append("%s %d %d %s %s" % (kind, len(blob), len(data), hashlib.sha256(data).hexdigest(), rel))
+        blob += data
+    if mutate:
+        index = mutate(index)
+    idx = raw_index if raw_index is not None else ("\n".join(index) + "\n").encode()
+    ioff = len(blob)
+    blob += idx
+    blob += struct.pack("<8sQII32s8s", b"V3XPAYL1", ioff, len(idx), len(index), hashlib.sha256(idx).digest(), b"V3XEND\0\0")
+    open(out, "wb").write(blob)
+    return out
+
+
+def junction(link, target):
+    """directory junction (no admin rights needed); True if made"""
+    return subprocess.run(["cmd", "/c", "mklink", "/J", link, target], capture_output=True).returncode == 0
+
+
 def synthetic_header():
     """4 KB PE header whose TimeDateStamp-SizeOfImage is the first id in builds.txt (setup.c pe_build_id)"""
     bid = next(l.split()[0] for l in open(os.path.join(HERE, "builds.txt")) if l.strip() and not l.startswith("#"))
@@ -378,7 +435,177 @@ def main():
         proc.kill(); proc.wait()
     check("doctor: game running -> D015 WARN", m.get("D015", ("",))[0] == "WARN", out)
 
-    fails = [n for n, ok in RESULTS if not ok]
+    # 13. manifest trust (H2): paths, backup lines, purge outside binaries\v3x, links
+    def fresh(case):
+        gd = make_game(root, case, header)
+        rc_, out_ = run(exe, "--game-dir", gd)
+        assert rc_ == 0, out_
+        return gd, os.path.join(gd, "binaries"), os.path.join(gd, "binaries", "v3x", "install_manifest.txt")
+    g9, B9, man9 = fresh("traversal")
+    outside = os.path.join(root, "traversal", "outside.txt")        # next to "Victoria 3"
+    open(outside, "w").write("not V3X's file")
+    secret = os.path.join(root, "traversal", "secret.dll")
+    open(secret, "wb").write(b"MZ someone else's dll")
+    ho, hs = sha(outside), sha(secret)
+    evil = ["../../outside.txt", "v3x/../../../outside.txt", "..\\..\\outside.txt", "/outside.txt", "C:/outside.txt",
+            "v3x/plugins/x.dll.", "v3x/CON", "v3x/nul.txt", "v3x/a:stream", "v3x//x.dll", "v3x/COM1.dll"]
+    with open(man9, "a") as f:
+        for r in evil:
+            f.write("file bin %s %s\n" % (ho, r))
+        f.write("file bin %s ../../secret.dll\n" % hs)
+    rc, out = run(exe, "--game-dir", g9)
+    check("traversal: install with a hostile manifest rc=0, warns about %d ignored lines" % (len(evil) + 1),
+          rc == 0 and ("%d line(s) of binaries\\v3x\\install_manifest.txt were ignored" % (len(evil) + 1)) in out, out)
+    check("traversal: the rewritten manifest no longer names any hostile path",
+          not any(r in open(man9).read() for r in ("outside.txt", "secret.dll", "x.dll.", "CON")), open(man9).read())
+    with open(man9, "a") as f:
+        for r in evil:
+            f.write("file bin %s %s\n" % (ho, r))
+        f.write("backup %s ../../secret.dll\n" % hs)
+    rc, out = run(exe, "--uninstall", "--purge", "--game-dir", g9)
+    check("traversal: uninstall --purge rc=0 and files outside the game folder survive (hash matched!)",
+          rc == 0 and os.path.isfile(outside) and sha(outside) == ho and os.path.isfile(secret), out)
+    check("traversal: a 'backup ../../secret.dll' line is not moved to binaries\\version.dll",
+          not os.path.exists(os.path.join(B9, "version.dll")) and os.path.isfile(secret), out)
+    # backup line names something under v3x/ that is not a backup name -> ignored, never restored
+    g10, B10, man10 = fresh("backup_rel")
+    junk = os.path.join(B10, "v3x", "my.ini")
+    open(junk, "w").write("user file")
+    with open(man10, "a") as f:
+        f.write("backup %s v3x/my.ini\n" % sha(junk))
+        f.write("backup %s v3x/backup/version.100.dll\n" % sha(junk))
+    rc, out = run(exe, "--uninstall", "--game-dir", g10)
+    check("backup: only v3x/backup/version(.N).dll accepted (v3x/my.ini not moved to version.dll)",
+          rc == 0 and os.path.isfile(junk) and not os.path.exists(os.path.join(B10, "version.dll")), out)
+    # purge: a changed version.dll (another tool's) outside binaries\v3x is kept even with --purge
+    g11, B11, man11 = fresh("purge_outside")
+    other = b"MZ other tool replaced version.dll after V3X"
+    open(os.path.join(B11, "version.dll"), "wb").write(other)
+    rc, out = run(exe, "--uninstall", "--purge", "--game-dir", g11)
+    check("purge: changed version.dll outside binaries\\v3x kept (no hash match), binaries\\v3x deleted",
+          rc == 0 and open(os.path.join(B11, "version.dll"), "rb").read() == other and not os.path.exists(os.path.join(B11, "v3x")), out)
+    # links: binaries\v3x or binaries\v3x\plugins as a junction -> refused, nothing written through it
+    g12 = make_game(root, "junction", header)
+    B12 = os.path.join(g12, "binaries")
+    tgt = os.path.join(root, "junction", "elsewhere")
+    os.makedirs(tgt)
+    made = junction(os.path.join(B12, "v3x"), tgt)
+    check("links: junction created for the test", made)
+    if made:
+        rc, out = run(exe, "--game-dir", g12)
+        check("links: binaries\\v3x is a junction -> install refused rc=1, nothing written", rc == 1 and "is a link" in out
+              and os.listdir(tgt) == [] and not os.path.exists(os.path.join(B12, "version.dll")), out)
+        open(os.path.join(tgt, "keep.txt"), "w").write("x")
+        rc, out = run(exe, "--uninstall", "--purge", "--game-dir", g12)
+        check("links: uninstall --purge through a junction refused, target untouched", rc != 0 and os.path.isfile(os.path.join(tgt, "keep.txt")), out)
+        os.rmdir(os.path.join(B12, "v3x"))   # removes the junction only
+    g13, B13, man13 = fresh("junction_plugins")
+    tgt2 = os.path.join(root, "junction_plugins", "elsewhere")
+    os.makedirs(tgt2)
+    shutil.rmtree(os.path.join(B13, "v3x", "plugins"))
+    if junction(os.path.join(B13, "v3x", "plugins"), tgt2):
+        rc, out = run(exe, "--repair", "--game-dir", g13)
+        check("links: binaries\\v3x\\plugins is a junction -> repair refused, nothing written into the target",
+              rc == 1 and os.listdir(tgt2) == [], out)
+        os.rmdir(os.path.join(B13, "v3x", "plugins"))
+
+    # 14. payload checks (L3) and bounded builders (M1) with crafted setup files
+    cr = os.path.join(root, "crafted")
+    os.makedirs(cr)
+    g14 = make_game(root, "crafted_game", header)
+    def wrap(lines):   # an entry whose offset + size wraps around 2^64
+        k, off, size, h, rel = lines[0].split()
+        return ["%s %d %d %s %s" % (k, 2 ** 64 - 16, 32, h, rel)] + lines[1:]
+    for name, kw in (("wrap", {"mutate": wrap}),
+                     ("traversal", {"entries": [("bin", "../evil.dll", b"MZ evil")] + [(k, r, d) for k, r, h, d in payload(exe) if k == "meta"]}),
+                     ("drive", {"entries": [("bin", "C:/evil.dll", b"MZ evil")] + [(k, r, d) for k, r, h, d in payload(exe) if k == "meta"]}),
+                     ("kind", {"entries": [("exec", "v3x/a.dll", b"MZ")] + [(k, r, d) for k, r, h, d in payload(exe) if k == "meta"]}),
+                     ("bigindex", {"raw_index": b"x" * 10, "mutate": None})):
+        cx = repack(exe, os.path.join(cr, name + ".exe"), **kw)
+        if name == "bigindex":   # footer index_size larger than the file
+            bb = bytearray(open(cx, "rb").read())
+            struct.pack_into("<I", bb, len(bb) - 64 + 16, 0xFFFFFFF0)
+            open(cx, "wb").write(bb)
+        rc, out = run(cx, "--game-dir", g14)
+        check("payload %s: refused as damaged rc=6, nothing written" % name,
+              rc == 6 and sorted(os.listdir(os.path.join(g14, "binaries"))) == ["victoria3.exe"]
+              and not os.path.exists(os.path.join(root, "evil.dll")), out)
+    long_names = "".join("plugin p%s 0\n" % (("%02d" % i) * 31) for i in range(64))           # 64 x 63-char names
+    long_builds = "".join("build %s release/%s\n" % (("%x" % i) * 39, "b" * 55) for i in range(15))
+    real = [l.split() for l in open(os.path.join(HERE, "builds.txt")) if l.strip() and not l.startswith("#")][0]
+    meta_long = ("version 0.0.0-long\nbuild %s %s\n" % (real[0], real[1]) + long_builds + long_names).encode()
+    ents = [(k, r, meta_long if k == "meta" else d) for k, r, h, d in payload(exe)]
+    cx = repack(exe, os.path.join(cr, "long.exe"), entries=ents)
+    g15 = make_game(root, "long", header)
+    rc, out = run(exe, "--game-dir", g15)
+    open(os.path.join(g15, "binaries", "v3x", "v3x.ini"), "w").write("[plugins]\r\n")
+    rc, out = run(cx, "--game-dir", g15)
+    vi15 = open(os.path.join(g15, "binaries", "v3x", "v3x.ini")).read()
+    check("M1: v3x.ini merge with 64 long plugin names (old add[4096]) rc=0, every name added",
+          rc == 0 and all(("p%s=0" % (("%02d" % i) * 31)) in vi15 for i in range(64)) and "added 64 line(s)" in out, out[-800:])
+    rc, out = run(cx, "--status", "--game-dir", g15)
+    check("M1: status with 16 long builds (old buf[512]) rc=0, list printed", rc == 0 and "this setup:" in out and "release/bbbb" in out, out[-800:])
+    g16 = make_game(root, "fake_v3x", header)
+    fake = b"MZ not a PE but says V3X_DISABLE\0 and v3x_plugin_load\0 v3x_loader_api\0 v3x_loader_semver\0"
+    open(os.path.join(g16, "binaries", "version.dll"), "wb").write(fake)
+    rc, out = run(exe, "--game-dir", g16)
+    check("L4: a non-PE file with the V3X marker strings is foreign: backed up, not overwritten unseen",
+          rc == 0 and open(os.path.join(g16, "binaries", "v3x", "backup", "version.dll"), "rb").read() == fake, out)
+
+    # 15. release signature (H1): V3X-Setup.exe --verify-release with the public TEST key
+    keys_h = open(os.path.join(HERE, "release_keys.h")).read()
+    ps1 = open(os.path.join(HERE, "install.ps1")).read()
+    import re
+    hk = dict(re.findall(r'#define V3X_RELEASE_KEY_(CURRENT|NEXT) "([0-9a-f]*)"', keys_h))
+    pk = {"CURRENT": (re.search(r"\$ReleaseKeyCurrent = '([0-9a-f]*)'", ps1) or [None, None])[1],
+          "NEXT": (re.search(r"\$ReleaseKeyNext = '([0-9a-f]*)'", ps1) or [None, None])[1]}
+    check("keys: install.ps1 $ReleaseKeyCurrent/$ReleaseKeyNext == release_keys.h", hk == pk and set(hk) == {"CURRENT", "NEXT"}, "%s %s" % (hk, pk))
+    check("keys: the public TEST key is not a release key", TEST_PUB not in keys_h and TEST_PUB not in ps1)
+    sd = signed_dist(root)
+    vexe = os.path.join(sd, "V3X-Setup.exe")
+    def verify(d, use=None):
+        p = subprocess.run([use or vexe, "--verify-release", d], capture_output=True, timeout=120)
+        return p.returncode, p.stdout.decode("utf-8", "replace")
+    rc, out = verify(sd)
+    check("verify-release: signed test release rc=0 (setup, zip, install.ps1 checked)", rc == 0 and "verify-release: ok" in out
+          and "DEV TEST key" in out and "files=3" in out, out)
+    rc, out = verify(sd, use=exe)
+    check("verify-release: the normal setup (no test key) refuses the test-signed release rc=8", rc == 8 and "FAILED signature" in out, out)
+    def variant(name, fn):
+        d = os.path.join(root, "rel_" + name)
+        shutil.rmtree(d, ignore_errors=True)
+        shutil.copytree(sd, d)
+        fn(d)
+        return d
+    def flip(path, off):
+        bb = bytearray(open(path, "rb").read())
+        bb[off if off >= 0 else len(bb) + off] ^= 0x01
+        open(path, "wb").write(bb)
+    cases = [
+        ("compat byte", lambda d: flip(os.path.join(d, "compat.json"), 20), "BAD signature"),
+        ("sig byte", lambda d: flip(os.path.join(d, "compat.json.sig"), 40), "FAILED signature"),
+        ("no sig", lambda d: os.remove(os.path.join(d, "compat.json.sig")), "not signed"),
+        ("unknown key", lambda d: sign_dir(d, seed=os.urandom(32)), "unknown key"),
+        ("setup copy byte", lambda d: flip(os.path.join(d, "V3X-Setup.exe"), 0x50), "does not match"),
+        ("zip byte", lambda d: flip(os.path.join(d, [f for f in os.listdir(d) if f.endswith(".zip")][0]), -30), "does not match"),
+        ("setup missing", lambda d: os.remove(os.path.join(d, "V3X-Setup.exe")), "missing"),
+    ]
+    for name, fn, want in cases:
+        rc, out = verify(variant(name.replace(" ", "_"), fn))
+        check("verify-release: tampered %s -> refused rc=8 (%s)" % (name, want), rc == 8 and want in out and "verify-release: ok" not in out, out)
+    d = variant("self", lambda d: None)
+    flip(os.path.join(d, "V3X-Setup.exe"), 0x50)      # DOS stub text: the exe still runs
+    rc, out = verify(d, use=os.path.join(d, "V3X-Setup.exe"))
+    check("verify-release: a modified setup checking itself -> rc=8 (its own hash is not the signed one)", rc == 8 and "not the one compat.json names" in out, out)
+    def other_version(d):
+        p = os.path.join(d, "compat.json")
+        data = open(p, "rb").read().replace(b'"v3x_version": "0.0.1-sigtest"', b'"v3x_version": "0.0.2"')
+        open(p, "wb").write(data)
+        sign_dir(d)
+    rc, out = verify(variant("version", other_version))
+    check("verify-release: validly signed compat.json of another version -> rc=8", rc == 8 and "compat.json is for V3X 0.0.2" in out, out)
+
+    fails =[n for n, ok in RESULTS if not ok]
     print("\n%d/%d passed%s" % (len(RESULTS) - len(fails), len(RESULTS), "" if not fails else "; FAILED: " + "; ".join(fails)))
     if not a.keep:
         shutil.rmtree(root, ignore_errors=True)

@@ -3,10 +3,11 @@ Mirrors the V3X runtime API: find_string, find_xref (RIP-relative lea/mov), func
 Usage as a script: re_vfs_lib.py <exe> dis <rva-hex> [max_insns]   disassemble the function containing rva
                    re_vfs_lib.py <exe> calls <rva-hex>              list direct call targets of that function
                    re_vfs_lib.py <exe> callers <rva-hex>            list direct E8 callers of an rva"""
-import bisect, re, struct, sys
+import bisect, os, re, struct, sys
 import pefile, capstone
 
-DEFAULT_EXE = r'D:\SteamLibrary\steamapps\common\Victoria 3\binaries\victoria3.exe'
+DEFAULT_EXE = os.environ.get('V3X_GAME_EXE') or os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), '..', '..', 'binaries', 'victoria3.exe')  # <game>/v3x/tools/ -> <game>/binaries/
 
 
 class Image:

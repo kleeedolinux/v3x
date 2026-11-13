@@ -3,7 +3,7 @@
     "v3x": {
       "type": "stdio",
       "command": "python",
-      "args": ["D:/SteamLibrary/steamapps/common/Victoria 3/v3x/mcp/v3x_mcp.py"],
+      "args": ["<path to your game>/Victoria 3/v3x/mcp/v3x_mcp.py"],
       "env": { "V3X_MCP_TIMEOUT": "60" }
     }
   }

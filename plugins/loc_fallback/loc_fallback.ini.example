@@ -1,0 +1,14 @@
+# loc_fallback: copy to binaries/v3x/loc_fallback.ini (every key optional; these are the defaults).
+# See docs/re/localization.md.
+[loc_fallback]
+
+# 0 = delete the generated fallback files and do nothing
+enabled = 1
+
+# 1 = also fill English keys of the vanilla game (clausewitz/jomini/game/DLC) missing in your language.
+# Vanilla is fully translated (7 keys in 1.15.1 for l_braz_por), so by default only mods are filled.
+also_fill_vanilla = 0
+
+# force a language id (l_braz_por, l_french, l_german, l_polish, l_russian, l_spanish, l_simp_chinese,
+# l_japanese, l_korean, l_turkish); empty = the "language" of Documents/Paradox Interactive/Victoria 3/pdx_settings.json
+language =

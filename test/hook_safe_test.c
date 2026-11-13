@@ -8,7 +8,9 @@
  * changing args, skip_original with a replacement return value, post changing the return value,
  * recursion through the hook, 4 threads at once, unhook/rehook, the callee's non-volatile
  * registers, the thunk's unwind entry, a stack walk from inside the original through the thunk,
- * and bad arguments. Exit code 0 = ALL OK. */
+ * bad arguments, and register preservation with 2 subscribers (entry rax/r11/xmm4-5/upper ymm reach
+ * the original; every register the original leaves, r8-r11/xmm4-5/upper ymm included, reaches the
+ * caller; only rax/xmm0 change when post sets the return value). Exit code 0 = ALL OK. */
 #include "../src/safe_hook.c"
 #include <stdio.h>
 #include <math.h>
@@ -114,6 +116,141 @@ static int frame_in(void *fn)
         if (rf == want) return i;
     }
     return -1;
+}
+
+/* ---- register preservation (WPO callers keep values in volatile registers across calls)
+ * Regs layout: gp[0..6] = rax, rcx, rdx, r8, r9, r10, r11; y[i] = ymm i (32 bytes) at +64+32i.
+ * reg_caller(fn, in, out): loads `in` into rax..r11 and ymm0-5 (xmm0-5 without AVX), calls fn,
+ * stores the registers fn's call left into `out`. reg_target: records its entry registers in
+ * g_rt_entry, then leaves g_rt_exit in them and returns. */
+typedef struct { uint64_t gp[8]; uint8_t y[6][32]; } Regs;
+Regs g_rt_entry, g_rt_exit;
+void reg_caller(void *fn, const Regs *in, Regs *out);
+void reg_target(void);
+#define RT_YS(base, op) \
+    op " ymmword ptr [" base "+64], ymm0\n\t" op " ymmword ptr [" base "+96], ymm1\n\t" \
+    op " ymmword ptr [" base "+128], ymm2\n\t" op " ymmword ptr [" base "+160], ymm3\n\t" \
+    op " ymmword ptr [" base "+192], ymm4\n\t" op " ymmword ptr [" base "+224], ymm5\n\t"
+#define RT_XS(base, op) \
+    op " xmmword ptr [" base "+64], xmm0\n\t" op " xmmword ptr [" base "+96], xmm1\n\t" \
+    op " xmmword ptr [" base "+128], xmm2\n\t" op " xmmword ptr [" base "+160], xmm3\n\t" \
+    op " xmmword ptr [" base "+192], xmm4\n\t" op " xmmword ptr [" base "+224], xmm5\n\t"
+#define RT_YL(base, op) \
+    op " ymm0, ymmword ptr [" base "+64]\n\t" op " ymm1, ymmword ptr [" base "+96]\n\t" \
+    op " ymm2, ymmword ptr [" base "+128]\n\t" op " ymm3, ymmword ptr [" base "+160]\n\t" \
+    op " ymm4, ymmword ptr [" base "+192]\n\t" op " ymm5, ymmword ptr [" base "+224]\n\t"
+#define RT_XL(base, op) \
+    op " xmm0, xmmword ptr [" base "+64]\n\t" op " xmm1, xmmword ptr [" base "+96]\n\t" \
+    op " xmm2, xmmword ptr [" base "+128]\n\t" op " xmm3, xmmword ptr [" base "+160]\n\t" \
+    op " xmm4, xmmword ptr [" base "+192]\n\t" op " xmm5, xmmword ptr [" base "+224]\n\t"
+__asm__(
+    ".intel_syntax noprefix\n"
+    ".text\n"
+    ".globl reg_caller\n"
+    ".def reg_caller; .scl 2; .type 32; .endef\n"
+    ".p2align 4\n"
+    "reg_caller:\n"
+    ".seh_proc reg_caller\n\t"
+    "push rbx\n\t" ".seh_pushreg rbx\n\t"
+    "push rsi\n\t" ".seh_pushreg rsi\n\t"
+    "sub rsp, 0x28\n\t" ".seh_stackalloc 0x28\n\t"
+    ".seh_endprologue\n\t"
+    "mov rbx, rcx\n\t"
+    "mov rsi, r8\n\t"
+    "cmp dword ptr [rip+v3x_sh_avx], 0\n\t"
+    "jle 1f\n\t"
+    RT_YL("rdx", "vmovups")
+    "jmp 2f\n"
+    "1:\n\t"
+    RT_XL("rdx", "movups")
+    "2:\n\t"
+    "mov rax, qword ptr [rdx]\n\t" "mov rcx, qword ptr [rdx+8]\n\t" "mov r8, qword ptr [rdx+24]\n\t"
+    "mov r9, qword ptr [rdx+32]\n\t" "mov r10, qword ptr [rdx+40]\n\t" "mov r11, qword ptr [rdx+48]\n\t"
+    "mov rdx, qword ptr [rdx+16]\n\t"
+    "call rbx\n\t"
+    "mov qword ptr [rsi], rax\n\t" "mov qword ptr [rsi+8], rcx\n\t" "mov qword ptr [rsi+16], rdx\n\t"
+    "mov qword ptr [rsi+24], r8\n\t" "mov qword ptr [rsi+32], r9\n\t" "mov qword ptr [rsi+40], r10\n\t"
+    "mov qword ptr [rsi+48], r11\n\t"
+    "cmp dword ptr [rip+v3x_sh_avx], 0\n\t"
+    "jle 3f\n\t"
+    RT_YS("rsi", "vmovups")
+    "vzeroupper\n\t"
+    "jmp 4f\n"
+    "3:\n\t"
+    RT_XS("rsi", "movups")
+    "4:\n\t"
+    "add rsp, 0x28\n\t"
+    "pop rsi\n\t"
+    "pop rbx\n\t"
+    "ret\n"
+    ".seh_endproc\n"
+    ".globl reg_target\n"
+    ".def reg_target; .scl 2; .type 32; .endef\n"
+    ".p2align 4\n"
+    "reg_target:\n\t"
+    ".byte 0x0f, 0x1f, 0x44, 0x00, 0x00\n\t"     /* 5-byte nop: room for MinHook's jmp */
+    "mov qword ptr [rip+g_rt_entry], rax\n\t"
+    "lea rax, [rip+g_rt_entry]\n\t"
+    "mov qword ptr [rax+8], rcx\n\t" "mov qword ptr [rax+16], rdx\n\t" "mov qword ptr [rax+24], r8\n\t"
+    "mov qword ptr [rax+32], r9\n\t" "mov qword ptr [rax+40], r10\n\t" "mov qword ptr [rax+48], r11\n\t"
+    "cmp dword ptr [rip+v3x_sh_avx], 0\n\t"
+    "jle 1f\n\t"
+    RT_YS("rax", "vmovups")
+    "lea rax, [rip+g_rt_exit]\n\t"
+    RT_YL("rax", "vmovups")
+    "jmp 2f\n"
+    "1:\n\t"
+    RT_XS("rax", "movups")
+    "lea rax, [rip+g_rt_exit]\n\t"
+    RT_XL("rax", "movups")
+    "2:\n\t"
+    "mov rcx, qword ptr [rax+8]\n\t" "mov rdx, qword ptr [rax+16]\n\t" "mov r8, qword ptr [rax+24]\n\t"
+    "mov r9, qword ptr [rax+32]\n\t" "mov r10, qword ptr [rax+40]\n\t" "mov r11, qword ptr [rax+48]\n\t"
+    "mov rax, qword ptr [rax]\n\t"
+    "ret\n"
+    ".att_syntax prefix\n");
+static void (*volatile preg_target)(void) = reg_target;
+
+/* Callbacks that wreck every volatile register (C code may use any of them, CRT memcpy uses ymm). */
+static const float g_junk = -1234.5f;
+static void clobber_regs(void)
+{
+    __asm__ volatile("mov $0xdead1, %%rcx\n\tmov $0xdead2, %%rdx\n\tmov $0xdead3, %%r8\n\tmov $0xdead4, %%r9\n\t"
+                     "mov $0xdead5, %%r10\n\tmov $0xdead6, %%r11\n\t"
+                     ::: "rcx", "rdx", "r8", "r9", "r10", "r11");
+    if (v3x_sh_avx > 0)
+        __asm__ volatile("vbroadcastss %0, %%ymm0\n\tvbroadcastss %0, %%ymm1\n\tvbroadcastss %0, %%ymm2\n\t"
+                         "vbroadcastss %0, %%ymm3\n\tvbroadcastss %0, %%ymm4\n\tvbroadcastss %0, %%ymm5\n\t"
+                         :: "m"(g_junk) : "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5");
+    else
+        __asm__ volatile("movss %0, %%xmm0\n\tshufps $0, %%xmm0, %%xmm0\n\tmovaps %%xmm0, %%xmm1\n\t"
+                         "movaps %%xmm0, %%xmm2\n\tmovaps %%xmm0, %%xmm3\n\tmovaps %%xmm0, %%xmm4\n\tmovaps %%xmm0, %%xmm5\n\t"
+                         :: "m"(g_junk) : "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5");
+}
+static volatile LONG g_rg_calls;
+static void rg_cb(V3X_HookCall *c) { (void)c; InterlockedIncrement(&g_rg_calls); clobber_regs(); }
+static int g_rg_setret;
+static void rg_post_ret(V3X_HookCall *c)
+{
+    InterlockedIncrement(&g_rg_calls); clobber_regs();
+    if (g_rg_setret) { c->ret = 0x5151; memset(c->xmm_ret.b, 0x61, 16); }
+}
+static void rg_pre_skip(V3X_HookCall *c) { InterlockedIncrement(&g_rg_calls); clobber_regs(); c->skip_original = 1; c->ret = 777; }
+
+static void rg_fill(Regs *r, uint64_t seed)
+{
+    memset(r, 0, sizeof *r);
+    for (int i = 0; i < 7; i++) r->gp[i] = seed * 0x1000 + 0x11 * (uint64_t)(i + 1);
+    for (int i = 0; i < 6; i++)
+        for (int j = 0; j < 32; j++) r->y[i][j] = (uint8_t)(seed * 16 + i * 32 + j + 1);
+}
+/* Compares GP regs (mask of gp indices) and ymm 0-5 (low 16 bytes; all 32 with AVX). */
+static int rg_same(const Regs *a, const Regs *b, unsigned gpmask, unsigned ymask, int *what)
+{
+    for (int i = 0; i < 7; i++) if ((gpmask >> i & 1) && a->gp[i] != b->gp[i]) { *what = i; return 0; }
+    size_t n = v3x_sh_avx > 0 ? 32 : 16;
+    for (int i = 0; i < 6; i++) if ((ymask >> i & 1) && memcmp(a->y[i], b->y[i], n)) { *what = 100 + i; return 0; }
+    return 1;
 }
 
 /* ---- threads */
@@ -274,6 +411,46 @@ int main(void)
     int i_th = frame_in(v3x_safe_thunk_address()), i_c = frame_in((void *)walk_caller), i_m = frame_in((void *)main);
     CHECK(i_th >= 0 && i_c > i_th && i_m > i_c, "hooked stack walk: thunk at %d, walk_caller at %d, main at %d", i_th, i_c, i_m);
     unhook((void *)fwalk);
+
+    /* registers: entry state reaches the original, exit state reaches the caller (2 subscribers) */
+    {
+        Regs in, out; int w = -1;
+        static int own1, own2;
+        rg_fill(&in, 1); rg_fill(&g_rt_exit, 2);
+        memset(&out, 0, sizeof out);
+        reg_caller((void *)preg_target, &in, &out);
+        CHECK(rg_same(&g_rt_entry, &in, 0x5f, 0x3f, &w) && rg_same(&out, &g_rt_exit, 0x7f, 0x3f, &w),
+              "register test harness, unhooked (avx %d, diff %d)", v3x_sh_avx, w);
+        CHECK(v3x_hook_add_safe(&own1, (void *)reg_target, rg_cb, rg_cb, NULL, NULL) == 0 &&
+              v3x_hook_add_safe(&own2, (void *)reg_target, rg_cb, rg_post_ret, NULL, NULL) == 0,
+              "hook_safe reg_target with 2 subscribers");
+        g_rg_calls = 0; g_rg_setret = 0; w = -1;
+        memset(&g_rt_entry, 0, sizeof g_rt_entry); memset(&out, 0, sizeof out);
+        reg_caller((void *)preg_target, &in, &out);
+        CHECK(g_rg_calls == 4 && rg_same(&g_rt_entry, &in, 0x5f, 0x3f, &w),
+              "original sees caller's rax/rcx/rdx/r8/r9/r11/ymm0-5 after clobbering pre callbacks (calls %ld, diff %d)",
+              g_rg_calls, w);
+        w = -1;
+        CHECK(rg_same(&out, &g_rt_exit, 0x7f, 0x3f, &w),
+              "caller sees rax/rcx/rdx/r8-r11/xmm4-5/full ymm0-5 as the original left them (diff %d)", w);
+        g_rg_setret = 1; w = -1;
+        memset(&out, 0, sizeof out);
+        reg_caller((void *)preg_target, &in, &out);
+        uint8_t x61[16]; memset(x61, 0x61, 16);
+        int ok = rg_same(&out, &g_rt_exit, 0x7e, 0x3e, &w) && out.gp[0] == 0x5151 && !memcmp(out.y[0], x61, 16) &&
+                 (v3x_sh_avx <= 0 || !memcmp(out.y[0] + 16, g_rt_exit.y[0] + 16, 16));
+        CHECK(ok, "post sets ret/xmm_ret: only rax and low xmm0 change (diff %d)", w);
+        g_rg_setret = 0;
+        CHECK(v3x_hook_remove(&own2, (void *)reg_target, NULL) == 0 &&
+              v3x_hook_add_safe(&own2, (void *)reg_target, rg_pre_skip, rg_cb, NULL, NULL) == 0, "resubscribe with skip");
+        g_rg_calls = 0; w = -1;
+        memset(&g_rt_entry, 0, sizeof g_rt_entry); memset(&out, 0, sizeof out);
+        reg_caller((void *)preg_target, &in, &out);
+        CHECK(g_rg_calls == 4 && g_rt_entry.gp[1] == 0 && out.gp[0] == 777 && rg_same(&out, &in, 0x5e, 0x3e, &w),
+              "skip_original: rax = ret, other registers = caller's entry values (calls %ld, diff %d)", g_rg_calls, w);
+        CHECK(v3x_hook_remove(&own1, (void *)reg_target, NULL) == 0 && v3x_hook_remove(&own2, (void *)reg_target, NULL) == 0,
+              "unsubscribe reg_target");
+    }
 
     /* threads */
     memset(&g_thr, 0, sizeof g_thr);

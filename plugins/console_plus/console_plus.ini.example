@@ -27,12 +27,33 @@ log_installs=1
 # scan_frames      check the engine's command registry every N frames (new commands get a
 #                  completer; nothing is done while the registry does not change). 10..100000.
 scan_frames=120
+# names            1 = Tab also completes from DISPLAY NAMES in the game's current language
+#                  (case and accents do not matter): `tag Prus<Tab>` -> PRU, `own Sao_Pa<Tab>`
+#                  -> STATE_SAO_PAULO (write blanks as _ or leave them out), `event <title><Tab>`,
+#                  laws, goods, cultures, ... and numeric ids of live objects from their names:
+#                  `invalidate_state Bahia<Tab>` -> its state id, also characters, countries,
+#                  interest groups, buildings ("name@TAG" narrows by owner: landowners@PRU).
+#                  Several matches are listed as "ID  (Name, owner)" in the console, Tab cycles.
+#                  In-game `find <text>` + Tab lists matches of every kind; V3X `find <text>` searches
+#                  what the in-game console has already indexed. 0 = ids only, no hooks.
+names=1
+# wildcards        1 = on Enter in the game console, a wildcard in an argument the command describes
+#                  as a country runs the line once per matching country, through the console itself
+#                  (history, output and the command's own checks as if typed), then prints
+#                  "console_plus: ran <command> for N subjects (N ok)":
+#                    *      every country that is a subject of anyone   add_liberty_desire * -100
+#                    M:*    every subject of the player's country       add_liberty_desire M:* -100
+#                    TAG:*  every subject of TAG                         add_liberty_desire GBR:* 20
+#                    ALL    every country
+#                  One wildcard per line. Needs names=1 (the live country list). 0 = off, no hook.
+wildcards=1
 
 [commands]
 # <command> = <kind> [<kind> ...]   one kind per argument; this wins over the automatic choice
 # and over the engine's own completer. Kinds: country state_region strategic_region law goods
 # journal building production_method culture religion ideology pop_type decree tech movement
 # country_type war_goal company_type social_hierarchy strait ig_type subgoal event none
+# and numeric ids (completed from display names only): state_id country_id character_id ig_id building_id
 # Examples (these are already chosen automatically from the engine's descriptions):
 # own = state_region country
 # tag = country

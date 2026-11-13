@@ -16,7 +16,8 @@ site-packages where pefile is usually installed ("No module named 'pefile'").
 import argparse, bisect, csv, os, re, struct, sys
 import pefile
 
-DEFAULT_EXE = r"D:\SteamLibrary\steamapps\common\Victoria 3\binaries\victoria3.exe"
+DEFAULT_EXE = os.environ.get("V3X_GAME_EXE") or os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "..", "binaries", "victoria3.exe")  # <game>/v3x/tools/ -> <game>/binaries/
 LEA = re.compile(rb'[\x40-\x4f]\x8d[\x05\x0d\x15\x1d\x25\x2d\x35\x3d]', re.S)
 CALL = re.compile(rb'\xe8', re.S)
 UNW_FLAG_CHAININFO = 4

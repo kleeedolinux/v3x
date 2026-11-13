@@ -13,6 +13,10 @@ typedef struct {
     int index_workshop;  /* 1: index roots under steamapps/workshop/content/529340/ (default 1) */
     int index_dlc;       /* 1: index <game>/game/dlc/<x> roots (default 1) */
     int index_local;     /* 1: index Documents/.../Victoria 3/mod/<x> roots (default 0: mods being edited) */
+    int index_game;      /* 1: index the install roots <game>/{game,jomini,clausewitz,platform_specific_game_data} (default 1) */
+    int index_packs;     /* 1: index <game>/binaries/v3x/content_packs/<x> roots (default 1) */
+    int index_cache;     /* 1: reuse indexes across launches via binaries/v3x/mod_loader.index (default 1) */
+    int log_misses;      /* measure: keep the first N misses the index could NOT predict for the report (default 32) */
     int verify_every;    /* mode=on: every Nth skipped miss is re-checked with the real call; a mismatch
                             turns the cache off for the session (default 64, 0 = never) */
     int report;          /* 1: write v3x/mod_report.txt after every load transition (default 1) */
@@ -33,10 +37,14 @@ int ml_in_list(const char *list, const char *name);
  * "." / ".." components, components ending in '.' or ' ', DOS device names, too long. */
 int ml_norm(const char *name, char *out, size_t cap);
 
+/* ml_norm + ml_hash in one pass without a buffer (the hot path): returns the key length and sets *hash
+ * (== ml_hash of the ml_norm key), or -1 under exactly the same rules as ml_norm. */
+int ml_key(const char *name, uint64_t *hash);
+
 /* Root path (PhysFS DIR opaque, e.g. "D:/x/y\\") -> lower-case, '/' separators, no trailing '/'. */
 void ml_norm_root(const char *in, char *out, size_t cap);
 
-enum { ML_ROOT_OTHER = 0, ML_ROOT_WORKSHOP, ML_ROOT_DLC, ML_ROOT_LOCAL };
+enum { ML_ROOT_OTHER = 0, ML_ROOT_WORKSHOP, ML_ROOT_DLC, ML_ROOT_LOCAL, ML_ROOT_GAME, ML_ROOT_PACK };
 /* game_norm / docs_norm: ml_norm_root of <game> (folder that contains game/) and of the
  * Documents/Paradox Interactive/Victoria 3 folder (may be ""). */
 int ml_classify(const char *root_norm, const char *game_norm, const char *docs_norm);
@@ -67,5 +75,35 @@ int ml_parse_playset(const char *json, void (*cb)(const char *path, void *u), vo
  * advances *pos; 0 at end. */
 enum { ML_ERR_OTHER = 0, ML_ERR_PARSE, ML_ERR_DUPKEY, ML_ERR_LOC };
 int ml_errlog_next(const char *text, size_t *pos, char *path, size_t pathn, int *kind);
+
+/* ---- compact lookup index (what the hooks use) ----------------------------------------------------
+ * Per root: sorted, deduplicated array of 64-bit FNV-1a hashes of every key (files and dirs), 8 bytes per
+ * key. A hash collision can only turn a miss into "maybe present" = the engine is asked (safe direction);
+ * a present key is never reported absent. Lookup = interpolation search (uniform hashes), binary fallback. */
+uint64_t ml_hash(const char *key, size_t len);
+typedef struct { uint64_t *h; uint32_t n, cap; } ml_hv;
+int ml_hv_push(ml_hv *v, uint64_t h);          /* 0 ok, -1 oom */
+void ml_hv_finish(ml_hv *v);                    /* sort + dedupe + shrink */
+int ml_hv_has(const ml_hv *v, uint64_t h);
+void ml_hv_free(ml_hv *v);
+
+/* Directories of a root with each one's last-write time (FILETIME as u64, read BEFORE the directory was
+ * enumerated). Adding, removing or renaming an entry changes its parent directory's mtime, so "every
+ * directory still has its recorded mtime" == "the set of names is unchanged" (the persisted signature). */
+typedef struct { char *names; size_t nlen, ncap; uint32_t *off; uint64_t *mt; uint32_t n, cap; } ml_dirs;
+int ml_dirs_add(ml_dirs *d, const char *rel, uint64_t mtime);   /* rel "" = the root itself */
+const char *ml_dirs_name(const ml_dirs *d, uint32_t i);
+void ml_dirs_free(ml_dirs *d);
+
+/* binaries/v3x/mod_loader.index: "V3XMLIX\0", u32 version, u32 nroots, per root { u16 len, root (normalized),
+ * u32 ndirs, ndirs x { u16 len, name, u64 mtime }, u32 nhash, nhash x u64 (strictly increasing) },
+ * u64 FNV-1a of all previous bytes. Any bound / order / checksum / version error = whole file rejected. */
+#define ML_IXFILE_VERSION 1
+typedef struct { char root[600]; ml_dirs dirs; ml_hv hv; } ml_ixroot;
+/* bytes written (0 if cap too small); out NULL = size only */
+size_t ml_ixfile_write(const ml_ixroot *const *r, int n, uint8_t *out, size_t cap);
+/* number of roots (>= 0), *out = array to free with ml_ixfile_free; -1 = corrupt (nothing allocated) */
+int ml_ixfile_read(const uint8_t *buf, size_t len, ml_ixroot **out);
+void ml_ixfile_free(ml_ixroot *r, int n);
 
 #endif

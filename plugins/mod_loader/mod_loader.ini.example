@@ -11,6 +11,15 @@ mode = measure
 index_workshop = 1     # steamapps/workshop/content/529340/<id>
 index_dlc = 1          # <game>/game/dlc/<dlc>
 index_local = 0        # Documents/Paradox Interactive/Victoria 3/mod/<x> (often edited live)
+index_game = 1         # <game>/game, jomini, clausewitz, platform_specific_game_data (install, static)
+index_packs = 1        # binaries/v3x/content_packs/<pack> (restart after editing a pack while mode=on)
+
+# reuse the indexes across launches (binaries/v3x/mod_loader.index); a root is rebuilt when any of its
+# directories has a different last-write time (= a file was added, removed or renamed)
+index_cache = 1
+
+# measure: list the first N misses the index could not predict in the report (0..1024)
+log_misses = 32
 
 # mode=on: every Nth skipped miss is re-checked with the real call; one mismatch = cache off (0 = never)
 verify_every = 64

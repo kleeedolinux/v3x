@@ -57,10 +57,12 @@ typedef struct {
     char norm[600];
     int cls, play, hidden;
     volatile LONG state;
-    ml_set set;
+    ml_hv hv;                /* compact lookup index: sorted 64-bit key hashes */
+    ml_dirs dirs;            /* directories + mtimes = persisted signature */
+    int from_cache;
     double build_ms;
     volatile LONG64 st_n, st_miss, op_n, op_miss, miss_qpc, hit_qpc, would_n, would_qpc, skipped, verified,
-        mismatch, fp, hidden_n;
+        mismatch, fp, hidden_n, unpred_n;
 } root_t;
 
 typedef struct {
@@ -83,6 +85,8 @@ static volatile LONG g_disabled;           /* mode=on cache turned off after a v
 static int g_active;                       /* hooks installed */
 static char g_game_norm[600], g_docs_norm[600], g_game_native[600], g_docs_native[600];
 static char g_mismatch[16][300];
+static char g_unpred[1024][200];          /* measure: misses the index could not predict (why + root + name) */
+static volatile LONG g_nunpred;
 static volatile LONG g_nmismatch;
 static LARGE_INTEGER g_freq;
 static volatile LONG g_reports, g_errlog_done;
@@ -97,11 +101,29 @@ static void (*g_set_err)(void) = set_notfound_tls;   /* replaced by the offline 
 
 static double qms(LONG64 t) { return g_freq.QuadPart ? (double)t * 1000.0 / (double)g_freq.QuadPart : 0; }
 
-/* ---- index build -------------------------------------------------------------------------------- */
+/* ---- index build / persisted cache -------------------------------------------------------------- */
 
-static int index_dir(ml_set *s, wchar_t *path, size_t plen, char *key, size_t klen, int depth)
+/* walk(): calls sink(u, key, len, is_dir) for every entry under the root (keys lower-case ASCII, '/'),
+ * and dir(u, rel, mtime) for the root ("") and every directory with its mtime read BEFORE it is listed. */
+typedef struct {
+    int (*sink)(void *u, const char *key, size_t len, int is_dir);
+    int (*dir)(void *u, const char *rel, uint64_t mtime);
+    void *u;
+} walk_t;
+
+static int dir_mtime(const wchar_t *path, uint64_t *mt)
+{
+    WIN32_FILE_ATTRIBUTE_DATA a;
+    if (!GetFileAttributesExW(path, GetFileExInfoStandard, &a) || !(a.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) return 0;
+    *mt = ((uint64_t)a.ftLastWriteTime.dwHighDateTime << 32) | a.ftLastWriteTime.dwLowDateTime;
+    return 1;
+}
+
+static int walk(const walk_t *w, wchar_t *path, size_t plen, char *key, size_t klen, int depth)
 {
     if (depth > 24 || plen + 4 >= 1024) return 0;
+    uint64_t mt;
+    if (w->dir && (!dir_mtime(path, &mt) || w->dir(w->u, key, mt))) return 0;
     wcscpy(path + plen, L"\\*");
     WIN32_FIND_DATAW fd;
     HANDLE h = FindFirstFileExW(path, FindExInfoBasic, &fd, FindExSearchNameMatch, NULL, FIND_FIRST_EX_LARGE_FETCH);
@@ -118,14 +140,14 @@ static int index_dir(ml_set *s, wchar_t *path, size_t plen, char *key, size_t kl
         if (kl) key[kl++] = '/';
         for (int i = 0; i < ul - 1; i++) key[kl++] = (char)(u[i] >= 'A' && u[i] <= 'Z' ? u[i] + 32 : u[i]);
         key[kl] = 0;
-        int dir = (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
-        if (ml_set_add(s, key, kl, dir) < 0) { ok = 0; break; }
-        if (dir) {
+        int isdir = (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+        if (w->sink(w->u, key, kl, isdir)) { ok = 0; break; }
+        if (isdir) {
             size_t nl = wcslen(n);
             if (plen + 1 + nl + 4 >= 1024) { ok = 0; break; }
             path[plen] = L'\\';
             wcscpy(path + plen + 1, n);
-            ok = index_dir(s, path, plen + 1 + nl, key, kl, depth + 1);
+            ok = walk(w, path, plen + 1 + nl, key, kl, depth + 1);
             path[plen] = 0;
             if (!ok) break;
         }
@@ -136,23 +158,138 @@ static int index_dir(ml_set *s, wchar_t *path, size_t plen, char *key, size_t kl
     return ok;
 }
 
+static size_t native_root(const char *path, wchar_t *w)   /* opaque -> "D:\x\y" (no trailing '\'), 0 = bad */
+{
+    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, w, 1000) <= 0) return 0;
+    size_t n = wcslen(w);
+    while (n && (w[n - 1] == L'\\' || w[n - 1] == L'/')) w[--n] = 0;
+    for (size_t i = 0; i < n; i++) if (w[i] == L'/') w[i] = L'\\';
+    return n;
+}
+
+static int hv_sink(void *u, const char *k, size_t n, int d) { (void)d; return ml_hv_push(&((root_t *)u)->hv, ml_hash(k, n)); }
+static int dirs_sink(void *u, const char *rel, uint64_t mt) { return ml_dirs_add(&((root_t *)u)->dirs, rel, mt); }
+static int set_sink(void *u, const char *k, size_t n, int d) { return ml_set_add((ml_set *)u, k, n, d) < 0; }
+
+/* keys of a root as a string set (report only: overrides / BOM need the names) */
+static int list_keys(const root_t *r, ml_set *s)
+{
+    wchar_t w[1024];
+    char key[1024] = "";
+    size_t n = native_root(r->path, w);
+    walk_t wk = {set_sink, NULL, s};
+    return n && walk(&wk, w, n, key, 0, 0);
+}
+
+/* persisted index: loaded once at plugin load, consumed by build_index, rewritten when roots changed */
+static ml_ixroot *g_cache;
+static int g_ncache;
+static volatile LONG *g_cache_taken;
+static volatile LONG g_dirty;
+static char g_cache_note[160];
+
+static void cache_load(void)
+{
+    char p[700];
+    ml_ixfile_free(g_cache, g_ncache);           /* (re)load: drop any previous cache */
+    free((void *)g_cache_taken);
+    g_cache = NULL; g_ncache = 0; g_cache_taken = NULL;
+    snprintf(p, sizeof p, "%smod_loader.index", api->v3x_dir());
+    size_t n = 0;
+    FILE *f = fopen(p, "rb");
+    if (!f) { snprintf(g_cache_note, sizeof g_cache_note, "no index file"); return; }
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    uint8_t *b = sz > 0 && sz < (256L << 20) ? malloc((size_t)sz) : NULL;
+    if (b) n = fread(b, 1, (size_t)sz, f);
+    fclose(f);
+    int k = b && n == (size_t)sz ? ml_ixfile_read(b, n, &g_cache) : -1;
+    free(b);
+    if (k < 0) { g_cache = NULL; snprintf(g_cache_note, sizeof g_cache_note, "index file corrupt/old -> ignored, full rebuild"); return; }
+    g_ncache = k;
+    g_cache_taken = calloc(k ? k : 1, sizeof *g_cache_taken);
+    snprintf(g_cache_note, sizeof g_cache_note, "index file: %d root(s), %ld bytes", k, sz);
+}
+
+/* adopts the cached index of r if every recorded directory still has its mtime. 1 = adopted */
+static int cache_try(root_t *r, const wchar_t *w, size_t wn)
+{
+    for (int i = 0; i < g_ncache; i++) {
+        if (strcmp(g_cache[i].root, r->norm) || InterlockedExchange(&g_cache_taken[i], 1)) continue;
+        ml_ixroot *c = &g_cache[i];
+        wchar_t p[1100];
+        int ok = c->dirs.n > 0 && !strcmp(ml_dirs_name(&c->dirs, 0), "");
+        for (uint32_t k = 0; ok && k < c->dirs.n; k++) {
+            const char *rel = ml_dirs_name(&c->dirs, k);
+            uint64_t mt;
+            wcscpy(p, w);
+            size_t pl = wn;
+            if (*rel) {
+                p[pl++] = L'\\';
+                int m = MultiByteToWideChar(CP_UTF8, 0, rel, -1, p + pl, (int)(1100 - pl));
+                if (m <= 0) { ok = 0; break; }
+                for (wchar_t *q = p + pl; *q; q++) if (*q == L'/') *q = L'\\';
+            }
+            ok = dir_mtime(p, &mt) && mt == c->dirs.mt[k];
+        }
+        if (!ok) return 0;
+        r->hv = c->hv; memset(&c->hv, 0, sizeof c->hv);         /* steal */
+        r->dirs = c->dirs; memset(&c->dirs, 0, sizeof c->dirs);
+        return 1;
+    }
+    return 0;
+}
+
 static void build_index(root_t *r)
 {
     LARGE_INTEGER t0, t1;
     QueryPerformanceCounter(&t0);
     wchar_t w[1024];
     char key[1024] = "";
-    int ok = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, r->path, -1, w, 1000) > 0;
-    size_t n = ok ? wcslen(w) : 0;
-    while (n && (w[n - 1] == L'\\' || w[n - 1] == L'/')) w[--n] = 0;
-    for (size_t i = 0; i < n; i++) if (w[i] == L'/') w[i] = L'\\';
-    ok = ok && n && index_dir(&r->set, w, n, key, 0, 0);
+    size_t n = native_root(r->path, w);
+    int ok = 0;
+    if (n && cfg.index_cache && cache_try(r, w, n)) { ok = 1; r->from_cache = 1; }
+    else if (n) {
+        walk_t wk = {hv_sink, dirs_sink, r};
+        ok = walk(&wk, w, n, key, 0, 0);
+        if (ok) { ml_hv_finish(&r->hv); InterlockedExchange(&g_dirty, 1); }
+    }
     QueryPerformanceCounter(&t1);
     r->build_ms = qms(t1.QuadPart - t0.QuadPart);
-    if (!ok) ml_set_free(&r->set);
+    if (!ok) { ml_hv_free(&r->hv); ml_dirs_free(&r->dirs); }
     InterlockedExchange(&r->state, ok ? IX_READY : IX_FAILED);
-    if (api) api->log(TAG, "index %s: %s, %u files %u dirs, %.1f ms", r->norm, ok ? "ready" : "FAILED (root not indexed)",
-                      r->set.nfiles, r->set.ndirs, r->build_ms);
+    if (api) api->log(TAG, "index %s: %s, %u keys %u dirs, %.2f ms", r->norm,
+                      !ok ? "FAILED (root not indexed)" : r->from_cache ? "reused (signature unchanged)" : "built",
+                      r->hv.n, r->dirs.n, r->build_ms);
+}
+
+/* writes every READY root to mod_loader.index (tmp + rename). Returns bytes or 0. */
+static size_t cache_save(void)
+{
+    const ml_ixroot *rs[MAX_ROOTS];
+    static ml_ixroot tmp[MAX_ROOTS];
+    int n = 0;
+    for (LONG k = 0; k < g_nroots; k++) {
+        root_t *r = &g_roots[k];
+        if (r->state != IX_READY) continue;
+        snprintf(tmp[n].root, sizeof tmp[n].root, "%s", r->norm);
+        tmp[n].dirs = r->dirs; tmp[n].hv = r->hv;               /* shallow views, not freed */
+        rs[n] = &tmp[n]; n++;
+    }
+    size_t sz = ml_ixfile_write(rs, n, NULL, 0);
+    uint8_t *b = malloc(sz);
+    if (!b || ml_ixfile_write(rs, n, b, sz) != sz) { free(b); return 0; }
+    char p[700], pt[720];
+    snprintf(p, sizeof p, "%smod_loader.index", api->v3x_dir());
+    snprintf(pt, sizeof pt, "%s.tmp", p);
+    FILE *f = fopen(pt, "wb");
+    size_t wr = f ? fwrite(b, 1, sz, f) : 0;
+    if (f) fclose(f);
+    free(b);
+    if (wr != sz || !MoveFileExA(pt, p, MOVEFILE_REPLACE_EXISTING)) { remove(pt); return 0; }
+    InterlockedExchange(&g_dirty, 0);
+    return sz;
 }
 
 static void CALLBACK build_cb(PTP_CALLBACK_INSTANCE inst, void *ctx) { (void)inst; build_index((root_t *)ctx); }
@@ -162,7 +299,8 @@ static void CALLBACK build_cb(PTP_CALLBACK_INSTANCE inst, void *ctx) { (void)ins
 static int indexable(int cls)
 {
     return (cls == ML_ROOT_WORKSHOP && cfg.index_workshop) || (cls == ML_ROOT_DLC && cfg.index_dlc) ||
-           (cls == ML_ROOT_LOCAL && cfg.index_local);
+           (cls == ML_ROOT_LOCAL && cfg.index_local) || (cls == ML_ROOT_GAME && cfg.index_game) ||
+           (cls == ML_ROOT_PACK && cfg.index_packs);
 }
 
 static root_t *root_find(void *opaque)
@@ -192,7 +330,8 @@ static root_t *root_get(void *opaque)
         r->play = -1;
         for (int i = g_nplay - 1; i >= 0; i--)
             if (!strcmp(g_play[i].norm, r->norm)) { r->play = i; break; }
-        if (r->play >= 0 && g_play[r->play].hidden && r->cls != ML_ROOT_DLC && g_err_off >= 0) r->hidden = 1;
+        if (r->play >= 0 && g_play[r->play].hidden && r->cls != ML_ROOT_DLC && r->cls != ML_ROOT_GAME && g_err_off >= 0)
+            r->hidden = 1;
         int want = indexable(r->cls) && !r->hidden;
         r->state = want ? IX_PENDING : IX_NONE;
         MemoryBarrier();
@@ -215,12 +354,11 @@ static void note_mismatch(root_t *r, const char *name, int is_open)
 /* one PhysFS DIR probe (stat or openRead) on root r */
 static uintptr_t probe(root_t *r, int is_open, pass8_fn orig, PASS8_ARGS)
 {
-    char key[1024];
     int pred = -1;
     if (r->state == IX_READY) {
         MemoryBarrier();
-        int kl = ml_norm((const char *)a1_, key, sizeof key);
-        if (kl >= 0) pred = ml_set_has(&r->set, key, (size_t)kl);
+        uint64_t h;
+        if (ml_key((const char *)a1_, &h) >= 0) pred = ml_hv_has(&r->hv, h);
     }
     if (cfg.mode == ML_ON && pred == 0 && !g_disabled) {
         LONG64 k = InterlockedIncrement64(&r->skipped);
@@ -260,6 +398,16 @@ static uintptr_t probe(root_t *r, int is_open, pass8_fn orig, PASS8_ARGS)
     else if (pred == 0) {
         InterlockedIncrement64(&r->would_n);
         InterlockedAdd64(&r->would_qpc, dt);
+    } else if (pred < 0 && !hit && !r->hidden) {
+        InterlockedIncrement64(&r->unpred_n);
+        if (g_nunpred < cfg.log_misses) {
+            LONG k = InterlockedIncrement(&g_nunpred) - 1;
+            if (k < cfg.log_misses && k < 1024)
+                snprintf(g_unpred[k], sizeof g_unpred[k], "%s %s %s: %s",
+                         r->state == IX_READY ? "unsafe-name" : r->state == IX_NONE ? "root-not-indexed" :
+                         r->state == IX_PENDING ? "index-building" : "index-failed",
+                         is_open ? "open" : "stat", ml_root_leaf(r->norm), (const char *)a1_);
+        }
     }
     return res;
 }
@@ -466,16 +614,19 @@ static void summary_line(char *out, size_t n)
     for (LONG k = 0; k < g_nroots; k++) ix += g_roots[k].state == IX_READY;
     snprintf(out, n,
              "mode=%s%s roots %ld (indexed %d) | stat %lld (miss %lld) open %lld (miss %lld) | time in misses %.0f ms | "
-             "index-predicted misses %lld (%.0f ms) | skipped %lld (verified %lld) | mismatches %lld, false hits %lld",
+             "index-predicted misses %lld (%.0f ms) | skipped %lld (verified %lld) | coverage %.1f%% of misses | "
+             "mismatches %lld, false hits %lld",
              cfg.mode == ML_ON ? "on" : cfg.mode == ML_MEASURE ? "measure" : "off", g_disabled ? " (cache DISABLED)" : "",
-             g_nroots, ix, t[0], t[1], t[2], t[3], qms(t[4]), t[5], qms(t[6]), t[7], t[10], t[8], t[9]);
+             g_nroots, ix, t[0], t[1], t[2], t[3], qms(t[4]), t[5], qms(t[6]), t[7], t[10],
+             100.0 * (double)(t[5] + t[7] - t[10]) / (double)(t[1] + t[3] + t[7] - t[10] > 0 ? t[1] + t[3] + t[7] - t[10] : 1),
+             t[8], t[9]);
 }
 
 static int has_higher(int play, const char *key, size_t kl, int *who)
 {
     for (int j = g_nplay - 1; j > play; j--) {
         root_t *h = root_of_play(j);
-        if (h && h->state == IX_READY && ml_set_has(&h->set, key, kl)) { *who = j; return 1; }
+        if (h && h->state == IX_READY && ml_hv_has(&h->hv, ml_hash(key, kl))) { *who = j; return 1; }
     }
     return 0;
 }
@@ -493,6 +644,18 @@ static void write_report(void)
     fprintf(f, "# PhysFS DIR stat=%p openRead=%p err_off=0x%x | docs %s\n", g_stat_fn, g_open_fn, (unsigned)g_err_off, g_docs_native);
     summary_line(line, sizeof line);
     fprintf(f, "%s\n", line);
+    {
+        int nc = 0, nb = 0; size_t mem = 0; double bms = 0;
+        for (LONG k = 0; k < g_nroots; k++) {
+            root_t *r = &g_roots[k];
+            if (r->state != IX_READY) continue;
+            if (r->from_cache) nc++; else nb++;
+            bms += r->build_ms;
+            mem += (size_t)r->hv.cap * 8 + r->dirs.ncap + (size_t)r->dirs.cap * 12;
+        }
+        fprintf(f, "# index: %d root(s) reused from mod_loader.index, %d built, %.1f ms total, %zu KB in memory | %s\n",
+                nc, nb, bms, mem / 1024, g_cache_note);
+    }
 
     fprintf(f, "\n## playset (content_load.json, %d mods; LAST = searched first = wins file conflicts)\n", g_nplay);
     for (int i = 0; i < g_nplay; i++) {
@@ -512,12 +675,17 @@ static void write_report(void)
     for (LONG k = 0; k < g_nroots; k++) {
         root_t *r = &g_roots[k];
         char ix[40];
-        if (r->state == IX_READY) snprintf(ix, sizeof ix, "%uf/%.0fms", r->set.nfiles, r->build_ms);
+        if (r->state == IX_READY) snprintf(ix, sizeof ix, "%uk/%.1fms%s", r->hv.n, r->build_ms, r->from_cache ? "/c" : "");
         else snprintf(ix, sizeof ix, "%s", r->hidden ? "hidden" : r->state == IX_PENDING ? "building" : r->state == IX_FAILED ? "FAILED" : "-");
         fprintf(f, "  %-24.24s %-8s %-14s %9lld %9lld %9lld %9lld %10.1f %10.1f %9lld %5lld\n", ml_root_leaf(r->norm),
                 ml_class_name(r->cls), ix, r->st_n, r->st_miss, r->op_n, r->op_miss, qms(r->miss_qpc), qms(r->would_qpc),
                 r->skipped, r->mismatch);
     }
+    LONG nu = g_nunpred;
+    LONG64 un = 0;
+    for (LONG k = 0; k < g_nroots; k++) un += g_roots[k].unpred_n;
+    fprintf(f, "\n## misses the index could not predict: %lld (first %ld)\n", un, nu < cfg.log_misses ? nu : cfg.log_misses);
+    for (LONG i = 0; i < nu && i < cfg.log_misses && i < 1024; i++) fprintf(f, "  %s\n", g_unpred[i]);
     LONG nm = g_nmismatch;
     fprintf(f, "\n## index mismatches (must be 0; any = cache unsafe): %ld\n", nm);
     for (LONG i = 0; i < nm && i < 16; i++) fprintf(f, "  %s\n", g_mismatch[i]);
@@ -530,7 +698,9 @@ static void write_report(void)
         if (!r || r->state != IX_READY) continue;
         int over_game = 0, over_dlc = 0, nobom = 0, idx = 0, flags;
         const char *key;
-        while ((idx = ml_set_next(&r->set, idx, &key, &flags)) >= 0) {
+        ml_set ks = {0};
+        if (!list_keys(r, &ks)) { ml_set_free(&ks); fprintf(f, "  %s: cannot list files\n", g_play[i].leaf); continue; }
+        while ((idx = ml_set_next(&ks, idx, &key, &flags)) >= 0) {
             idx++;
             if (flags & ML_SET_DIR) continue;
             size_t kl = strlen(key);
@@ -542,7 +712,7 @@ static void write_report(void)
                 continue;
             }
             for (LONG k = 0; k < g_nroots; k++)
-                if (g_roots[k].cls == ML_ROOT_DLC && g_roots[k].state == IX_READY && ml_set_has(&g_roots[k].set, key, kl)) { over_dlc++; break; }
+                if (g_roots[k].cls == ML_ROOT_DLC && g_roots[k].state == IX_READY && ml_hv_has(&g_roots[k].hv, ml_hash(key, kl))) { over_dlc++; break; }
             char gdir[700];
             snprintf(gdir, sizeof gdir, "%s/game", g_game_native);
             if (file_exists_u8(gdir, key)) over_game++;
@@ -562,6 +732,7 @@ static void write_report(void)
                 }
             }
         }
+        ml_set_free(&ks);
         if (over_game || over_dlc || nobom)
             fprintf(f, "  %-14s replaces %d vanilla file(s), %d DLC file(s)%s\n", g_play[i].leaf, over_game, over_dlc,
                     nobom ? " | localization without BOM listed above" : "");
@@ -576,7 +747,11 @@ static void CALLBACK report_cb(PTP_CALLBACK_INSTANCE inst, void *ctx)
 {
     (void)inst; (void)ctx;
     AcquireSRWLockExclusive(&g_lock);   /* serializes writers; root_get() waits only on new roots */
-    write_report();
+    if (cfg.index_cache && g_dirty) {
+        size_t b = cache_save();
+        if (api) api->log(TAG, "index file %s (%zu bytes)", b ? "written" : "NOT written", b);
+    }
+    if (cfg.report) write_report();
     ReleaseSRWLockExclusive(&g_lock);
 }
 
@@ -588,7 +763,7 @@ static void on_transition(const char *name, void *data, void *user)
     char line[700];
     summary_line(line, sizeof line);
     api->log(TAG, "%s: %s", g_last_event, line);
-    if (cfg.report) TrySubmitThreadpoolCallback(report_cb, NULL, NULL);
+    if (cfg.report || cfg.index_cache) TrySubmitThreadpoolCallback(report_cb, NULL, NULL);
 }
 
 static void cmd_modload(const char *args, void *user)
@@ -639,6 +814,7 @@ V3X_EXPORT int v3x_plugin_load(const V3X_API *a)
     }
     if (cfg.mode == ML_OFF) { api->log(TAG, "mode=off: nothing hooked"); return 0; }
     paths_init();
+    if (cfg.index_cache) { cache_load(); api->log(TAG, "%s", g_cache_note); }
     snprintf(p, sizeof p, "%s\\content_load.json", g_docs_native);
     char *js = read_file(p, 1u << 20, NULL);
     int np = js ? ml_parse_playset(js, add_play, NULL) : -1;
@@ -672,8 +848,9 @@ V3X_EXPORT int v3x_plugin_load(const V3X_API *a)
         api->on_event("load_transition", on_transition, NULL);
         api->register_command("modload", "mod_loader: VFS probe stats + write v3x/mod_report.txt", cmd_modload, NULL);
     }
-    api->log(TAG, "ready: mode=%s, playset %d mod(s), index workshop=%d dlc=%d local=%d, verify_every=%d, skip_fatal=%d skip_mods='%s'",
-             cfg.mode == ML_ON ? "on" : "measure", np, cfg.index_workshop, cfg.index_dlc, cfg.index_local, cfg.verify_every,
+    api->log(TAG, "ready: mode=%s, playset %d mod(s), index workshop=%d dlc=%d local=%d game=%d packs=%d, verify_every=%d, skip_fatal=%d skip_mods='%s'",
+             cfg.mode == ML_ON ? "on" : "measure", np, cfg.index_workshop, cfg.index_dlc, cfg.index_local,
+             cfg.index_game, cfg.index_packs, cfg.verify_every,
              cfg.skip_fatal, cfg.skip_mods);
     return 0;
 }

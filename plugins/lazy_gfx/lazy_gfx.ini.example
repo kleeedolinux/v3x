@@ -1,0 +1,38 @@
+# lazy_gfx: texture load stage split + prefetch (docs/re/lazy_gfx.md)
+# Copy to binaries/v3x/lazy_gfx.ini. Without the ini the plugin runs as mode=measure.
+#   off     = no hooks
+#   measure = no behaviour change: per texture load, time in stat (PhysFS getRealDir probes), open (PhysFS
+#             openRead probes + open), read, decode (DDS / FreeImage png+jpg), upload (DX11 CreateTexture2D),
+#             obj (texture object incl. a second getRealDir for the file stamp); who requested it (return
+#             addresses), which thread, which load phase. Writes v3x/lazy_gfx_report.txt + lazy_gfx_textures.csv
+#             after every load transition and at exit, and v3x/lazy_gfx_prefetch.txt when the first Game load begins.
+#   on      = measure + prefetch: at start, background threads read the files listed in the previous run's
+#             lazy_gfx_prefetch.txt (only if size and mtime are unchanged) so the main thread hits the OS cache.
+mode = measure
+csv = 1
+max_records = 20000
+slow_log_ms = 100
+log_budget = 300
+# write the prefetch manifest: textures read before the first Game load begins (startup + main menu, any
+# thread); manifest_game = 1: also those of the first Game load (written when it ends)
+manifest = 1
+manifest_game = 0
+# mode=on only
+prefetch_threads = 4
+prefetch_max_mb = 1024
+# 1 = THREAD_MODE_BACKGROUND_BEGIN (very low I/O priority; may finish too late to help)
+prefetch_low_io = 0
+# processed-texture cache for png/jpg/tga (works in measure and on). Run order: build (one session) -> verify -> on
+#   off    = nothing
+#   build  = after the engine decoded a png/jpg/tga, store its exact output as a single-mip DDS
+#            (<cache_dir>/<key>.v3xtex, key = real file + size + mtime + game build) with a digest of the output
+#   verify = build, and compare every fresh engine decode with the stored digest (mismatch = entry deleted, cache off)
+#   on     = give decode the cached DDS instead of the png; the result must equal the stored digest, else the
+#            entry is deleted and the cache is off for the session
+# Nothing is stored or used until layout_min plain DDS decodes confirmed the decoded-image layout (none may contradict).
+png_cache = off
+cache_max_mb = 512
+cache_min_kb = 32
+layout_min = 16
+# empty = binaries/v3x/cache/lazy_gfx/
+cache_dir =

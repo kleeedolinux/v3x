@@ -71,6 +71,7 @@ mkdir -p $T/mm && $CC -o $T/mmt.exe test/mod_menu_test.c && $T/mmt.exe $T/mm [..
 $CC -o $T/cst.exe test/cpu_sched_test.c && $T/cst.exe [$EXE|- [build/plugins/cpu_sched.dll]]
 mkdir -p $T/enh && $CC -o $T/enht.exe test/enhance_test.c && $T/enht.exe $T/enh [$EXE]
 $CC -I$M/include -o $T/flt.exe test/fast_load_test.c $M/src/buffer.c $M/src/hook.c $M/src/trampoline.c $M/src/hde/hde64.c && $T/flt.exe [$EXE]
+$CC -I$M/include -o $T/fkt.exe test/fast_lookup_test.c $M/src/buffer.c $M/src/hook.c $M/src/trampoline.c $M/src/hde/hde64.c && $T/fkt.exe [$EXE]
 $CC -o $T/fpt.exe test/frame_pacer_test.c && $T/fpt.exe plugins/frame_pacer/frame_pacer.ini.example [$EXE]
 $CC -o $T/gdt.exe test/gfx_driver_test.c && $T/gdt.exe plugins/gfx_driver/gfx_driver.ini.example [$EXE]
 $CC -o $T/kht.exe test/keep_history_test.c && $T/kht.exe $EXE build/plugins/keep_history.dll

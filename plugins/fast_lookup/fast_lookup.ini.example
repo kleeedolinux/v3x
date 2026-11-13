@@ -1,0 +1,22 @@
+# fast_lookup: copy to binaries/v3x/fast_lookup.ini (every key optional; these are the defaults).
+# See docs/re/datastructures.md. Answers are always the engine's own; only the way they are fetched changes.
+
+# off     = hook nothing
+# measure = the engine answers every token lookup; the cache is filled and compared with every answer
+#           (calls, would-be hits, mismatches, engine vs cache cycles); any mismatch turns the cache off
+# on      = token lookups (id -> string) are answered from the cache without the registry spin lock;
+#           the text writer's indent writes the same tab chunks without taking that lock
+mode = measure
+
+# TokenGetString (exe+0x3e1e010) side cache
+token_cache = 1
+
+# WriteIndent (exe+0x3e24100) emulation (needs token_cache; only used in mode=on)
+indent = 1
+
+# mode=on: every Nth cache hit (per stats stripe) is re-checked against the engine; one mismatch =
+# cache off (0 = never; each check costs one locked engine lookup)
+verify_every = 0
+
+# ids above this are always forwarded to the engine (8 bytes each, pages touched on demand)
+max_tokens = 1048576

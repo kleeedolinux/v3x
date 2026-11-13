@@ -3,7 +3,7 @@
 # Undo: System > Advanced system settings > Performance > Advanced > Virtual memory >
 #       tick "Automatically manage paging file size for all drives".
 $ErrorActionPreference = 'Stop'
-$log = 'D:\SteamLibrary\steamapps\common\Victoria 3\v3x\scripts\move_pagefile.log'
+$log = Join-Path $PSScriptRoot 'move_pagefile.log'
 try {
     $cs = Get-CimInstance Win32_ComputerSystem
     Set-CimInstance -InputObject $cs -Property @{ AutomaticManagedPagefile = $false }

@@ -1,6 +1,6 @@
 """Regenerates this mod's shader overrides from the vanilla game files.
 
-    python mods/v3x_lowspec_shaders/make_mod.py [--game "D:/SteamLibrary/steamapps/common/Victoria 3"]
+    python mods/v3x_lowspec_shaders/make_mod.py [--game "<Steam>/steamapps/common/Victoria 3"]
 
 Each override is a copy of the vanilla file with a few exact-text replacements (EDITS below).
 If any replacement text is not found exactly as many times as expected (a game patch changed the

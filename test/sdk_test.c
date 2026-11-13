@@ -53,7 +53,7 @@ static void test_ini(void)
     CHECK(v3x_ini_int(&ini, "my_plugin", "flat", 0) == 5, "ini flat key is a fallback for any section");
     CHECK(v3x_ini_int(&ini, "my_plugin", "missing", -3) == -3, "ini missing key -> default");
     v3x_ini_free(&ini);
-    CHECK(v3x_ini_load(&ini, "D:/v3x_tmp/sdk/does_not_exist.ini") == 0 && !ini.found && v3x_ini_int(&ini, "a", "b", 7) == 7,
+    CHECK(v3x_ini_load(&ini, "v3x_sdk_test_no_such_dir/does_not_exist.ini") == 0 && !ini.found && v3x_ini_int(&ini, "a", "b", 7) == 7,
           "ini missing file = defaults");
     v3x_ini_free(&ini);
 }

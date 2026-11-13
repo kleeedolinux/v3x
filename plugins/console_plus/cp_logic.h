@@ -28,6 +28,8 @@ typedef enum {
     CK_MOVEMENT, CK_COUNTRY_TYPE, CK_WAR_GOAL, CK_COMPANY_TYPE, CK_SOCIAL_HIERARCHY, CK_STRAIT,
     CK_IG_TYPE, CK_SUBGOAL,
     CK_EVENT,      /* not a CGameDatabase: delegates to the engine's own `event` completer */
+    /* numeric ids of live game objects (only with a game loaded; completed from display names) */
+    CK_N_STATE, CK_N_COUNTRY, CK_N_CHARACTER, CK_N_IG, CK_N_BUILDING,
     CK_COUNT
 } CpKind;
 
@@ -57,7 +59,14 @@ static const struct { const char *name; const char *db; } CP_KINDS[CK_COUNT] = {
     {"ig_type", "CInterestGroupTypeDatabase"},
     {"subgoal", "CObjectiveSubgoalDatabase"},
     {"event", 0},
+    {"state_id", 0},
+    {"country_id", 0},
+    {"character_id", 0},
+    {"ig_id", 0},
+    {"building_id", 0},
 };
+
+#define CP_IS_NUMERIC(k) ((k) >= CK_N_STATE && (k) <= CK_N_BUILDING)
 
 #define CP_MAX_ARGS 12
 
@@ -114,6 +123,22 @@ static CpKind cp_classify_one(const char *s, size_t n)
 {
 #define HAS(w) cp_hasword(s, n, w)
     if (HAS("event")) return CK_EVENT;
+    /* numeric object ids: "state ID", "character ID", "interest group ID", "<building ID>",
+     * "country ID" (not "country_TAG/province_ID", "province id", "formation ID") */
+    int num = 0;
+    for (size_t i = 0; i + 2 <= n && !num; i++) {      /* the word "id" / "ID" (not "ideology") */
+        if (cp_lower((unsigned char)s[i]) != 'i' || cp_lower((unsigned char)s[i + 1]) != 'd') continue;
+        int pa = i > 0 && ((s[i - 1] >= 'a' && s[i - 1] <= 'z') || (s[i - 1] >= 'A' && s[i - 1] <= 'Z'));
+        int nx = i + 2 < n && ((s[i + 2] >= 'a' && s[i + 2] <= 'z') || (s[i + 2] >= 'A' && s[i + 2] <= 'Z'));
+        num = !pa && !nx;
+    }
+    if (num && !HAS("province") && !HAS("tag")) {
+        if (HAS("character")) return CK_N_CHARACTER;
+        if (HAS("interest group")) return CK_N_IG;
+        if (HAS("building")) return CK_N_BUILDING;
+        if (HAS("state")) return CK_N_STATE;
+        if (HAS("country")) return CK_N_COUNTRY;
+    }
     if (HAS("strategic region")) return CK_STRATEGIC_REGION;
     if (HAS("state region") || HAS("state_region")) return CK_STATE_REGION;
     if (HAS("journal entry")) return CK_JOURNAL;
@@ -406,7 +431,7 @@ static int cp_help_find(const CpHelp *ch, const char *name)
 /* ------------------------------------------------------------------ console_plus.ini */
 #define CP_OVR_MAX 64
 typedef struct {
-    int enabled, game_console, v3x_console, override_engine, log_installs, scan_frames;
+    int enabled, game_console, v3x_console, override_engine, log_installs, scan_frames, names, wildcards;
     int novr;
     struct { char cmd[48]; CpKind kinds[CP_MAX_ARGS]; int nkinds; } ovr[CP_OVR_MAX];
     int bad_lines;
@@ -416,7 +441,7 @@ static void cp_cfg_defaults(CpCfg *c)
 {
     memset(c, 0, sizeof *c);
     c->enabled = 1; c->game_console = 1; c->v3x_console = 1; c->override_engine = 0;
-    c->log_installs = 1; c->scan_frames = 120;
+    c->log_installs = 1; c->scan_frames = 120; c->names = 1; c->wildcards = 1;
 }
 
 static char *cp_trim(char *s)
@@ -427,7 +452,7 @@ static char *cp_trim(char *s)
     return s;
 }
 
-/* [console_plus] enabled game_console v3x_console override_engine log_installs scan_frames
+/* [console_plus] enabled game_console v3x_console override_engine log_installs scan_frames names wildcards
  * [commands]     <command> = <kind> [<kind> ...]   (one kind per argument; "none" = skip that
  *                argument; a line with only "none" disables completion for the command) */
 static void cp_parse_ini(const char *text, CpCfg *c)
@@ -453,6 +478,8 @@ static void cp_parse_ini(const char *text, CpCfg *c)
             else if (cp_streqi(k, "v3x_console")) c->v3x_console = iv != 0;
             else if (cp_streqi(k, "override_engine")) c->override_engine = iv != 0;
             else if (cp_streqi(k, "log_installs")) c->log_installs = iv != 0;
+            else if (cp_streqi(k, "names")) c->names = iv != 0;
+            else if (cp_streqi(k, "wildcards")) c->wildcards = iv != 0;
             else if (cp_streqi(k, "scan_frames")) c->scan_frames = iv < 10 ? 10 : iv > 100000 ? 100000 : iv;
             else c->bad_lines++;
         } else if (cp_streqi(sect, "commands")) {

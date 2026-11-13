@@ -31,8 +31,10 @@ static void t_set_err(void) { f_err = PHYSFS_ERR_NOT_FOUND; }
 static int exists(const char *opaque, const char *name)
 {
     char p[1200];
+    wchar_t w[1200];
     snprintf(p, sizeof p, "%s%s", opaque, name);
-    return GetFileAttributesA(p) != INVALID_FILE_ATTRIBUTES;
+    if (MultiByteToWideChar(CP_UTF8, 0, p, -1, w, 1200) <= 0) return 0;   /* PhysFS converts UTF-8 too */
+    return GetFileAttributesW(w) != INVALID_FILE_ATTRIBUTES;
 }
 static uintptr_t fake_stat(PASS8_ARGS)
 {
@@ -95,7 +97,10 @@ static void test_core(void)
     CHECK(ml_classify("d:/steamlibrary/steamapps/workshop/content/529340/123", "d:/g", "c:/docs") == ML_ROOT_WORKSHOP);
     CHECK(ml_classify("d:/g/game/dlc/dlc001", "d:/g", "c:/docs") == ML_ROOT_DLC);
     CHECK(ml_classify("d:/g/game/dlc", "d:/g", "c:/docs") == ML_ROOT_OTHER);
-    CHECK(ml_classify("d:/g/game", "d:/g", "c:/docs") == ML_ROOT_OTHER);
+    CHECK(ml_classify("d:/g/game", "d:/g", "c:/docs") == ML_ROOT_GAME && ml_classify("d:/g/jomini", "d:/g", "") == ML_ROOT_GAME);
+    CHECK(ml_classify("d:/g/game/common", "d:/g", "") == ML_ROOT_OTHER && ml_classify("d:/g", "d:/g", "") == ML_ROOT_OTHER);
+    CHECK(ml_classify("d:/g/binaries/v3x/content_packs/p", "d:/g", "") == ML_ROOT_PACK);
+    CHECK(ml_classify("d:/g/binaries/v3x/content_packs", "d:/g", "") == ML_ROOT_OTHER);
     CHECK(ml_classify("d:/g/game/dlcx/a", "d:/g", "c:/docs") == ML_ROOT_OTHER);
     CHECK(ml_classify("c:/docs/mod/my", "d:/g", "c:/docs") == ML_ROOT_LOCAL);
     CHECK(ml_classify("c:/docs", "d:/g", "c:/docs") == ML_ROOT_OTHER);
@@ -219,7 +224,7 @@ static void test_runtime(void)
     root_t *r1 = root_find(op1);
     CHECK(r1 && r1->cls == ML_ROOT_WORKSHOP && r1->play == 0 && !r1->hidden);
     wait_ready(r1);
-    CHECK(r1->state == IX_READY && r1->set.nfiles == 3);
+    CHECK(r1->state == IX_READY && r1->hv.n == 8 && r1->dirs.n == 6);
     f_calls = 0; f_err = 0;
     CHECK((int)stat_detour(op1, "common/bar.txt", 0, 0, 0, 0, 0, 0) == 0 && f_calls == 1 && f_err == 99);
     CHECK((int)stat_detour(op1, "COMMON", 0, 0, 0, 0, 0, 0) == 1);               /* directory */
@@ -236,10 +241,22 @@ static void test_runtime(void)
     mkfile("ws/steamapps/workshop/content/529340/111/common/new.txt");          /* appears after indexing */
     CHECK((int)stat_detour(op1, "common/new.txt", 0, 0, 0, 0, 0, 0) == 1);       /* measure: real answer */
     CHECK(r1->mismatch == 1 && g_nmismatch == 1 && !g_disabled);
-    /* a root that is not mod/DLC: passthrough, never indexed */
+    /* install root <game>/game: indexed too (index_game=1) */
     CHECK((int)stat_detour(opg, "common/Foo.txt", 0, 0, 0, 0, 0, 0) == 1);
     root_t *rg = root_find(opg);
-    CHECK(rg && rg->cls == ML_ROOT_OTHER && rg->state == IX_NONE);
+    CHECK(rg && rg->cls == ML_ROOT_GAME);
+    if (rg) wait_ready(rg);
+    CHECK(rg && rg->state == IX_READY);
+    LONG64 w0 = rg ? rg->would_n : 0;
+    CHECK((int)stat_detour(opg, "common/bar.txt", 0, 0, 0, 0, 0, 0) == 0 && rg && rg->would_n == w0 + 1);
+    /* a root that is not install/mod/DLC/pack (user dir): passthrough, never indexed, misses sampled */
+    static char opu[] = TROOT "/userdir\\";
+    CreateDirectoryA(TROOT "/userdir", NULL);
+    LONG u0 = g_nunpred;
+    CHECK((int)stat_detour(opu, "save games/x.v3", 0, 0, 0, 0, 0, 0) == 0);
+    root_t *ru = root_find(opu);
+    CHECK(ru && ru->cls == ML_ROOT_OTHER && ru->state == IX_NONE && ru->unpred_n == 1 && g_nunpred == u0 + 1);
+    CHECK(strstr(g_unpred[u0], "root-not-indexed stat userdir: save games/x.v3") != NULL);
 
     /* mode=on */
     cfg.mode = ML_ON; cfg.verify_every = 2; g_disabled = 0;
@@ -318,11 +335,328 @@ static int real_exe(const char *path)
     return why != NULL || g_err_off <= 0;
 }
 
+/* ---- replay: every real file path of every real root, probed against every root ------------------
+ * Roots = <game>/{game,jomini,clausewitz,platform_specific_game_data}, <game>/game/dlc/<x>,
+ * <game>/binaries/v3x/content_packs/<x> and the playset mods in content_load.json - the indexable part of
+ * the in-game search path. Lookup paths = every file and directory path found in any of them (original
+ * case from disk, as the engine asks for it). Truth = GetFileAttributesW, i.e. what DIR stat returns. */
+static char g_rp[64][600]; static int g_nrp;
+static void rp_add(const char *p, void *u) { (void)u; if (g_nrp < 64) snprintf(g_rp[g_nrp++], 600, "%s\\", p); }
+static char **g_paths; static int g_npaths, g_cpaths;
+static void collect(wchar_t *path, size_t plen, char *rel, size_t rlen)
+{
+    wcscpy(path + plen, L"\\*");
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW(path, &fd);
+    path[plen] = 0;
+    if (h == INVALID_HANDLE_VALUE) return;
+    do {
+        if (fd.cFileName[0] == '.' && (!fd.cFileName[1] || (fd.cFileName[1] == '.' && !fd.cFileName[2]))) continue;
+        char u[800];
+        int ul = WideCharToMultiByte(CP_UTF8, 0, fd.cFileName, -1, u, sizeof u, NULL, NULL);
+        if (ul <= 1 || rlen + ul + 2 > 1000) continue;
+        size_t rl = rlen;
+        if (rl) rel[rl++] = '/';
+        memcpy(rel + rl, u, ul);
+        if (g_npaths == g_cpaths) { g_cpaths = g_cpaths ? g_cpaths * 2 : 65536; g_paths = realloc(g_paths, g_cpaths * sizeof *g_paths); }
+        g_paths[g_npaths++] = _strdup(rel);
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+            size_t nl = wcslen(fd.cFileName);
+            path[plen] = L'\\';
+            wcscpy(path + plen + 1, fd.cFileName);
+            collect(path, plen + 1 + nl, rel, rl + ul - 1);
+            path[plen] = 0;
+        }
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+    rel[rlen] = 0;
+}
+static int cmpstr(const void *a, const void *b) { return _stricmp(*(char *const *)a, *(char *const *)b); }
+
+static int replay(const char *game, const char *docs, int step)
+{
+    static V3X_API fake;
+    fake.log = x_log; fake.print = x_print; fake.game_version = x_ver; fake.v3x_dir = x_v3x; fake.game_dir = x_game;
+    api = &fake;
+    QueryPerformanceFrequency(&g_freq);
+    g_set_err = t_set_err;
+    ml_config_defaults(&cfg);
+    cfg.log_misses = 20;
+    o_stat = fake_stat; o_open = fake_open;
+    snprintf(g_game_native, sizeof g_game_native, "%s", game);
+    ml_norm_root(game, g_game_norm, sizeof g_game_norm);
+    snprintf(g_docs_native, sizeof g_docs_native, "%s", docs);
+    ml_norm_root(docs, g_docs_norm, sizeof g_docs_norm);
+    static const char *inst[] = {"game", "jomini", "clausewitz", "platform_specific_game_data"};
+    char b[700];
+    for (int i = 0; i < 4; i++) { snprintf(b, sizeof b, "%s/%s", game, inst[i]); rp_add(b, NULL); }
+    const char *subs[] = {"game/dlc", "binaries/v3x/content_packs"};
+    for (int k = 0; k < 2; k++) {
+        WIN32_FIND_DATAA fd;
+        snprintf(b, sizeof b, "%s/%s/*", game, subs[k]);
+        HANDLE h = FindFirstFileA(b, &fd);
+        if (h == INVALID_HANDLE_VALUE) continue;
+        do {
+            if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && fd.cFileName[0] != '.') {
+                char r[700]; snprintf(r, sizeof r, "%s/%s/%s", game, subs[k], fd.cFileName); rp_add(r, NULL);
+            }
+        } while (FindNextFileA(h, &fd));
+        FindClose(h);
+    }
+    snprintf(b, sizeof b, "%s/content_load.json", docs);
+    char *js = read_file(b, 1 << 20, NULL);
+    if (js) { ml_parse_playset(js, add_play, NULL); ml_parse_playset(js, rp_add, NULL); free(js); }
+    for (int i = 0; i < g_nrp; i++)                       /* engine form: '/' separators, trailing '\' */
+        for (char *c = g_rp[i]; c[1]; c++) if (*c == '\\') *c = '/';
+    char rel[1100];
+    for (int i = 0; i < g_nrp; i++) {
+        wchar_t w[1100];
+        MultiByteToWideChar(CP_UTF8, 0, g_rp[i], -1, w, 1100);
+        size_t n = wcslen(w);
+        while (n && (w[n - 1] == L'\\' || w[n - 1] == L'/')) w[--n] = 0;
+        rel[0] = 0;
+        collect(w, n, rel, 0);
+    }
+    qsort(g_paths, g_npaths, sizeof *g_paths, cmpstr);
+    int u = 0;
+    for (int i = 0; i < g_npaths; i++) if (!u || _stricmp(g_paths[u - 1], g_paths[i])) g_paths[u++] = g_paths[i];
+    g_npaths = u;
+    CreateDirectoryA(TROOT, NULL);
+    CreateDirectoryA(TROOT "/v3x", NULL);
+    remove(TROOT "/v3x/mod_loader.index");
+    cfg.index_cache = 1;
+    g_ncache = 0;
+    /* pass A: fresh build */
+    LARGE_INTEGER t0, t1, t2;
+    QueryPerformanceCounter(&t0);
+    for (int i = 0; i < g_nrp; i++) { root_t *r = root_get(g_rp[i]); if (r) wait_ready(r); }
+    QueryPerformanceCounter(&t1);
+    double build_sum = 0, build_max = 0; size_t mem = 0, keys = 0, dirs = 0;
+    for (LONG k = 0; k < g_nroots; k++) {
+        root_t *r = &g_roots[k];
+        build_sum += r->build_ms; if (r->build_ms > build_max) build_max = r->build_ms;
+        mem += (size_t)r->hv.cap * 8 + r->dirs.ncap + (size_t)r->dirs.cap * 12; keys += r->hv.n; dirs += r->dirs.n;
+    }
+    printf("build: %d roots, %zu keys, %zu dirs, wall %.1f ms (sum %.1f ms, max root %.1f ms), memory %zu KB (%.1f B/key)\n",
+           g_nrp, keys, dirs, (double)(t1.QuadPart - t0.QuadPart) * 1000 / g_freq.QuadPart, build_sum, build_max, mem / 1024,
+           (double)mem / (keys ? keys : 1));
+    QueryPerformanceCounter(&t0);
+    size_t fsz = cache_save();
+    QueryPerformanceCounter(&t1);
+    printf("save: mod_loader.index %zu KB in %.1f ms\n", fsz / 1024, (double)(t1.QuadPart - t0.QuadPart) * 1000 / g_freq.QuadPart);
+    /* lookup cost, no syscalls: hash + interpolation search */
+    uint64_t *hs = malloc((size_t)g_npaths * 8);
+    char kb[1100];
+    int nh = 0;
+    for (int p = 0; p < g_npaths; p++) { int kl = ml_norm(g_paths[p], kb, sizeof kb); if (kl >= 0) hs[nh++] = ml_hash(kb, kl); }
+    uint8_t *ansA = calloc((size_t)nh * g_nrp, 1), *ansB = calloc((size_t)nh * g_nrp, 1);
+    QueryPerformanceCounter(&t0);
+    LONG64 hits = 0;
+    for (int i = 0; i < g_nrp; i++) { root_t *r = root_find(g_rp[i]); for (int p = 0; p < nh; p++) hits += ansA[(size_t)i * nh + p] = (uint8_t)ml_hv_has(&r->hv, hs[p]); }
+    QueryPerformanceCounter(&t1);
+    double ns = (double)(t1.QuadPart - t0.QuadPart) * 1e9 / g_freq.QuadPart / ((double)nh * g_nrp);
+    QueryPerformanceCounter(&t0);
+    for (int p = 0; p < g_npaths; p++) { uint64_t hh; if (ml_key(g_paths[p], &hh) >= 0) hits += (LONG64)(hh & 2); }
+    QueryPerformanceCounter(&t1);
+    printf("lookup: %.1f ns per index lookup (%d keys x %d roots), ml_key (normalize+hash, hot path) %.1f ns per path\n", ns, nh, g_nrp,
+           (double)(t1.QuadPart - t0.QuadPart) * 1e9 / g_freq.QuadPart / g_npaths);
+    /* syscall replay: every prediction against the real answer */
+    LONG64 probes = 0, misses = 0;
+    QueryPerformanceCounter(&t0);
+    for (int p = 0; p < g_npaths; p += step)
+        for (int i = 0; i < g_nrp; i++) {
+            misses += !(int)stat_detour(g_rp[i], g_paths[p], 0, 0, 0, 0, 0, 0);
+            probes++;
+        }
+    QueryPerformanceCounter(&t1);
+    LONG64 t[11], un = 0;
+    totals(t);
+    int ix = 0;
+    for (LONG k = 0; k < g_nroots; k++) { ix += g_roots[k].state == IX_READY; un += g_roots[k].unpred_n; }
+    printf("replay: %d roots (%d indexed), %d unique paths (every %d probed), %lld probes, %lld misses, "
+           "predicted %lld (%.2f%%), unpredicted %lld, mismatches %lld, false hits %lld, %.1f s\n",
+           g_nrp, ix, g_npaths, step, probes, misses, t[5], 100.0 * t[5] / (misses ? misses : 1), un, t[8], t[9],
+           (double)(t1.QuadPart - t0.QuadPart) / g_freq.QuadPart);
+    for (LONG i = 0; i < g_nunpred && i < 3; i++) printf("  unpredicted: %s\n", g_unpred[i]);
+    for (LONG i = 0; i < g_nmismatch && i < 16; i++) printf("  MISMATCH: %s\n", g_mismatch[i]);
+    int bad = t[8] != 0 || t[9] != 0 || ix != g_nrp || t[5] + un != misses;
+    /* pass B: next launch - load the file, verify signatures, reuse */
+    LONG nA = g_nroots;
+    g_nroots = 0;
+    QueryPerformanceCounter(&t0);
+    cache_load();
+    QueryPerformanceCounter(&t1);
+    for (int i = 0; i < g_nrp; i++) { root_t *r = root_get(g_rp[i]); if (r) wait_ready(r); }
+    QueryPerformanceCounter(&t2);
+    int reused = 0; double vsum = 0;
+    for (LONG k = 0; k < g_nroots; k++) { reused += g_roots[k].from_cache; vsum += g_roots[k].build_ms; }
+    for (int i = 0; i < g_nrp; i++) { root_t *r = root_find(g_rp[i]); for (int p = 0; p < nh; p++) ansB[(size_t)i * nh + p] = (uint8_t)ml_hv_has(&r->hv, hs[p]); }
+    int same = !memcmp(ansA, ansB, (size_t)nh * g_nrp);
+    printf("reuse: %s; load %.1f ms, %d/%ld roots reused, signature check wall %.1f ms (sum %.1f ms) vs build %.1f ms; "
+           "answers identical to the fresh build: %s\n", g_cache_note, (double)(t1.QuadPart - t0.QuadPart) * 1000 / g_freq.QuadPart,
+           reused, nA, (double)(t2.QuadPart - t1.QuadPart) * 1000 / g_freq.QuadPart, vsum, build_sum, same ? "yes" : "NO");
+    (void)hits;
+    return bad || !same || reused != g_nrp;
+}
+
+/* ---- compact index + persisted file ------------------------------------------------------------- */
+static void test_index(void)
+{
+    ml_hv v = {0};
+    char k[64];
+    for (int i = 0; i < 50000; i++) { int n = snprintf(k, sizeof k, "gfx/f%d.dds", i); CHECK(!ml_hv_push(&v, ml_hash(k, n))); }
+    for (int i = 0; i < 1000; i++) { int n = snprintf(k, sizeof k, "gfx/f%d.dds", i); ml_hv_push(&v, ml_hash(k, n)); }  /* dups */
+    ml_hv_finish(&v);
+    CHECK(v.n == 50000 && v.cap == 50000);
+    int sorted = 1;
+    for (uint32_t i = 1; i < v.n; i++) sorted &= v.h[i] > v.h[i - 1];
+    CHECK(sorted);
+    int has = 0, not = 0;
+    for (int i = 0; i < 50000; i++) { int n = snprintf(k, sizeof k, "gfx/f%d.dds", i); has += ml_hv_has(&v, ml_hash(k, n)); }
+    for (int i = 50000; i < 100000; i++) { int n = snprintf(k, sizeof k, "gfx/f%d.dds", i); not += ml_hv_has(&v, ml_hash(k, n)); }
+    CHECK(has == 50000 && not == 0);
+    CHECK(ml_hv_has(&v, v.h[0]) && ml_hv_has(&v, v.h[v.n - 1]) && !ml_hv_has(&v, 0) && !ml_hv_has(&v, ~0ull));
+    ml_hv small = {0};
+    CHECK(!ml_hv_has(&small, 5));
+    ml_hv_push(&small, 7); ml_hv_finish(&small);
+    CHECK(ml_hv_has(&small, 7) && !ml_hv_has(&small, 6) && !ml_hv_has(&small, 8));
+
+    /* ml_key == ml_hash(ml_norm(x)), same rejects */
+    static const char *kn[] = {"common/Foo.TXT", "gfx/a b/X.dds", "a", "", "/x", "a//b", "a/./b", "a/../b", "a.", "a ",
+                               "COMMON~1/x", "a\\b", "x:y", "gfx/nul.dds", "gfx/com1", "gfx/console.dds", "gfx/\xc3\xa9", "a/",
+                               "LPT9.txt/x", "aux", "auxx"};
+    int same_k = 1;
+    for (int i = 0; i < (int)(sizeof kn / sizeof *kn); i++) {
+        char nb[256]; uint64_t h = 0;
+        int a1 = ml_norm(kn[i], nb, sizeof nb), a2 = ml_key(kn[i], &h);
+        int ok = a1 == a2 && (a1 < 0 || h == ml_hash(nb, (size_t)a1));
+        same_k &= ok;
+        if (!ok) printf("  ml_key differs: '%s' %d %d\n", kn[i], a1, a2);
+    }
+    CHECK(same_k);
+
+    /* file round trip */
+    ml_ixroot a = {0}, b = {0};
+    snprintf(a.root, sizeof a.root, "d:/x/111");
+    ml_dirs_add(&a.dirs, "", 11); ml_dirs_add(&a.dirs, "common", 22); ml_dirs_add(&a.dirs, "gfx/\xc3\xa9", 33);
+    a.hv = v;
+    snprintf(b.root, sizeof b.root, "d:/x/empty");
+    ml_dirs_add(&b.dirs, "", 44);
+    const ml_ixroot *rs[2] = {&a, &b};
+    size_t sz = ml_ixfile_write(rs, 2, NULL, 0);
+    uint8_t *buf = malloc(sz);
+    CHECK(ml_ixfile_write(rs, 2, buf, sz) == sz && ml_ixfile_write(rs, 2, buf, sz - 1) == 0);
+    ml_ixroot *out;
+    int n = ml_ixfile_read(buf, sz, &out);
+    CHECK(n == 2);
+    if (n == 2) {
+        CHECK(!strcmp(out[0].root, "d:/x/111") && out[0].dirs.n == 3 && !strcmp(ml_dirs_name(&out[0].dirs, 2), "gfx/\xc3\xa9") &&
+              out[0].dirs.mt[2] == 33 && out[0].hv.n == v.n && !memcmp(out[0].hv.h, v.h, (size_t)v.n * 8));
+        CHECK(!strcmp(out[1].root, "d:/x/empty") && out[1].dirs.n == 1 && out[1].hv.n == 0);
+        ml_ixfile_free(out, n);
+    }
+    /* corruption: every single-byte flip at sampled offsets, truncation, wrong version -> rejected */
+    int rejected = 0, tries = 0;
+    for (size_t off = 0; off < sz; off += 997) {
+        buf[off] ^= 0x5A; tries++;
+        if (ml_ixfile_read(buf, sz, &out) < 0) rejected++; else ml_ixfile_free(out, 2);
+        buf[off] ^= 0x5A;
+    }
+    CHECK(rejected == tries);
+    CHECK(ml_ixfile_read(buf, sz - 8, &out) < 0 && ml_ixfile_read(buf, 10, &out) < 0);
+    uint32_t ver = 99; memcpy(buf + 8, &ver, 4);
+    CHECK(ml_ixfile_read(buf, sz, &out) < 0);
+    free(buf);
+    ml_dirs_free(&a.dirs); ml_dirs_free(&b.dirs); ml_hv_free(&v); ml_hv_free(&small);
+}
+
+/* after test_runtime: save, "relaunch", reuse unchanged roots, rebuild a changed one, ignore a corrupt file */
+static void test_cache(void)
+{
+    static char op1[] = TROOT "/ws/steamapps/workshop/content/529340/111\\";
+    static char op5[] = TROOT "/ws/steamapps/workshop/content/529340/555\\";
+    static const char *names[] = {"common/Foo.txt", "common/new.txt", "common/bar.txt", "gfx/a b", "gfx/a b/x.dds",
+                                  "gfx/zz.dds", "localization/english/m_l_english.yml", "gfx/sub/deep/q.txt"};
+    mkfile("ws/steamapps/workshop/content/529340/555/gfx/sub/deep/q.txt");
+    remove(TROOT "/ws/steamapps/workshop/content/529340/555/gfx/sub/deep/added.txt");
+    cfg.mode = ML_MEASURE; cfg.index_cache = 1; g_disabled = 0;
+    g_ncache = 0;
+    stat_detour(op5, "gfx", 0, 0, 0, 0, 0, 0);
+    root_t *r5 = root_find(op5);
+    root_t *r1 = NULL;                       /* the root test_runtime built (other opaque pointer, same folder) */
+    for (LONG i = 0; i < g_nroots; i++) if (strstr(g_roots[i].norm, "529340/111")) { r1 = &g_roots[i]; break; }
+    if (r5) wait_ready(r5);
+    CHECK(r1 && r5 && r1->state == IX_READY && r5->state == IX_READY && !r5->from_cache);
+    if (!r1 || !r5) return;
+    int a1[8], a5[8];
+    char k[256];
+    for (int i = 0; i < 8; i++) {
+        int kl = ml_norm(names[i], k, sizeof k);
+        a1[i] = ml_hv_has(&r1->hv, ml_hash(k, kl));
+        a5[i] = ml_hv_has(&r5->hv, ml_hash(k, kl));
+    }
+    /* 111 was built before common/new.txt existed (dir mtime recorded before listing) -> stale -> must rebuild */
+    CHECK(a1[1] == 0);
+    CHECK(cache_save() > 0);
+    /* relaunch */
+    g_nroots = 0;
+    cache_load();
+    CHECK(g_ncache >= 2 && strstr(g_cache_note, "root(s)"));
+    stat_detour(op5, "gfx", 0, 0, 0, 0, 0, 0);
+    stat_detour(op1, "gfx", 0, 0, 0, 0, 0, 0);
+    r5 = root_find(op5); r1 = root_find(op1);
+    if (r5) wait_ready(r5);
+    if (r1) wait_ready(r1);
+    CHECK(r5 && r5->from_cache && r5->state == IX_READY);
+    CHECK(r1 && !r1->from_cache && r1->state == IX_READY);           /* changed since its build -> rebuilt */
+    if (!r1 || !r5) return;
+    int same = 1;
+    for (int i = 0; i < 8; i++) {
+        int kl = ml_norm(names[i], k, sizeof k);
+        same &= ml_hv_has(&r5->hv, ml_hash(k, kl)) == a5[i];
+    }
+    CHECK(same);                                                       /* load == build */
+    {
+        int kl = ml_norm("common/new.txt", k, sizeof k);
+        CHECK(ml_hv_has(&r1->hv, ml_hash(k, kl)));                     /* the rebuilt root sees the new file */
+    }
+    /* change a deep directory of 555 -> next launch rebuilds 555 */
+    CHECK(cache_save() > 0);
+    Sleep(20);
+    mkfile("ws/steamapps/workshop/content/529340/555/gfx/sub/deep/added.txt");
+    g_nroots = 0;
+    cache_load();
+    stat_detour(op5, "gfx", 0, 0, 0, 0, 0, 0);
+    r5 = root_find(op5);
+    if (r5) wait_ready(r5);
+    CHECK(r5 && !r5->from_cache && r5->state == IX_READY);
+    if (r5) { int kl = ml_norm("gfx/sub/deep/added.txt", k, sizeof k); CHECK(ml_hv_has(&r5->hv, ml_hash(k, kl))); }
+    /* corrupt file -> ignored, full rebuild */
+    CHECK(cache_save() > 0);
+    FILE *f = fopen(TROOT "/v3x/mod_loader.index", "r+b");
+    if (f) { fseek(f, 40, SEEK_SET); fputc('#', f); fclose(f); }
+    g_nroots = 0;
+    cache_load();
+    CHECK(g_ncache == 0 && strstr(g_cache_note, "corrupt"));
+    stat_detour(op5, "gfx", 0, 0, 0, 0, 0, 0);
+    r5 = root_find(op5);
+    if (r5) wait_ready(r5);
+    CHECK(r5 && !r5->from_cache && r5->state == IX_READY);
+}
+
 int main(int argc, char **argv)
 {
+    setvbuf(stdout, NULL, _IONBF, 0);
+    if (argc > 3 && !strcmp(argv[1], "--replay")) {
+        int bad = replay(argv[2], argv[3], argc > 4 ? atoi(argv[4]) : 1);
+        printf(bad ? "REPLAY FAILED\n" : "REPLAY OK\n");
+        return bad;
+    }
     test_core();
     test_parsers();
+    test_index();
     test_runtime();
+    test_cache();
     if (argc > 1) fails += real_exe(argv[1]);
     printf(fails ? "%d FAILED\n" : "ALL OK\n", fails);
     return fails != 0;

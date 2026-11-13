@@ -2,10 +2,10 @@
 Usage: re_hist_lib.py <exe> <re_sim_lib command> ARGS...
        re_hist_lib.py <exe> around HEX BEFORE AFTER   (disassemble around any RVA, resynced)
        re_hist_lib.py <exe> func HEX                  (disassemble whole .pdata function)"""
-import os, sys
+import os, sys, tempfile
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import re_sim_lib, pexref
-re_sim_lib.CACHE = os.environ.get('RE_HIST_CACHE', r'D:\v3x_tmp\keep-history\re_hist_index.pkl')
+re_sim_lib.CACHE = os.environ.get('RE_HIST_CACHE', os.path.join(tempfile.gettempdir(), 'v3x_re', 're_hist_index.pkl'))
 if __name__ == '__main__':
     exe, cmd = sys.argv[1], sys.argv[2]
     if cmd == 'around':

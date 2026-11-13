@@ -67,7 +67,7 @@ fields, `api->api_version >= N` also works.
 | `log`, `print` | any thread (thread-safe, serialized by one lock) | - |
 | `image_base`, `image_size`, `game_version`, `game_build_id`, `game_dir`, `v3x_dir`, `main_thread_id` | any thread (constant after boot) | - |
 | `pattern_scan`, `find_string`, `find_xref`, `function_start` | any thread (read-only) | - |
-| `hook`, `unhook`, `hook_safe` | any thread; best at load time. MinHook briefly suspends all other threads | your detour / pre / post: the thread that calls the hooked function |
+| `hook`, `unhook`, `hook_safe` | any thread; best at load time. MinHook briefly suspends all other threads (not for a 2nd+ `hook_safe` subscriber on an already hooked target) | your detour / pre / post: the thread that calls the hooked function |
 | `patch` | any thread, but patching code another thread is executing is a race: patch at load time or while the code cannot run | - |
 | `on_frame` | **load time** (`v3x_plugin_load`) only; the table is not locked | main thread, once per message-pump iteration |
 | `run_on_main` | any thread | main thread, next frame tick |
@@ -120,14 +120,24 @@ functions without unwind info.
 
 ### `int hook(void *target, void *detour, void **original)`
 MinHook inline hook: `target` now jumps to `detour`; `*original` receives a trampoline that runs
-the original code. Returns 0 or a MinHook `MH_STATUS` (e.g. 3 `MH_ERROR_ALREADY_CREATED` when
-another plugin already hooked the same target: two plugins cannot inline-hook one function).
+the original code. Returns 0 or a MinHook `MH_STATUS`. A raw hook is **exclusive**: if the
+target already has a raw hook or `hook_safe` subscribers (any plugin), `hook` returns
+`V3X_EHOOKBUSY` (100) and v3x.log names the holder, e.g.
+`hook 00007FF6... by my_plugin.dll: V3X_EHOOKBUSY, target held by par_load.dll (hook_safe)`.
+Raw detours are not chained on purpose (each would have to call the previous one's trampoline
+with the exact prototype; one mistake breaks every plugin behind it). For engine functions other
+plugins may want too, use `hook_safe`: it can be shared.
 Your detour must have **exactly** the target's calling convention and **at least** its
 argument count: see [safety.md](safety.md#argument-forwarding). Prefer `hook_safe`.
 
 ### `int unhook(void *target)`
-Disables and removes a hook made by `hook` or `hook_safe`. A thread may still be running inside
-your detour: keep the detour's code and data alive (never `FreeLibrary` yourself).
+Removes what the **calling plugin** holds on `target` (the core finds the calling DLL from the
+return address): its raw hook, or all of its `hook_safe` subscriptions there. Other plugins'
+subscriptions on the same target stay; when the last subscriber leaves, the thunk is disabled
+and the original bytes are restored. Returns 0, `V3X_EHOOKBUSY` if only other plugins hold the
+target (nothing is removed), or 4 `MH_ERROR_NOT_CREATED` if nothing is hooked there. A thread
+may still be running inside your detour or callback: keep its code and data alive (never
+`FreeLibrary` yourself).
 
 ### `int patch(void *addr, const void *bytes, size_t n)`
 Writes `n` bytes over code or read-only data (handles page protection and the instruction
@@ -204,11 +214,39 @@ Hooks `target` with a core-generated pass-through thunk. On every call:
 4. `post(call)` runs (if set) and may change `ret` / `xmm_ret`;
 5. the thunk returns `ret` in rax and `xmm_ret` in xmm0.
 
-`pre` or `post` may be NULL, not both. Returns 0, -1 (bad args), or an `MH_STATUS` (9 =
-`MH_ERROR_MEMORY_ALLOC` also when the pool of 4096 thunks is full). Remove with `unhook`. The
+`pre` or `post` may be NULL, not both. Returns 0, -1 (bad args), `V3X_EHOOKBUSY` (the target
+has a raw `hook`; v3x.log names the owner), 3 `MH_ERROR_ALREADY_CREATED` (this plugin already
+subscribed the same `pre`/`post`/`user` there), or another `MH_STATUS` (9 =
+`MH_ERROR_MEMORY_ALLOC` also when the pool of 4096 hooked targets is full or the target already
+has `V3X_HOOK_MAX_SUBSCRIBERS` = 8 subscribers). Remove with `unhook`. The
 thunk has unwind info (`.pdata`), so C++ exceptions thrown through the hooked function, crash
 handlers and profilers' stack walks pass through it. Overhead: about 40 instructions plus your
 callbacks per call.
+
+**Several subscribers on one target.** Any number of plugins (up to 8 subscriptions per
+target, a plugin may subscribe several different `pre`/`post`/`user` triples) can `hook_safe` the
+same function, e.g. par_load and lazy_gfx both on `VFSOpen`. They share one thunk and run like
+nested wrappers, in subscription (= plugin load) order:
+
+```
+pre(A)  pre(B)  pre(C)  original  post(C)  post(B)  post(A)
+```
+
+* each subscriber gets its own `call->user` and its own `call->scratch` (zeroed per call);
+* `args[]` / `xmm[]` changed by a `pre` are what the next `pre` and the original see; `ret` /
+  `xmm_ret` changed by a `post` are what the previous `post` and the caller see;
+* `skip_original`: when a `pre` sets it, the chain stops there. The later subscribers see nothing
+  of that call (neither `pre` nor `post`), the original is not called, and the `post` callbacks of
+  the skipping subscriber and of the earlier ones run (with `skip_original = 1`). So the first
+  subscriber that skips wins, and its `ret` is the one returned (unless an earlier `post`
+  changes it);
+* subscribing / unsubscribing is safe while other threads call the function: the subscriber list
+  is an immutable snapshot swapped atomically (callers take no lock); a call that already started
+  finishes with the list it started with (its `pre` and `post` always pair up);
+* `unhook` removes only the calling plugin's subscriptions (see `unhook`).
+
+Do not rely on the order between plugins beyond "load order"; if two plugins must agree on who
+skips or rewrites arguments, coordinate through an event.
 
 Limits: functions with more than 16 arguments, `__vectorcall` HVA arguments and functions that
 inspect their own return address (`_ReturnAddress`) are not forwarded exactly. Do not

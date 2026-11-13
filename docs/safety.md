@@ -25,14 +25,23 @@ How to avoid it:
 * `api->hook_safe(target, pre, post, user)` (API v4) forwards all 16 integer slots and xmm0-3
   whatever the prototype is, and keeps the return value. Tested with 0-16 arguments, floats,
   doubles, mixed, struct returns, recursion and threads (`test/hook_safe_test.c`).
+* Register rule for `hook_safe`: the caller gets every register (rcx, rdx, r8-r11, xmm0-5, upper ymm0-5) exactly as the original left it, and only rax/xmm0 change when a callback sets `ret`/`xmm_ret`, because the game is built with whole-program optimisation and its callers may keep values in volatile registers across a call (the original also gets the caller's registers back after `pre`, except r10).
 * For a raw detour (`api->hook`) on a function whose prototype you have not proven: the
   `V3X_PASS8_ARGS` / `V3X_PASS8` macros in `sdk/v3x_hook.h`. They do not preserve float
   arguments if your detour does floating-point work before calling the original.
 * Measure: `tools/re_simopt_argcheck.py <exe> <rva>...` counts the stack arguments a function
   reads (callee side) and its callers pass (caller side).
-* Two plugins cannot inline-hook the same function (MinHook returns 3,
-  `MH_ERROR_ALREADY_CREATED`). If you need a function another plugin owns, subscribe to its event
-  or ask for one.
+* Sharing a function with another plugin: use `hook_safe`. Several plugins may `hook_safe` the
+  same target; they run nested in load order (pre A, pre B, original, post B, post A), and the
+  first `pre` that sets `skip_original` stops the chain (details in
+  [api-reference.md](api-reference.md#int-hook_safevoid-target-v3x_hook_fn-pre-v3x_hook_fn-post-void-user-v4)).
+  Tested in `test/hook_chain_test.c` (also 8 threads calling while subscribers come and go).
+* Raw detours (`api->hook`) stay exclusive: a raw hook on a target that already has a raw hook or
+  `hook_safe` subscribers (and `hook_safe` on a raw-hooked target) fails with `V3X_EHOOKBUSY` (100)
+  and v3x.log names the plugin that holds it. Check the return value and fail closed (log, do not
+  run the feature); never assume your hook is in. If you need a function another plugin holds
+  with a raw hook, ask its owner to move to `hook_safe`, subscribe to its event or ask for one.
+* `unhook` only removes your own plugin's hook or subscriptions on that target.
 
 ## Script and RNG scope
 

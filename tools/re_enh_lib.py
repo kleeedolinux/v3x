@@ -13,9 +13,9 @@ commands:
   ptr RVA          absolute 64-bit pointers to RVA in .rdata/.data (vtable slots, tables)
   anyref RVA       every instruction with a rip-relative operand to RVA (any opcode, verified by capstone)
 """
-import os, struct, sys
+import os, struct, sys, tempfile
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-os.environ.setdefault('RE_SIM_CACHE', 'D:/v3x_tmp/enhance/re_enh_index.pkl')  # never overwrite re_sim's cache
+os.environ.setdefault('RE_SIM_CACHE', os.path.join(tempfile.gettempdir(), 'v3x_re', 're_enh_index.pkl'))  # never overwrite re_sim's cache
 import capstone
 from re_sim_lib import Img
 

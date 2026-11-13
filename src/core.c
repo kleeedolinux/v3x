@@ -12,7 +12,8 @@
  *   5. API v3: exec_capture runs a command and also hands its print/log output (made on the
  *      calling thread) to a sink, via a per-thread capture slot (TLS index g_cap_tls).
  *      on_event / emit_event: named plugin-to-plugin events (fixed table of 64 subscriptions).
- *      API v4: hook_safe (generic pass-through thunk, src/safe_hook.c), main_thread_id,
+ *      API v4: hook_safe (generic pass-through thunk, src/safe_hook.c; several plugins may share
+ *      one target, raw api->hook stays exclusive -> V3X_EHOOKBUSY), main_thread_id,
  *      game_build_id, enum_commands; the optional `v3x_plugin_manifest` export is read before
  *      v3x_plugin_load (shown by `plugins`; min_api / V3X_MANIFEST_REQUIRE_BUILD refuse the load).
  *   6. Process exit. ntdll!RtlExitUserProcess (ExitProcess) is hooked: on the first call the core
@@ -36,7 +37,11 @@
 #include "../include/v3x.h"
 
 int v3x_proxy_resolve(void);
-int v3x_safe_hook_install(void *target, v3x_hook_fn pre, v3x_hook_fn post, void *user);   /* safe_hook.c */
+/* hook registry, src/safe_hook.c: per-target ownership, shared hook_safe thunks, exclusive raw hooks */
+int v3x_hook_add_safe(void *owner, void *target, v3x_hook_fn pre, v3x_hook_fn post, void *user, void **busy_owner);
+int v3x_hook_add_raw(void *owner, void *target, void *detour, void **original, void **busy_owner);
+int v3x_hook_remove(void *owner, void *target, void **busy_owner);
+int v3x_hook_subscribers(void *target);
 
 /* ------------------------------------------------------------------ state */
 
@@ -605,31 +610,71 @@ static int hook_enter(void)
     return 1;
 }
 
+/* The module (plugin DLL) a call came from: hooks are owned per module, so unhook removes only the
+ * caller's own hook and a busy target can name its owner. Falls back to the core itself. */
+static void *caller_module(void *ret_addr)
+{
+    HMODULE m = NULL;
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            (LPCWSTR)ret_addr, &m) || !m)
+        m = g_self;
+    return (void *)m;
+}
+
+static const char *module_label(void *m, char *buf, size_t n)
+{
+    char path[MAX_PATH];
+    if (!m) return "unknown (hooked outside the V3X API)";
+    if (m == (void *)g_self) return "v3x core";
+    if (!GetModuleFileNameA((HMODULE)m, path, sizeof path)) { snprintf(buf, n, "module %p", m); return buf; }
+    const char *b = strrchr(path, '\\');
+    snprintf(buf, n, "%s", b ? b + 1 : path);
+    return buf;
+}
+
+static void log_busy(const char *what, void *target, void *me, void *holder)
+{
+    char a[MAX_PATH], b[MAX_PATH];
+    int subs = v3x_hook_subscribers(target);
+    LOG("%s %p by %s: V3X_EHOOKBUSY, target held by %s (%s)%s", what, target, module_label(me, a, sizeof a),
+        module_label(holder, b, sizeof b), subs < 0 ? "raw hook" : subs ? "hook_safe" : "raw hook outside the registry",
+        subs < 0 || !subs ? "; raw hooks are exclusive, use api->hook_safe to share a function" : "");
+}
+
 static int api_hook(void *target, void *detour, void **original)
 {
+    void *me = caller_module(__builtin_return_address(0)), *holder;
     if (!hook_enter()) return MH_ERROR_NOT_INITIALIZED;
-    MH_STATUS s = MH_CreateHook(target, detour, original);
-    if (s == MH_OK) s = MH_EnableHook(target);
+    int s = v3x_hook_add_raw(me, target, detour, original, &holder);
     InterlockedDecrement(&g_hook_busy);
+    if (s == V3X_EHOOKBUSY) log_busy("hook", target, me, holder);
     return s;
 }
 
 static int api_unhook(void *target)
 {
+    void *me = caller_module(__builtin_return_address(0)), *holder;
     if (!hook_enter()) return MH_ERROR_NOT_INITIALIZED;
-    MH_DisableHook(target);
-    MH_STATUS s = MH_RemoveHook(target);
+    int s = v3x_hook_remove(me, target, &holder);
     InterlockedDecrement(&g_hook_busy);
+    if (s == V3X_EHOOKBUSY) log_busy("unhook", target, me, holder);
     return s;
 }
 
-/* API v4: pass-through thunk around the target (src/safe_hook.c); same exit guard as api_hook. */
+/* API v4: shared pass-through thunk around the target (src/safe_hook.c); same exit guard as api_hook. */
 static int api_hook_safe(void *target, v3x_hook_fn pre, v3x_hook_fn post, void *user)
 {
     if (!target || (!pre && !post)) return -1;
+    void *me = caller_module(__builtin_return_address(0)), *holder;
     if (!hook_enter()) return MH_ERROR_NOT_INITIALIZED;
-    int s = v3x_safe_hook_install(target, pre, post, user);
+    int s = v3x_hook_add_safe(me, target, pre, post, user, &holder);
     InterlockedDecrement(&g_hook_busy);
+    if (s == V3X_EHOOKBUSY) log_busy("hook_safe", target, me, holder);
+    else if (s == 0 && v3x_hook_subscribers(target) > 1) {
+        char a[MAX_PATH];
+        LOG("hook_safe %p by %s: shared target, %d subscribers", target, module_label(me, a, sizeof a),
+            v3x_hook_subscribers(target));
+    }
     return s;
 }
 

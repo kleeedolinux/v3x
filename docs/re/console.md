@@ -60,6 +60,15 @@ So command names were always completed. What was missing was arguments.
 
 ## 3. Matcher 0x3dc2140
 
+* **Signature: `(manager, CString input BY VALUE, result)`.** The caller (Autocomplete) copy-constructs
+  a temporary (0x36be7a0 -> 0x678580) and passes its address; the matcher destroys it itself before
+  returning (0x3dc296f `mov rcx,r15` = input; `call 0x67b890` CString dtor -> mi_free 0x43d94b0).
+  Lesson (crash6): never pass the matcher a CString whose buffer is not the engine's own mimalloc
+  block - mi_free on plugin memory is an access violation (seen at exe+0x43d94d6 for inputs >= 16
+  chars, heap mode). Change the engine's string in place instead (shorten size, NUL inside its
+  buffer, capacity/pointer untouched). Rule for every engine call: find out who destroys a CString
+  argument (callee-destroyed = by value) before handing over one built in the plugin.
+
 * No space in the input: fuzzy name search over all entries (0x3de2960, entries with +0x00 == 0
   are skipped when manager+0xf0 is set) plus console command macros (`CConsoleCommandMacroDatabase`
   0x3dc3050, names at +0x30, case-insensitive prefix), then sorted.
@@ -135,7 +144,7 @@ keywords decide the kind (state region before tag; "country ID"/"state ID" are n
 pushes the literal words, then the database keys (database vtable checked on every call), or for
 `event name` calls the engine's own `event` completer. The engine filters/sorts/pages as before.
 Commands with an engine completer are left alone unless `override_engine=1` or `[commands]`.
-No engine function is hooked or patched; no game script runs.
+The id completion hooks nothing; display names (section 6, `names=1`) hook the matcher and Autocomplete. No engine code is patched; no game script runs.
 
 Examples (1.15.1 descriptions): `tag` country; `annex` country; `own` state_region country;
 `conquerall` country; `change_law` law country; `treatyport`, `check_pollution_level`,
@@ -154,8 +163,107 @@ loaded, so the hook is in place before the first read. (An earlier version cance
 read with `CancelSynchronousIo`; that blocked the main thread forever about 1 run in 30-40 in
 `test/shutdown_test.c`, so it was removed.)
 
-## 6. Not verified
+## 6. Display names (`names=1`, worker namecomplete)
+
+The engine's completer gets only the arguments BEFORE the token, and the engine keeps candidates
+that CONTAIN the token, so a name like `Prús` can never reach `PRU` through the completer alone.
+
+* **Hooks** (MinHook detours, 4 integer register args forwarded; both functions take <= 3):
+  the matcher 0x3dc2140 `(manager, const CString *input, result)` and `CConsole::Autocomplete`
+  0x36be560 `(this, mode)` (only to remember `this` while it runs). Pre-step on the main thread:
+  input `cmd <args> <token>`, our record for `cmd`, kind of the argument at the token. If the
+  folded token matches display names of that kind, the token is cut off the matcher's own (by-value,
+  engine-owned) input IN PLACE (so the engine keeps every candidate) and our completer returns exactly the matching
+  ids (ids that contain the token first, then name matches by rank). One id: the engine replaces
+  the token with it. Several: `ID  (Name, context)` lines (first 15) are printed with the console's
+  own output function, the engine shows `(found: N ...)` and Tab cycles through the ids.
+  The engine's input pointer is always the one forwarded (section 3: the matcher frees it).
+* **Console output**: `CConsole::AddOutput(this, const CString *text, bool scroll)` 0x36bdd90 (the
+  call `mov r8b,1; lea rdx,[rsp+x]; mov rcx,r13; call` in Autocomplete, prologue `sub rsp,58h;
+  vpxor`); its first call 0x36bdb20 copies the text into the ring buffer at +0xd70 (count +0xd7c,
+  index +0xd88) and creates a `console_output` widget. It only copies the CString.
+* **Localization** (`pdx_localize.cpp`): `CTransactionResource<CLocalizationManager>` getter
+  0x3db2390 (object 0x5422af0, TLS transaction scope like the database getters, 164 callers).
+  Manager +0x90 = current language table (+0x00 CString name `l_english`). Table +0x38 = hash map:
+  +0x08 slot array, +0x14 mask, +0x18 max probe distance (byte); slot 0x30 bytes, +0x04 distance
+  byte (0 = empty), +0x08 32-bit key hash (murmur3 0x3e806f0), +0x10 entry = key `{char*, int len,
+  byte flag}` + value (same shape) at +0x20. Lookup 0x3db2180 (FNV over the hash bytes, robin hood),
+  used as `call getter; mov rbx,[rax+90h]; ...; lea rcx,[rbx+38h]; call 0x3db2180`
+  (e.g. 0x8fc1cf); value at entry+0x10 confirmed at 0x3dad16a (`CW_ORDINAL_NUMBER_FORMAT`).
+  console_plus does not call the hash: on first use it walks all slots once and builds its own
+  FNV-1a key index (rebuilt when language/slot array/mask change). Texts are raw: `$KEY$` (resolved
+  2 levels), `#style ... #!`, `[Script]`, `@icon!` are removed, nothing is evaluated.
+* **Name keys**: database key itself (`PRU`, `STATE_SAO_PAULO`, `law_monarchy`, `grain`, ...);
+  events `<id>.t`. `CEventDatabase` getter 0x7cdd80 (`CTransactionResource<unique_ptr<...>>`, same
+  prologue); layout from the engine `event` completer 0x86e290: `[db+8]` event*, `[db+14h]` count,
+  name CString at event+0x10 (checked in that completer's code at run time). With names on, the
+  `event` command gets our completer too; for the event argument it calls the engine's.
+* **Numeric ids of live objects**: the console's own commands look objects up as
+  `G = [[[exe+0x5c3ef90]+0x608]+0x120]`, slot array `{?, object*}` (16 bytes) at G+A, count at
+  G+A+0xc, object = slot[id]+8 (null = free id). Decoded at run time from the OnExecute (+0xb0) of
+  each command whose first argument is a numeric kind and whose other arguments name nothing:
+  `invalidate_state` 0x9570d0 (A = 0x1c30), `invalidate_character` 0x956d40 (0x1300),
+  `invalidate_country` 0x957460 (0x30), `invalidate_ig` 0x9577e0 (0x900), the building wage command
+  0x8876b0 (0x2d80). Two commands that disagree turn the kind off. The game state is read WITHOUT
+  the engine's game-state lock (0x3689380, taken by the commands when they execute): all live reads
+  go through ReadProcessMemory. Fields are found at run time: the 8-aligned offset (< 0x400) that
+  points into a known object set in >= 60 % of up to 256 sampled objects (country -> its
+  CCountryDefinition, state -> state region template and owner country, interest group -> type and
+  country, building -> type and state, character -> country); character names = the two fields that
+  hold localization keys (MSVC string or `{ptr,len}`) in >= 50 % of the sample.
+* **Matching** (`plugins/console_plus/cp_names.h`): UTF-8, ASCII case, Latin-1 + Latin Extended-A +
+  Romanian letters folded (á->a, ç->c, ß->ss, Ł->l, ...), compact form without blanks/punctuation;
+  score exact < prefix < later word starts with it < substring (2+ characters); ties: shorter name.
+  `name@ctx` filters by context (owner tag, state). Blanks end the console token, so names with
+  blanks are typed with `_` or without blanks (`Sao_Pa`, `saopa`); `own São Pa` lists the matches
+  with a hint instead.
+* **`find`**: in the GAME console type `find <text>` and press **Tab** - the matches of every kind
+  are listed (Tab-driven by design: there is no engine command `find`, so Enter does nothing
+  useful there; no engine command is registered). In the V3X console window `find <text>` is a
+  normal V3X command and works on **Enter**; it searches only the indexes already built by an
+  in-game Tab (index builds stay inside the game console's own completion call).
+
+## 6b. Country wildcards on Enter (`wildcards=1`, worker tabfix)
+
+In an argument the command describes as a country (kind `country`, not one of the command's own
+literal words such as `disable_ai all`), one wildcard per line:
+
+| Form | Expands to | Example |
+|---|---|---|
+| `*` | every country that is a subject of anyone (overlord is a live country) | `add_liberty_desire * -100` |
+| `M:*` | every direct subject of the player's country | `add_liberty_desire M:* -100` |
+| `TAG:*` | every direct subject of TAG (case-insensitive) | `add_liberty_desire GBR:* 20` |
+| `ALL` | every live country | `add_liberty_desire ALL` |
+
+The line is run once per matching tag through the console itself, then
+`console_plus: ran <cmd> for N subjects (K ok)` is printed. No match / unknown TAG / unknown player /
+two wildcards: a message and nothing runs. `add_liberty_desire <Country tag> [value, default 10]`
+(OnExecute 0x88c440) finds the subject pact via G+0x1e38 (0xc1abb0) and adds value*100000, so it
+works for subjects of any overlord, not only the player's.
+
+* **Hook**: `CConsole::ExecuteLine(this, const CString &line) -> bool` 0x36bf740, found as the call in
+  the queued-lines loop 0x36c0070 (`mov rdx,rbx; mov rcx,rdi; call; test al,al; jne; cmp [rdi+0D59h],al`,
+  unique) and checked to call the manager getter. The line is const: the history insert 0x301a470
+  copy-constructs it, the tokenizer 0x3de27e0 reads it, the caller destroys its own lines; so per-tag
+  lines built in the plugin are safe here (unlike the matcher). Only the main thread; other lines pass through.
+* **Overlord**: GetOverlord 0x93a030 (found via the call in the function that uses
+  `"%s has no overlord. 'make_independent' requires an overlord"`): G = `[[[exe+0x5c3ef90]+0x608]+0x120]`,
+  index = id & 0xffffff < [G+0x1f64], keys {int id, int slot} at [G+0x1f58], values {int overlord id,
+  bool set} at [G+0x1f70]. Decoded from the code at run time (cp_wild.h `cp_decode_overlord`), read
+  with ReadProcessMemory. Country full id at country+0x18 (checked against the id slot; mismatch = off).
+* **Player**: `[[exe+0x5c3ef90]+0x608]+0xf8`, decoded from the OnExecute of every registry command with
+  the inline "player country id" shape (TLS +0x53c check, `cp_decode_player`); 10 sites in 1.15.1, all
+  agree; a disagreement turns `M:*` off.
+* **Tags**: the live country display-name index (needs `names=1`).
+* Not seen in game; each expanded line is a separate console history entry.
+
+## 7. Not verified
 
 * Nothing was run in the game: completer calls, the getters from inside the completer, the
   registry lock and the engine's display of the candidates are from static analysis only.
-* Province ids, character/state ids (numbers) are not completed.
+* Province ids are not completed.
+* Display names (section 6) are offline-tested only: fake localization map / databases / game state
+  in `test/console_plus_test.c` part B2, anchors and id-lookup decoding against the real exe in
+  part C. Not seen in game: the hooks under the real console, the printed lines, the field
+  discovery on real objects (offsets are logged once per session), character name fields,
+  strategic region / event title localization keys, reading the game state while it ticks.

@@ -94,3 +94,58 @@ Tools: `tools/re_modload_vfs.py` (cost model, archiver anchor, bench, profile),
 - No in-game run of mod_loader (measure or on); the real number of probes and the wall-clock gain.
 - DLC vs mod mount order and replace_path semantics in code (0x3b6d020 not disassembled in detail).
 - That the engine never relies on GetLastError after a DIR miss (only the PhysFS code is set).
+
+## 5. In-game measure run (lead, 1.15.1, 23 mods, 14:31) and coverage fix
+
+- `mode=measure`, 42 roots: 3 442 575 misses (stat 2 251 365 + open 1 191 215), **103.8 s in misses**
+  (thread time). The index predicted 3 249 434 of them (97.2 s, 94.4 %), mismatches 0, false hits 0.
+- Not predicted: misses on the 7 roots that were not indexed: content pack v3x_menu (3.0 s), game, platform_specific_game_data,
+  jomini, clausewitz (0.8-0.9 s each), the Documents user dir (0.2 s), the install dir (3 probes).
+- Fix: `index_game=1` (game, jomini, clausewitz, platform_specific_game_data: exact install folders) and
+  `index_packs=1` (binaries/v3x/content_packs/<x>), both on by default. The Documents user/write dir stays
+  unindexed. `log_misses=32` lists the first unpredicted misses (reason: root-not-indexed / unsafe-name /
+  index-building) in the report; the summary line prints `coverage %`.
+- Offline replay (`mlt.exe --replay <game> <docs> [step]`): the 40 indexable real roots x 35 233 real paths
+  (original case) = 1 409 320 probes, 1 373 288 misses, **99.90 % predicted, 0 mismatches, 0 false hits**.
+  The rest are non-ASCII names (e.g. `..._méditerranée.dds`), which are never predicted on purpose (we do not
+  copy Windows' Unicode case folding).
+
+## 6. Compact index, reuse across launches, shared file format
+
+- Lookup structure per root: sorted, deduplicated `uint64_t` array of FNV-1a-64 hashes (`| 1`) of every
+  key (file and directory paths, ASCII lower-case, `/`), 8 bytes per key, interpolation search with a binary
+  fallback (`ml_hv_has`). A hash collision can only say "maybe present" -> the engine is asked (safe).
+  Hot path `ml_key` = normalize + hash in one pass, no buffer, same reject rules as `ml_norm`.
+- Signature = every directory of the root with its last-write time (read BEFORE the directory is listed).
+  Adding/removing/renaming an entry changes its parent's mtime, so "all mtimes equal" == "same names".
+  Content edits do not matter (existence only). Next launch: one GetFileAttributesExW per directory;
+  any difference (or a missing dir) = that root is rebuilt. `index_cache=1` (default).
+- Offline numbers (`mlt.exe --replay`, lead's install: 40 roots, 36 032 keys, 2 849 dirs, warm FS cache):
+  fresh build 121-146 ms CPU total (largest root game/ 57-73 ms), signature check of all roots 21-27 ms,
+  file load 0.9-1.1 ms, lookup 30-37 ns, `ml_key` 114-117 ns per path (the old two-step ml_norm + hash was
+  406-445 ns), memory 621 KB (288 KB hashes), file 424 KB. Answers after a reload are identical to a fresh
+  build; 0 mismatches over 1 409 320 real probes. The "wall" times the replay prints include the test's
+  Sleep(5) polling and are not build cost.
+- Texture path resolution 0x3e14180 (texture object 0x3c42ef0) goes 0x3e1be00 -> 0x3e1bcb0 ->
+  PHYSFS_getRealDir 0x3dffd50 -> DIR stat, i.e. through the hooked stat: already answered by the index, with
+  the same safety rules (static call trace, verified).
+
+### `binaries/v3x/mod_loader.index` (read-only for other plugins; written by mod_loader)
+
+All integers little-endian, no padding. Written to `mod_loader.index.tmp` and then renamed, so readers
+never see a half-written file.
+
+| field | type |
+|---|---|
+| magic | 8 bytes `V3XMLIX\0` |
+| version | u32 = 1 (`ML_IXFILE_VERSION`) |
+| nroots | u32 |
+| per root: root | u16 length + bytes: normalized root path (lower-case ASCII, `/`, no trailing `/`, UTF-8) |
+| per root: ndirs | u32, then ndirs x { u16 length + bytes: dir relative to the root (`""` = the root, first), u64 FILETIME last-write } |
+| per root: nhash | u32, then nhash x u64, strictly increasing |
+| checksum | u64 FNV-1a-64 (offset 14695981039346656037, prime 1099511628211) over all previous bytes |
+
+Key hash: FNV-1a-64 over the key bytes, then `| 1`. Key = path relative to the root, components joined by
+`/`, A-Z lowered to a-z, other bytes unchanged. Readers must reject the whole file on any bounds, order,
+version or checksum error (reference: `ml_ixfile_read` in plugins/mod_loader/ml_core.c), and must check the
+directory mtimes themselves before trusting a root (the file may be from an older launch).

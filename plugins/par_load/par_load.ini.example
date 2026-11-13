@@ -1,0 +1,21 @@
+# par_load.ini - copy to <game>/binaries/v3x/par_load.ini (all keys optional). See docs/re/par_load.md.
+#
+# mode = off      no hooks
+# mode = measure  (default) times every serial game-init step, the time spent in VFSOpen / lexer /
+#                 blend-shape loads / pdx_asset reads inside each step, distinct vs total asset paths,
+#                 and every database callback of the serial database ready-loop. No behaviour change.
+#                 Report: binaries/v3x/par_load_report.txt (after each load transition, on exit and with
+#                 the console command `parload`).
+# mode = on       reserved for proven-safe parallel steps; in this build none is proven, so it runs as measure.
+mode = measure
+
+db_times = 1      # 1 = time each database callback (generated thunks, pointers restored after the loop)
+top_db = 40       # databases listed in the report
+
+# Blend-shape file prefetch (OS file-cache warm-up). Every run records the blend-shape step's reads in engine
+# order (vfs path + the root PhysFS resolved) to binaries/v3x/par_load_prefetch.txt after the first load.
+# blendshape_cache = 1: the next launch starts a below-normal thread at game init that reads those files
+# (bytes discarded), at most prefetch_window_mb ahead of the engine. The engine still opens and reads every
+# file itself: same bytes, no engine memory touched. Report shows hit / in flight / miss / path mismatch.
+blendshape_cache = 0
+prefetch_window_mb = 64

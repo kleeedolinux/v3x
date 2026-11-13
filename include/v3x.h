@@ -54,6 +54,9 @@ typedef void (*v3x_command_fn)(const char *args, void *user);
  * than 16 arguments are NOT forwarded correctly (do not hook_safe them). __vectorcall / HVA
  * arguments are not supported. */
 #define V3X_HOOK_MAX_ARGS 16
+#define V3X_HOOK_MAX_SUBSCRIBERS 8   /* hook_safe subscribers per target (all plugins together) */
+#define V3X_EHOOKBUSY 100            /* hook / hook_safe / unhook: the target is held by another plugin
+                                        (see v3x.log for the owner); outside the MH_STATUS range */
 typedef union V3X_Xmm {
     double d;          /* a double argument / return value */
     float f;           /* a float argument / return value */
@@ -141,7 +144,15 @@ typedef struct V3X_API {
     void *(*function_start)(const void *addr);
 
     /* Inline hooking (MinHook). `original` receives a callable trampoline.
-     * Return 0 on success, otherwise a MinHook MH_STATUS code. */
+     * Return 0 on success, otherwise a MinHook MH_STATUS code.
+     * A raw hook is EXCLUSIVE: on a target that already has a raw hook or hook_safe subscribers
+     * (from any plugin) hook returns V3X_EHOOKBUSY and v3x.log names the owner. Prefer hook_safe
+     * for engine functions other plugins may want too: it can be shared.
+     * unhook removes only what the CALLING module (plugin DLL, found from the return address)
+     * holds on `target`: its raw hook, or all of its hook_safe subscriptions there (other plugins'
+     * subscriptions stay; the thunk is disabled and the original bytes restored when the last
+     * subscriber leaves). Returns V3X_EHOOKBUSY if only other plugins hold it,
+     * MH_ERROR_NOT_CREATED (4) if nothing is hooked. */
     int (*hook)(void *target, void *detour, void **original);
     int (*unhook)(void *target);
 
@@ -225,9 +236,21 @@ typedef struct V3X_API {
      *   has unwind info, so exceptions and stack walks pass through it. Callbacks run on whatever
      *   thread calls the hooked function (often an engine worker): keep them short, and never run
      *   game script from them unless you know you are inside a tick task (sdk/v3x_game.h
-     *   v3x_script_random_allowed). Returns 0 or a MinHook MH_STATUS like hook (12 =
-     *   MH_ERROR_MEMORY_ALLOC also when the thunk pool is full, -1 bad args). Remove with unhook;
-     *   the thunk itself is never freed (a thread may still be inside it). Any thread.
+     *   v3x_script_random_allowed). Returns 0 or a MinHook MH_STATUS like hook (9 =
+     *   MH_ERROR_MEMORY_ALLOC also when the thunk pool is full or the target already has
+     *   V3X_HOOK_MAX_SUBSCRIBERS subscribers, 3 = MH_ERROR_ALREADY_CREATED when this plugin already
+     *   subscribed the same pre/post/user there, V3X_EHOOKBUSY when the target has a raw hook,
+     *   -1 bad args). Remove with unhook; the thunk itself is never freed (a thread may still be
+     *   inside it). Any thread.
+     *   Several plugins (or one plugin several times, with different pre/post/user) may hook_safe
+     *   the SAME target: they share one thunk and run nested, like wrappers. pre callbacks run in
+     *   subscription order, then the original, then post callbacks in REVERSE order. Each one gets
+     *   its own call->user and its own call->scratch; args / ret changes are seen by the next one.
+     *   A pre that sets skip_original ends the chain for that call: the later subscribers' pre and
+     *   post do not run, the original is not called, the post callbacks of the earlier subscribers
+     *   and of the skipping one still run (so the first subscriber to skip wins). Subscribing and
+     *   unsubscribing are safe while other threads call the target; a call that already started
+     *   finishes with the subscriber list it started with.
      * main_thread_id: Win32 thread id of the game's main thread (the one on_frame/run_on_main use).
      * game_build_id: identity of the running victoria3.exe from its PE header,
      *   "<TimeDateStamp hex>-<SizeOfImage hex>", e.g. "6af3094f-60fb000". It changes with every

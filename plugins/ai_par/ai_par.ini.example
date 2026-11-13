@@ -1,0 +1,24 @@
+# ai_par.ini - copy to <game>/binaries/v3x/ai_par.ini (all keys optional). See docs/re/ai_par.md.
+#
+# enabled = 0     nothing is installed (also: env V3X_NO_AIPAR=1, or mode = off)
+# mode = measure  (default) read-only hook_safe probes: serial vs parallel time of HandleAutonomousInvestment,
+#                 UpdateAI, UpdateStateTrades, UpdatePopGrowth; every range-parallel stage (wall, range size,
+#                 threads, engine chunking, cost heuristic); per-item cost distribution; RenderFrameIfNeeded time
+#                 per call site. Report: console `aipar` (`aipar reset`), after Game->Empty and on exit ->
+#                 binaries/v3x/ai_par_report.txt
+# mode = on       REFUSED in this build (no serial loop is proven safe to run in parallel); runs as measure.
+enabled = 1
+mode = measure
+
+probe_items = 1   # 1 = also time every item (HAI country eval, UpdateAI subsystem, trades record eval)
+
+# Chunking lever (opt-in, default off). For the listed range-parallel tasks whose stage did not pick a batch mode
+# itself, RunRangeExecutionParallel is called with batch mode 2 = grain 1: every item is pulled individually from
+# the engine's own atomic work counter (the engine uses grain 1 itself for its "Expensive" items, and on machines
+# with many workers). What is computed does not change, only which thread takes which item when. The report line
+# "finer chunking can recover at most X ms" says whether it can help on this machine before you turn it on.
+fine_chunks = 0
+fine_chunks_tasks = HandleAutonomousInvestment,UpdateAI
+# 1 = keep the engine's cost heuristic (Expensive items first); the lever then only acts when the heuristic
+#     declines. 0 = also disengage the heuristic for these calls, so the whole range runs with grain 1.
+fine_chunks_heuristic = 1

@@ -1,8 +1,8 @@
 ---
 title: "Updating V3X"
-summary: ""
-group: modders
-order: 50
+summary: "How V3X updates itself with the updater plugin, and how to update by hand."
+group: players
+order: 7
 source: "docs/updating.md"
 sourceUrl: "https://github.com/kleeedolinux/v3x/blob/main/docs/updating.md"
 updated: "2026-11-13"

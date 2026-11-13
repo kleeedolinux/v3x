@@ -19,4 +19,6 @@ const rows = [...shipped].sort((a, b) => Number(b.on) - Number(a.on));
     </tbody>
   </table>
 </div>
-<p class="text-sm text-ink-400">{pt ? "Fonte: " : "Source: "}<a href="/docs/install/">docs/install.md</a>{pt ? " e o " : " and the "}<a href="/docs/plugins/">{pt ? "catálogo de plugins (em inglês)" : "plugin catalog"}</a>.</p>
+<p class="text-sm text-ink-400">{pt
+  ? "Desligado = instalado, mas desligado: ligue em menu principal › V3X. "
+  : "Off = installed but switched off: turn it on in main menu › V3X. "}{pt ? "Fonte: " : "Source: "}<a href={"https://github.com/kleeedolinux/v3x/blob/main/installer/profile.txt"}>installer/profile.txt</a>{pt ? " e o " : " and the "}<a href="/docs/plugins/">{pt ? "catálogo de plugins (em inglês)" : "plugin catalog"}</a>.</p>

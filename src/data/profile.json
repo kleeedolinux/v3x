@@ -1,0 +1,170 @@
+{
+  "source": "installer/profile.txt",
+  "plugins": [
+    {
+      "name": "crash_logger",
+      "state": "on",
+      "reason": "writes v3x/crash.log on a crash: the evidence a player sends with a bug report; read-only"
+    },
+    {
+      "name": "content_packs",
+      "state": "on",
+      "reason": "file overrides from v3x/content_packs/; inert without packs; needed by mod_menu, loc_fallback, script_ext"
+    },
+    {
+      "name": "mod_menu",
+      "state": "on",
+      "reason": "the main-menu \"V3X\" button: the player's on/off switch for every other plugin; fails closed to the vanilla menu"
+    },
+    {
+      "name": "script_ext",
+      "state": "on",
+      "reason": "passive: hooks nothing; lets plugins ship script/loc/gui packs via content_packs"
+    },
+    {
+      "name": "keep_history",
+      "state": "off",
+      "reason": "country graphs are no longer wiped when switching country; played 4h"
+    },
+    {
+      "name": "ironman_console",
+      "state": "off",
+      "reason": "developer console usable in ironman (multiplayer stays blocked); off because it can matter for achievements"
+    },
+    {
+      "name": "log_filter",
+      "state": "off",
+      "reason": "drops noisy engine log lines; played 4h"
+    },
+    {
+      "name": "frame_pacer",
+      "state": "off",
+      "reason": "timer sleep instead of a busy-wait frame cap, lower fps when idle/background; played 4h"
+    },
+    {
+      "name": "cpu_sched",
+      "state": "off",
+      "reason": "P-/E-core placement on hybrid CPUs, nothing on other CPUs; played 4h"
+    },
+    {
+      "name": "gfx_driver",
+      "state": "off",
+      "reason": "fewer D3D11 driver threads; retries without the flag on failure; played 4h"
+    },
+    {
+      "name": "mem_tuner",
+      "state": "off",
+      "reason": "lower memory commit, one out-of-memory rescue; played 4h"
+    },
+    {
+      "name": "fast_load",
+      "state": "off",
+      "reason": "load timeline + load_transition events other plugins use; optional speedups stay off; played 4h"
+    },
+    {
+      "name": "console_plus",
+      "state": "off",
+      "reason": "Tab completion of console arguments; catalog says not run in game and it had a crash fixed recently (crash6)"
+    },
+    {
+      "name": "loc_fallback",
+      "state": "off",
+      "reason": "English text for keys a mod did not translate; useful for non-English players"
+    },
+    {
+      "name": "enhance",
+      "state": "off",
+      "reason": "only acts in debug mode (binary saves) or with opt-in speed/lean options; catalog: smoke test only"
+    },
+    {
+      "name": "asset_stream",
+      "state": "off",
+      "reason": "forces the texture streamer on; opt-in (its own default is off too)"
+    },
+    {
+      "name": "lazy_mesh",
+      "state": "off",
+      "reason": "faster 3D model loading needs mode=lazy in lazy_mesh.ini; opt-in"
+    },
+    {
+      "name": "sim_opt",
+      "state": "off",
+      "reason": "simulation changes (throttle) are opt-in; single player only; back up saves first"
+    },
+    {
+      "name": "map_cache",
+      "state": "off",
+      "reason": "default mode=measure (reports only); keep-alive needs mode=on in map_cache.ini"
+    },
+    {
+      "name": "mod_loader",
+      "state": "off",
+      "reason": "default mode=measure (reports only); mode=on ran 1h44m in game 2026-11-13: 0 mismatches, 98,786 verified skips"
+    },
+    {
+      "name": "par_load",
+      "state": "off",
+      "reason": "default mode=measure (reports only)"
+    },
+    {
+      "name": "lazy_gfx",
+      "state": "off",
+      "reason": "default mode=measure (reports only); not run in game"
+    },
+    {
+      "name": "fast_lookup",
+      "state": "off",
+      "reason": "default mode=measure; caused crash5 (fixed); measure ran 1h44m in game 2026-11-13: 1.72 M calls, 0 mismatches"
+    },
+    {
+      "name": "tick_par",
+      "state": "off",
+      "reason": "read-only tick parallelism analysis (reports only)"
+    },
+    {
+      "name": "ai_par",
+      "state": "off",
+      "reason": "measure-only analysis of AI/economy tick tasks (mode=on refused); fine_chunks is opt-in; not run in game"
+    },
+    {
+      "name": "hello",
+      "state": "none",
+      "reason": "SDK example plugin, logs only"
+    },
+    {
+      "name": "devtools",
+      "state": "none",
+      "reason": "CPU/memory profiler for developers"
+    },
+    {
+      "name": "devconsole",
+      "state": "none",
+      "reason": "reverse-engineering commands (disassembly, memory scans)"
+    },
+    {
+      "name": "devbridge",
+      "state": "none",
+      "reason": "named pipe for the developer MCP server (local tool access to the console)"
+    },
+    {
+      "name": "tick_profiler",
+      "state": "none",
+      "reason": "per-tick-task timing for developers"
+    },
+    {
+      "name": "alloc_tracker",
+      "state": "none",
+      "reason": "allocation tracker, heavy overhead (periodic report = ~0.55 s frame stalls)"
+    },
+    {
+      "name": "updater",
+      "state": "off",
+      "reason": "in-game auto-update; shipped off until the first release with compat.json exists"
+    },
+    {
+      "name": "doctor",
+      "state": "on",
+      "reason": "in-game health check (console: doctor); read-only, writes ini only on an explicit doctor fix"
+    }
+  ]
+}

@@ -4,7 +4,7 @@
 
 - 3D-model loading pass: 37.5 s before, 6.7 s with the optional lazy_mesh plugin.
 - Debug-mode autosave: 156 MB before, 26 MB with the optional enhance plugin.
-- GDP and other history graphs are kept when you switch country (keep_history, on by default).
+- GDP and other history graphs are kept when you switch country (keep_history plugin, installed off: turn it on in main menu > V3X).
 - Not for multiplayer. Uninstall: run V3X-Setup.exe > Uninstall, or delete binaries\version.dll and binaries\v3x.
 
 ## Pages

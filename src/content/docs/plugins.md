@@ -18,7 +18,7 @@ deleting it: `[plugins]` `<plugin> = 0` in `binaries/v3x/v3x.ini`, or the main-m
 
 Sources for this page (2026-11-13): each plugin's header comment (`plugins/<p>/<p>.c`, line 1 on),
 its `*.ini.example`, the player installer profile [`installer/profile.txt`](https://github.com/kleeedolinux/v3x/blob/main/installer/profile.txt),
-the session report [`docs/sessions/2026-11-13-evening.md`](/docs/session-2026-11-13/) (cited
+the 2026-11-13 play-session measurements (cited
 as `S:<line>`), [CHANGELOG.md](https://github.com/kleeedolinux/v3x/blob/main/CHANGELOG.md), [safety.md](/docs/safety/) and `docs/re/*.md`.
 Line numbers in plugin sources are as of 2026-11-13; the sdk worker is adding manifests to those
 files, so they may shift by a few lines.

@@ -14,6 +14,7 @@ function gear(n: number, ro: number, ri: number, cx = 0, cy = 0) {
   }
   return "M" + pts.join("L") + "Z";
 }
+import { onAfterInstall } from "../data/facts";
 const pt = Astro.props.lang === "pt-BR";
 const big = gear(28, 248, 228);
 const mid = gear(14, 96, 82);
@@ -50,12 +51,12 @@ const small = gear(10, 64, 53);
     class="absolute top-1/2 left-1/2 w-[58%] -translate-x-1/2 -translate-y-1/2 drop-shadow-[0_30px_60px_rgb(0_0_0/0.55)]" />
 
   <div aria-hidden="true" class="absolute top-[14%] left-[-4%] hidden animate-float rounded-xl border border-white/10 bg-ink-850/85 px-3.5 py-2.5 font-mono text-[12px] shadow-xl backdrop-blur sm:block">
-    <span class="mr-2 inline-block size-2 rounded-full bg-[#4ee06a] shadow-[0_0_10px_#4ee06a]"></span><span class="text-ink-100">keep_history</span> <span class="text-ink-400">ok</span>
+    <span class="mr-2 inline-block size-2 rounded-full bg-[#4ee06a] shadow-[0_0_10px_#4ee06a]"></span><span class="text-ink-100">mod_menu</span> <span class="text-ink-400">ok</span>
   </div>
   <div aria-hidden="true" class="absolute right-[-2%] bottom-[22%] hidden animate-float rounded-xl border border-white/10 bg-ink-850/85 px-3.5 py-2.5 font-mono text-[12px] shadow-xl backdrop-blur [animation-delay:-3s] sm:block">
     <span class="mr-2 inline-block size-2 rounded-full bg-cyan shadow-[0_0_10px_var(--color-cyan)]"></span><span class="text-ink-100">lazy_mesh</span> <span class="text-teal-200">{pt ? "37,5 s → 6,7 s" : "37.5 s → 6.7 s"}</span>
   </div>
   <div aria-hidden="true" class="absolute bottom-[-2%] left-[30%] hidden animate-float rounded-xl border border-white/10 bg-ink-850/85 px-3.5 py-2.5 font-mono text-[12px] shadow-xl backdrop-blur [animation-delay:-6s] md:block">
-    <span class="mr-2 inline-block size-2 rounded-full bg-brass-300 shadow-[0_0_10px_var(--color-brass-300)]"></span><span class="text-ink-100">{pt ? "21/23 plugins carregados" : "21/23 plugins loaded"}</span>
+    <span class="mr-2 inline-block size-2 rounded-full bg-brass-300 shadow-[0_0_10px_var(--color-brass-300)]"></span><span class="text-ink-100">{pt ? `${onAfterInstall.length}/${onAfterInstall.length} plugins carregados` : `${onAfterInstall.length}/${onAfterInstall.length} plugins loaded`}</span>
   </div>
 </div>

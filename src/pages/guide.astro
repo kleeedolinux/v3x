@@ -3,7 +3,7 @@ import Base from "../layouts/Base.astro";
 import DocsShell from "../components/DocsShell.astro";
 import CopyCmd from "../components/CopyCmd.astro";
 import PluginTable from "../components/PluginTable.astro";
-import { RELEASES_URL } from "../data/facts";
+import { RELEASES_URL, onAfterInstall, isOn } from "../data/facts";
 
 const toc = [
   ["before", "Before you start"], ["install", "Install"], ["first-start", "The first start"],
@@ -11,7 +11,7 @@ const toc = [
   ["achievements", "Achievements, ironman, multiplayer"], ["update", "Update, repair, uninstall"], ["trouble", "When something goes wrong"],
 ];
 const ini = `[plugins]
-ironman_console=0
+keep_history=1
 loc_fallback=1`;
 ---
 <Base title="How to install V3X for Victoria 3: players' guide" ogType="article" crumbs={[{ name: "V3X", href: "/" }, { name: "Players' guide", href: "/guide/" }]} jsonLd={[{ "@type": "TechArticle", headline: "Installing and using V3X", inLanguage: "en", about: "Victoria 3", proficiencyLevel: "Beginner" }]} description="How to install V3X for Victoria 3, use the main-menu V3X button, turn parts on and off, keep achievements, uninstall, and what to do when something goes wrong." section="guide" alternate="/pt-br/guia/">
@@ -96,7 +96,7 @@ loc_fallback=1`;
       
 
       <h2 id="parts">What is on, what is off</h2>
-        <p>V3X is a set of parts (plugins). Setup switches on the ones that fix or protect without changing your game, and installs the rest switched off, for you to try.</p>
+        <p>V3X is a platform; the parts listed here are plugins built on it. Setup switches on only the minimum: {onAfterInstall.map((n, i) => <>{i ? ", " : ""}<code>{n}</code></>)}. Everything else is installed switched off: turn it on in main menu › <b>V3X</b> or in <code>v3x.ini</code>. Developer tools are not installed.</p>
         <PluginTable lang="en" />
       
 
@@ -112,7 +112,7 @@ loc_fallback=1`;
       
 
       <h2 id="achievements">Achievements, ironman, multiplayer</h2>
-        <p><b>Achievements.</b> V3X does not touch achievement code or DLC ownership and unlocks nothing. One part that is on by default, <code>ironman_console</code>, lets the console work in ironman. If achievements matter to you, set <code>ironman_console=0</code>, and leave the parts that change the simulation (<code>sim_opt</code>'s throttle) off.</p>
+        <p><b>Achievements.</b> V3X does not touch achievement code or DLC ownership and unlocks nothing. One part, <code>ironman_console</code> ({isOn("ironman_console") ? "on by default" : "installed off"}), lets the console work in ironman. If achievements matter to you, keep <code>ironman_console=0</code>, and leave the parts that change the simulation (<code>sim_opt</code>'s throttle) off.</p>
         <p><b>Multiplayer.</b> Do not use V3X online: other players would run different code, and parts that change the simulation would put you out of sync. Before a multiplayer session, rename <code>binaries\version.dll</code> to <code>version.dll.off</code>, and rename it back afterwards. Or uninstall.</p>
       
 

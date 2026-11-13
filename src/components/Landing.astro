@@ -5,7 +5,7 @@ import Icon from "./Icon.astro";
 import CopyCmd from "./CopyCmd.astro";
 import HeroArt from "./HeroArt.astro";
 import { en, pt } from "../i18n/landing";
-import { RELEASES_URL, REPO_URL, BRAND, measured } from "../data/facts";
+import { RELEASES_URL, REPO_URL, BRAND, measured, isOn } from "../data/facts";
 
 interface Props { lang: "en" | "pt-BR" }
 const { lang } = Astro.props;
@@ -23,28 +23,45 @@ const jsonLd = [
     featureList: t.register.map((r) => r.head) },
   { "@type": "FAQPage", inLanguage: lang, mainEntity: t.qa.map((q) => ({ "@type": "Question", name: q.q, acceptedAnswer: { "@type": "Answer", text: strip(q.a) } })) },
 ];
-const code = `#include <windows.h>
+const code = `#include <string.h>
 #include "v3x.h"
+#include "v3x_script.h"
 
-V3X_PLUGIN_MANIFEST("tick_counter", "0.1.0", "you", "counts game ticks", "release/1.15*");
-static volatile LONG g_ticks;
+V3X_PLUGIN_MANIFEST("my_keywords", "0.1.0", "you", "effect in C", "release/1.15*");
+static const V3X_API *api;
 
-static void on_tick(V3X_HookCall *call) { (void)call; InterlockedIncrement(&g_ticks); }
-
-V3X_EXPORT int v3x_plugin_load(const V3X_API *api)
+/* script: v3x_note = "text"  (any thread: keep it short) */
+static void fx_note(const V3X_ScriptScope *scope, const char *value, void *user)
 {
-    if (!V3X_HAS(api, hook_safe)) return 1;                 /* loader older than API v4 */
-    void *s  = api->find_string("Processing Tick: ");      /* 1. anchor: a log string */
-    void *x  = s ? api->find_xref(s, 0) : NULL;            /* 2. the code that loads it */
-    void *fn = x ? api->function_start(x) : NULL;          /* 3. its function (.pdata) */
-    if (!fn) { api->log("tick_counter", "anchor FAILED: nothing installed"); return 1; }
-    return api->hook_safe(fn, on_tick, NULL, NULL);        /* 4. observe; args forwarded */
+    (void)user;
+    api->log("my_keywords", "%s (scope type %u, id %llu)", value,
+             (unsigned)scope->type, (unsigned long long)scope->id);
+}
+
+static const char ON_ACTIONS[] =                /* script shipped from C */
+    "on_monthly_pulse_country = { on_actions = { my_monthly } }\\n"
+    "my_monthly = { effect = { v3x_note = \\"a month passed\\" } }\\n";
+
+V3X_EXPORT int v3x_plugin_load(const V3X_API *a)
+{
+    api = a;
+    const V3X_ScriptExt *sx = v3x_script_get(api);
+    if (!V3X_SCRIPT_HAS(sx, register_effect)) return 0;
+    /* 1. a new script keyword, 2. the script that uses it */
+    if (sx->register_effect("v3x_note", fx_note, NULL)) return 0;
+    if (sx->begin_pack("my_keywords") != V3X_SCRIPT_OK) return 0;
+    sx->write_file("my_keywords", "common/on_actions/my_on_actions.txt",
+                   ON_ACTIONS, strlen(ON_ACTIONS));
+    sx->end_pack("my_keywords");
+    return 0;
 }`;
 const bars = [
   { before: measured.meshLoad.before, after: measured.meshLoad.after },
   { before: measured.debugSave.before, after: measured.debugSave.after },
 ];
-const isOn = (p: string) => / · (on|ligado)$/.test(p);
+const docLinks = isPt
+  ? [["/docs/plugin-template/", "Template de plugin"], ["/docs/scripting/", "Script a partir de C"], ["/docs/testing/", "Testes offline"], ["/docs/api-stability/", "Estabilidade da API"]]
+  : [["/docs/plugin-template/", "Plugin template"], ["/docs/scripting/", "Script from C"], ["/docs/testing/", "Offline tests"], ["/docs/api-stability/", "API stability"]];
 ---
 <Base title={t.title} description={t.description} lang={lang} section="home" alternate={isPt ? "/" : "/pt-br/"} jsonLd={jsonLd}>
 
@@ -72,7 +89,8 @@ const isOn = (p: string) => / · (on|ligado)$/.test(p);
 
         <div data-reveal style="--d:240ms" class="mt-10 flex flex-wrap items-center gap-3">
           <a class="btn-primary w-full !px-6 !py-3.5 text-[17px] sm:w-auto" href={RELEASES_URL}><Icon name="download" class="size-5" />{t.download}</a>
-          <a class="btn-secondary w-full !px-6 !py-3.5 text-[17px] sm:w-auto" href={REPO_URL}><Icon name="github" class="size-5" />{t.github}</a>
+          <a class="btn-secondary w-full !px-6 !py-3.5 text-[17px] sm:w-auto" href="/docs/getting-started/"><Icon name="book" class="size-5" />{t.buildCta}</a>
+          <a class="btn-secondary w-full !px-6 !py-3.5 text-[17px] sm:w-auto" href={REPO_URL}><Icon name="github" class="size-5" />GitHub</a>
         </div>
         <p data-reveal style="--d:280ms" class="mt-3 text-sm text-ink-300">{t.downloadSub}</p>
 
@@ -88,6 +106,60 @@ const isOn = (p: string) => / · (on|ligado)$/.test(p);
     </div>
 
 
+  </section>
+
+  <!-- BUILD: the platform -->
+  <section id="build" class="section relative overflow-hidden">
+    <div aria-hidden="true" class="pointer-events-none absolute top-20 right-[-10%] -z-10 size-[600px] rounded-full bg-[radial-gradient(closest-side,rgb(31_53_80/0.9),transparent)]"></div>
+    <div class="container-x">
+      <div data-reveal class="grid gap-8 lg:grid-cols-2 lg:items-end lg:gap-16">
+        <div>
+          <p class="eyebrow">{t.bKicker}</p>
+          <h2 class="section-title mt-4">{t.bTitle}</h2>
+        </div>
+        <div>
+          <p class="text-lg text-ink-200">{t.bIntro}</p>
+          <div class="mt-5 flex flex-wrap gap-2">
+            <img src="/assets/badge-v3x-api.svg" alt="V3X API v4" width="132" height="20" class="h-5 w-auto" loading="lazy" />
+            <img src="/assets/badge-v3x-plugin.svg" alt="V3X plugin" width="150" height="20" class="h-5 w-auto" loading="lazy" />
+          </div>
+        </div>
+      </div>
+      <div class="mt-12 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        {t.layers.map((l, i) => (
+          <article data-reveal style={`--d:${i * 80}ms`} class="card card-hover p-6">
+            <img src={`/assets/icon-${l.icon}.svg`} alt="" width="40" height="40" class="size-10" loading="lazy" />
+            <h3 class="mt-5 text-xl font-semibold tracking-tight text-white">{l.h}</h3>
+            <p class="rich mt-2 text-[15px] leading-relaxed text-ink-300" set:html={l.t} />
+          </article>
+        ))}
+      </div>
+      <div class="mt-14 grid items-start gap-10 lg:grid-cols-[1.15fr_0.85fr]">
+        <figure data-reveal="scale" class="relative min-w-0">
+          <div aria-hidden="true" class="absolute -inset-x-10 -inset-y-6 -z-10 rounded-[3rem] bg-[radial-gradient(closest-side,rgb(185_139_62/0.16),transparent)] blur-2xl"></div>
+          <div class="frame">
+            <div class="frame-bar"><i></i><i></i><i></i><span class="ml-3 truncate font-mono text-[11px] text-ink-400">my_keywords.c</span><span class="ml-auto font-mono text-[11px] text-ink-400">C · V3X + script_ext</span></div>
+            <Code code={code} lang="c" theme="css-variables" class="!m-0 !rounded-none !border-0 !bg-transparent !px-6 !py-6 !text-[12px] md:!text-[13px]" />
+          </div>
+          <figcaption class="mt-4 text-sm text-ink-400">{t.codeCaption}</figcaption>
+        </figure>
+        <div data-reveal class="min-w-0">
+          <h3 class="text-2xl font-semibold tracking-tight text-white">{t.s7}</h3>
+          <p class="mt-3 text-[17px] text-ink-200">{t.modders}</p>
+          <ul class="mt-6 grid gap-2 sm:grid-cols-2">
+            {docLinks.map(([h, l]) => <li><a href={h} class="inline-flex items-center gap-1.5 font-medium text-brass-300 hover:text-brass-200">{l}<Icon name="arrow" class="size-4" /></a></li>)}
+          </ul>
+          <div class="mt-7 flex flex-wrap gap-3">
+            <a class="btn-primary" href="/docs/getting-started/"><Icon name="book" />{t.modStart}</a>
+            <a class="btn-secondary" href="/docs/">{t.modLink}<Icon name="arrow" class="size-4" /></a>
+          </div>
+        </div>
+      </div>
+      <figure data-reveal="scale" class="mt-16">
+        <div class="plate"><img src="/assets/platform.svg" width="1200" height="560" alt={t.platformAlt} class="block w-full rounded-xl" loading="lazy" /></div>
+        <figcaption class="mx-auto mt-4 max-w-3xl text-center text-sm text-ink-400">{t.plate2}</figcaption>
+      </figure>
+    </div>
   </section>
 
   <!-- TRUST STRIP -->
@@ -156,10 +228,12 @@ const isOn = (p: string) => / · (on|ligado)$/.test(p);
       <div class="mt-16 grid gap-5 md:grid-cols-3">
         {t.stats.map((s, i) => (
           <article data-reveal style={`--d:${i * 110}ms`} class="card card-hover bars relative flex flex-col overflow-hidden p-7 md:p-8">
-            <div class="flex items-start justify-between gap-3">
-              <h3 class="text-[15px] font-semibold text-ink-100">{s.label}</h3>
-              <span class={isOn(s.plugin) ? "pill-on" : "pill-opt"}>{s.plugin.split(" · ")[0]}</span>
+            <div class="flex flex-wrap items-center justify-between gap-2">
+              <span class="font-mono text-[11px] font-semibold tracking-[0.14em] text-brass-200 uppercase">{t.pluginTag} · {s.plugin}</span>
+              <span class="pill-opt">{t.builtOn}</span>
             </div>
+            <h3 class="mt-4 text-lg font-semibold tracking-tight text-white">{s.label}</h3>
+            <p class="mt-1.5 flex items-center gap-2 text-[13px] text-ink-300"><span class={isOn(s.plugin) ? "pill-on" : "pill-opt"}>{isOn(s.plugin) ? t.stampOn : t.stampOpt}</span>{isOn(s.plugin) ? t.stateOn : t.stateOff}</p>
             {s.to !== undefined ? (
               <>
                 <p class="mt-8 flex items-baseline gap-2 font-bold tracking-tight text-white">
@@ -168,15 +242,14 @@ const isOn = (p: string) => / · (on|ligado)$/.test(p);
                 </p>
                 <p class="mt-2 text-sm text-ink-300">{isPt ? "antes" : "was"} <span class="font-mono text-rust-300 line-through decoration-rust-400/60">{s.before}</span></p>
                 <div class="mt-7 space-y-2.5" aria-hidden="true">
-                  <div class="flex items-center gap-3"><span class="w-16 shrink-0 text-[11px] font-medium tracking-wide text-ink-400 uppercase">{t.figBefore}</span><span class="h-2.5 flex-1 rounded-full bg-white/[0.05]"><span class="bar block h-full rounded-full bg-gradient-to-r from-rust-500 to-rust-400" style="width:100%"></span></span></div>
-                  <div class="flex items-center gap-3"><span class="w-16 shrink-0 text-[11px] font-medium tracking-wide text-ink-400 uppercase">V3X</span><span class="h-2.5 flex-1 rounded-full bg-white/[0.05]"><span class="bar block h-full rounded-full bg-gradient-to-r from-teal-500 to-teal-300" style={`width:${(100 * bars[i].after) / bars[i].before}%;--d:300ms`}></span></span></div>
+                  <div class="flex items-center gap-3"><span class="w-24 shrink-0 text-[11px] leading-tight font-medium tracking-wide text-ink-400 uppercase">{t.figBefore}</span><span class="h-2.5 flex-1 rounded-full bg-white/[0.05]"><span class="bar block h-full rounded-full bg-gradient-to-r from-rust-500 to-rust-400" style="width:100%"></span></span></div>
+                  <div class="flex items-center gap-3"><span class="w-24 shrink-0 text-[11px] leading-tight font-medium tracking-wide text-ink-400 uppercase">{t.figAfter}</span><span class="h-2.5 flex-1 rounded-full bg-white/[0.05]"><span class="bar block h-full rounded-full bg-gradient-to-r from-teal-500 to-teal-300" style={`width:${(100 * bars[i].after) / bars[i].before}%;--d:300ms`}></span></span></div>
                 </div>
               </>
             ) : (
               <>
                 <p class="mt-8 text-[clamp(3.25rem,5vw,4.5rem)] leading-none font-bold tracking-tight text-teal-200">{s.after}</p>
-                <p class="mt-2 text-sm text-ink-300">{isPt ? "ligado por padrão" : "on by default"}</p>
-                <div class="mt-7 flex items-center gap-2" aria-hidden="true">
+                                <div class="mt-7 flex items-center gap-2" aria-hidden="true">
                   <span class="rounded-lg bg-rust-500/20 px-3 py-1.5 font-mono text-xs text-rust-300 ring-1 ring-rust-400/30">{s.before}</span>
                   <Icon name="arrow" class="size-4 text-ink-400" />
                   <span class="rounded-lg bg-teal-500/25 px-3 py-1.5 font-mono text-xs text-teal-100 ring-1 ring-teal-400/40">{s.delta}</span>
@@ -186,6 +259,7 @@ const isOn = (p: string) => / · (on|ligado)$/.test(p);
             <p class="mt-auto pt-7 text-[15px] leading-relaxed text-ink-300">
               {s.to !== undefined && <span class="mr-1.5 font-semibold text-brass-200">{s.delta}.</span>}{s.desc}
             </p>
+            <a href={s.href} class="mt-4 inline-flex items-center gap-1.5 text-sm font-semibold text-brass-300 hover:text-brass-200">{t.howBuilt}<Icon name="arrow" class="size-4" /></a>
           </article>
         ))}
       </div>
@@ -216,7 +290,7 @@ const isOn = (p: string) => / · (on|ligado)$/.test(p);
           <article data-reveal style={`--d:${(i % 3) * 80}ms`} class={`card card-hover group p-6 md:p-7 ${i === 0 ? "lg:col-span-2" : ""}`}>
             <div class="flex items-center justify-between gap-3">
               <img src={`/assets/icon-${r.icon}.svg`} alt="" width="48" height="48" class="size-12 transition-transform duration-500 group-hover:scale-110 group-hover:-rotate-6" loading="lazy" />
-              <span class={r.on ? "pill-on" : "pill-opt"}>{r.on ? t.stampOn : t.stampOpt}</span>
+              <span class={isOn(r.plugin) ? "pill-on" : "pill-opt"}>{isOn(r.plugin) ? t.stampOn : t.stampOpt}</span>
             </div>
             <h3 class={`mt-6 font-semibold tracking-tight text-white ${i === 0 ? "text-2xl" : "text-xl"}`}>{r.head}</h3>
             <p class="rich mt-2.5 text-[15px] leading-relaxed text-ink-300" set:html={r.body} />
@@ -319,44 +393,6 @@ const isOn = (p: string) => / · (on|ligado)$/.test(p);
           </details>
         ))}
       </div>
-    </div>
-  </section>
-
-  <!-- MODDERS -->
-  <section id="modders" class="section relative overflow-hidden">
-    <div aria-hidden="true" class="pointer-events-none absolute top-20 right-[-10%] -z-10 size-[600px] rounded-full bg-[radial-gradient(closest-side,rgb(31_53_80/0.9),transparent)]"></div>
-    <div class="container-x">
-      <div data-reveal class="grid gap-8 lg:grid-cols-2 lg:items-end lg:gap-16">
-        <div>
-          <p class="eyebrow">{isPt ? "Para modders" : "For modders"}</p>
-          <h2 class="section-title mt-4">{t.s7}</h2>
-        </div>
-        <div>
-          <p class="text-lg text-ink-200">{t.modders}</p>
-          <div class="mt-5 flex flex-wrap gap-2">
-            <img src="/assets/badge-v3x-api.svg" alt="V3X API v4" width="132" height="20" class="h-5 w-auto" loading="lazy" />
-            <img src="/assets/badge-v3x-plugin.svg" alt="V3X plugin" width="150" height="20" class="h-5 w-auto" loading="lazy" />
-          </div>
-        </div>
-      </div>
-      <figure data-reveal="scale" class="relative mt-14 min-w-0">
-        <div aria-hidden="true" class="absolute -inset-x-10 -inset-y-6 -z-10 rounded-[3rem] bg-[radial-gradient(closest-side,rgb(185_139_62/0.16),transparent)] blur-2xl"></div>
-        <div class="frame">
-          <div class="frame-bar"><i></i><i></i><i></i><span class="ml-3 truncate font-mono text-[11px] text-ink-400">tick_counter.c</span><span class="ml-auto font-mono text-[11px] text-ink-400">C · V3X API v4</span></div>
-          <Code code={code} lang="c" theme="css-variables" class="!m-0 !rounded-none !border-0 !bg-transparent !px-6 !py-6 !text-[12px] md:!text-[14px]" />
-        </div>
-        <figcaption class="mt-5 flex flex-col gap-5 sm:flex-row sm:items-center sm:justify-between">
-          <span class="max-w-xl text-sm text-ink-400">{t.codeCaption}</span>
-          <span class="flex flex-wrap gap-3">
-            <a class="btn-primary" href="/docs/"><Icon name="book" />{t.modLink}</a>
-            <a class="btn-secondary" href="/docs/getting-started/">{t.modStart}<Icon name="arrow" class="size-4" /></a>
-          </span>
-        </figcaption>
-      </figure>
-      <figure data-reveal="scale" class="mt-20">
-        <div class="plate"><img src="/assets/platform.svg" width="1200" height="560" alt={t.platformAlt} class="block w-full rounded-xl" loading="lazy" /></div>
-        <figcaption class="mx-auto mt-4 max-w-3xl text-center text-sm text-ink-400">{t.plate2}</figcaption>
-      </figure>
     </div>
   </section>
 

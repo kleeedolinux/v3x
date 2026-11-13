@@ -117,6 +117,25 @@ for (const m of sm.matchAll(/<loc>([^<]+)<\/loc>|href="([^"]+)"/g)) {
   if (!resolve(u)) errors.push(`sitemap.xml: ${u} does not exist`);
 }
 
+// the one-liner `irm https://v3extender.pages.dev/install.ps1 | iex` needs dist/install.ps1, byte-equal
+// to the repo's installer/install.ps1 when the repo is on this machine
+const PS1 = join(DIST, "install.ps1");
+const REPO = process.env.V3X_REPO ?? "D:/SteamLibrary/steamapps/common/Victoria 3/v3x";
+const REPO_PS1 = join(REPO, "installer/install.ps1");
+let ps1Note = "not checked";
+if (!existsSync(PS1)) errors.push("install.ps1 missing from dist/ (public/install.ps1 is copied by scripts/sync-docs.ts)");
+else {
+  const bytes = readFileSync(PS1);
+  if (bytes.some((b) => b > 0x7f)) errors.push("install.ps1 is not ASCII");
+  if (existsSync(REPO_PS1)) {
+    if (!bytes.equals(readFileSync(REPO_PS1))) errors.push(`install.ps1 in dist/ differs from ${REPO_PS1} (run bun run sync)`);
+    else ps1Note = `${bytes.length} bytes, equal to the repo copy`;
+  } else ps1Note = `${bytes.length} bytes, repo not here so not compared`;
+}
+const headers = existsSync(join(DIST, "_headers")) ? readFileSync(join(DIST, "_headers"), "utf8") : "";
+if (!/^\/install\.ps1\r?\n(?:[ \t]+.*\r?\n)*?[ \t]+Content-Type: text\/plain/m.test(headers)) errors.push("_headers: no Content-Type rule for /install.ps1");
+
+console.log(`check-links: install.ps1 ${ps1Note}`);
 console.log(`check-links: ${htmlFiles.length} pages, ${checked} internal references checked, ${external.size} distinct external links (not fetched)`);
 if (process.argv.includes("--external")) for (const e of [...external].sort()) console.log("  ext " + e);
 if (errors.length) {

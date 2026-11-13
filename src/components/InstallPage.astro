@@ -4,7 +4,7 @@ import Icon from "./Icon.astro";
 import CopyCmd from "./CopyCmd.astro";
 import PageHero from "./PageHero.astro";
 import { en, pt } from "../i18n/landing";
-import { RELEASES_URL, REPO_URL, GAME_VERSION } from "../data/facts";
+import { RELEASES_URL, REPO_URL, GAME_VERSION, onAfterInstall } from "../data/facts";
 
 interface Props { lang: "en" | "pt-BR" }
 const { lang } = Astro.props;
@@ -35,6 +35,9 @@ const x = isPt
         ["Faça backup dos saves", "Eles ficam em <code>Documentos\\Paradox Interactive\\Victoria 3\\save games</code>."],
         ["Espaço livre no C:", "Deixe alguns GB livres: um autosave já falhou com o disco quase cheio."],
       ],
+      afterTitle: "Depois de instalar: escolha os plugins",
+      afterBody: "O instalador liga só o mínimo. Todo o resto vem instalado e desligado: ligue o que quiser em menu principal › <b>V3X</b>; vale na próxima abertura do jogo.",
+      afterLink: "Todos os plugins, ligados e desligados",
       more: "Mais detalhes", moreLinks: [["/pt-br/guia/", "Guia do jogador"], ["/docs/install/", "docs/install.md (em inglês)"], ["/docs/troubleshooting/", "Solução de problemas (em inglês)"]],
     }
   : {
@@ -60,6 +63,9 @@ const x = isPt
         ["Back up your saves", "They are in <code>Documents\\Paradox Interactive\\Victoria 3\\save games</code>."],
         ["Free space on C:", "Keep a few GB free: an autosave once failed when C: was nearly full."],
       ],
+      afterTitle: "After install: choose your plugins",
+      afterBody: "Setup switches on only the minimum. Everything else is installed switched off: turn on what you want in main menu › <b>V3X</b>; it applies the next time you start the game.",
+      afterLink: "Every plugin, on and off",
       more: "More detail", moreLinks: [["/guide/", "Players' guide"], ["/docs/install/", "docs/install.md"], ["/docs/troubleshooting/", "Troubleshooting"]],
     };
 const jsonLd = [{ "@type": "HowTo", name: x.title, inLanguage: lang, step: x.aSteps.map((s, i) => ({ "@type": "HowToStep", position: i + 1, text: s.replace(/<[^>]+>/g, "") })) }];
@@ -118,6 +124,15 @@ const jsonLd = [{ "@type": "HowTo", name: x.title, inLanguage: lang, step: x.aSt
           <p class="rich mt-2 text-[15px] text-ink-300" set:html={b} />
         </div>
       ))}
+    </div>
+
+    <h2 id="after" data-reveal class="mt-24 text-3xl font-semibold tracking-tight text-white md:text-4xl">{x.afterTitle}</h2>
+    <div data-reveal class="card mt-8 p-6 md:p-8">
+      <p class="rich text-ink-200" set:html={x.afterBody} />
+      <ul class="mt-5 flex flex-wrap gap-2">
+        {onAfterInstall.map((n) => <li class="pill-on font-mono normal-case">{n}</li>)}
+      </ul>
+      <a href={`${guide}${isPt ? "#partes" : "#parts"}`} class="mt-6 inline-flex items-center gap-1.5 font-semibold text-brass-300 hover:text-brass-200">{x.afterLink}<Icon name="arrow" class="size-4" /></a>
     </div>
 
     <h2 id="off" data-reveal class="mt-24 text-3xl font-semibold tracking-tight text-white md:text-4xl">{t.s5}</h2>

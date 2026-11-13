@@ -9,8 +9,12 @@
  *    docs/assets/*.svg becomes /assets/*.svg, anything else in the repo becomes a GitHub URL;
  *  - records the source path and its modification date in frontmatter.
  *
+ * It also copies installer/install.ps1 byte-for-byte to public/install.ps1 (served for
+ * `irm https://v3extender.pages.dev/install.ps1 | iex`) and turns installer/profile.txt (which
+ * plugins setup ships, and which are on) into src/data/profile.json. Both outputs are committed.
+ *
  * If the repo is not on this machine (e.g. a CI build), it prints a note and exits 0, so the
- * copies committed in src/content/docs/ are used as they are.
+ * copies committed in src/content/docs/, public/install.ps1 and src/data/profile.json are used.
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, copyFileSync, statSync, rmSync } from "node:fs";
 import { join, dirname, posix } from "node:path";
@@ -41,6 +45,8 @@ export const DOCS: Doc[] = [
   { src: "docs/troubleshooting.md", slug: "troubleshooting", group: "players", order: 3, summary: "Save the evidence, read v3x.log and crash.log, hangs, build problems." },
   { src: "docs/configuration.md", slug: "configuration", group: "players", order: 4, summary: "v3x.ini and every plugin's ini keys with their defaults." },
   { src: "docs/plugins.md", slug: "plugins", group: "players", order: 5, summary: "The catalog: every bundled plugin, its class, default, test and history." },
+  { src: "docs/doctor.md", slug: "doctor", group: "players", order: 6, summary: "The in-game health check: what doctor looks at, what each result means, doctor fix." },
+  { src: "docs/updating.md", slug: "updating", group: "players", order: 7, summary: "How V3X updates itself with the updater plugin, and how to update by hand." },
 
   { src: "docs/getting-started.md", slug: "getting-started", group: "modders", order: 10, summary: "Install the loader, build the template plugin and run it, in about 10 minutes." },
   {
@@ -62,21 +68,38 @@ export const DOCS: Doc[] = [
 
   { src: "docs/reverse-engineering.md", slug: "reverse-engineering", group: "engine", order: 20, summary: "The RE workflow: strings, xrefs, functions, profiles, anchors, offline checks." },
   { src: "docs/engine-map.md", slug: "engine-map", group: "engine", order: 21, summary: "What is known about the engine: tick, threads, memory, rendering, saves, VFS." },
-  { src: "docs/maturity.md", slug: "maturity", group: "engine", order: 23, summary: "How mature V3X is as a platform, area by area, with the evidence for each score." },
-  { src: "docs/sessions/2026-11-13-evening.md", slug: "session-2026-11-13", group: "engine", order: 22, summary: "A measured 1 h 44 m play session: what the player felt and what to flip." },
 ];
+
+/**
+ * Never published (lead rule): agent-generated reports, and anything the V3X repo gitignores.
+ * The list is the floor even without git; `git check-ignore` adds whatever .gitignore says.
+ */
+const NEVER = [/^docs\/sessions\//, /^docs\/maturity\.md$/, /^docs\/[^/]*audit\.md$/];
+const ignoreCache = new Map<string, boolean>();
+function isExcluded(src: string): boolean {
+  src = src.replace(/\/$/, "");
+  if (NEVER.some((r) => r.test(src) || r.test(src + "/"))) return true;
+  let hit = ignoreCache.get(src);
+  if (hit === undefined) {
+    const r = Bun.spawnSync(["git", "-C", REPO, "check-ignore", "-q", "--", src], { stdout: "ignore", stderr: "ignore" });
+    hit = r.exitCode === 0; // 0 = ignored, 1 = not ignored, other = no git / not a repo
+    ignoreCache.set(src, hit);
+  }
+  return hit;
+}
 
 function toPosix(p: string) { return p.replace(/\\/g, "/"); }
 
 let bySrc = new Map<string, Doc>();
 
 /** Rewrite one link target found in file `from` (repo-relative). */
-function rewrite(target: string, from: string): string {
+function rewrite(target: string, from: string): string | null {
   if (/^[a-z][a-z0-9+.-]*:/i.test(target) || target.startsWith("//")) return target; // absolute URL, mailto:
   if (target.startsWith("#")) return target; // same page
   const [pathPart, hash = ""] = target.split("#");
   const anchor = hash ? "#" + hash : "";
   const resolved = posix.normalize(posix.join(posix.dirname(from), pathPart));
+  if (isExcluded(resolved)) return null; // not published: the caller drops the link, keeps its text
   const doc = bySrc.get(resolved);
   if (doc) return `/docs/${doc.slug}/${anchor}`;
   if (resolved.startsWith("docs/assets/")) return "/assets/" + resolved.slice("docs/assets/".length);
@@ -102,8 +125,10 @@ function rewriteLinks(md: string, from: string): string {
     // split on inline code so `[x](y)` inside backticks is left alone
     const parts = line.split(/(`+[^`]*`+)/);
     out.push(parts.map((p, i) => (i % 2 ? p : p
-      .replace(/(\]\()([^)\s]+)((?:\s+"[^"]*")?\))/g, (_m, a, t, b) => a + rewrite(t, from) + b)
-      .replace(/(\b(?:src|href)=")([^"]+)(")/g, (_m, a, t, b) => a + rewrite(t, from) + b)
+      // a link to an unpublished file becomes its plain text
+      .replace(/(?<!!)\[([^\[\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g, (m, text, t) => (rewrite(t, from) === null ? text : m))
+      .replace(/(\]\()([^)\s]+)((?:\s+"[^"]*")?\))/g, (_m, a, t, b) => a + (rewrite(t, from) ?? "#") + b)
+      .replace(/(\b(?:src|href)=")([^"]+)(")/g, (_m, a, t, b) => a + (rewrite(t, from) ?? "#") + b)
     )).join(""));
   }
   return out.join("\n");
@@ -111,15 +136,54 @@ function rewriteLinks(md: string, from: string): string {
 
 function yamlString(s: string) { return JSON.stringify(s); }
 
+export type PluginState = "on" | "off" | "none";
+export interface ProfileEntry { name: string; state: PluginState; reason: string }
+
+/** Drops "(docs/sessions/...)"-style citations of files the site does not publish. */
+function unpublishedRefs(s: string) {
+  return s.replace(/\s*\(((?:docs\/)?[^()\s]+\.md)(?::\d+)?\)/g, (m, f) => (isExcluded(f.startsWith("docs/") ? f : "docs/" + f) ? "" : m));
+}
+
+/** installer/profile.txt: `<name> <1|0|-> <reason>` per line; `#` starts a comment line. */
+export function parseProfile(text: string): ProfileEntry[] {
+  const out: ProfileEntry[] = [];
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || line.startsWith("#")) continue;
+    const m = line.match(/^(\S+)\s+([10-])(?:\s+(.*))?$/);
+    if (!m) throw new Error(`sync-docs: installer/profile.txt: cannot parse line: ${line}`);
+    out.push({ name: m[1], state: m[2] === "1" ? "on" : m[2] === "0" ? "off" : "none", reason: unpublishedRefs((m[3] ?? "").trim()) });
+  }
+  return out;
+}
+
+function syncInstaller() {
+  const ps1 = join(REPO, "installer/install.ps1");
+  if (existsSync(ps1)) {
+    const bytes = readFileSync(ps1); // a Buffer, written back as is: CRLF and ASCII kept
+    writeFileSync(join(SITE, "public/install.ps1"), bytes);
+    console.log(`sync-docs: installer/install.ps1 -> public/install.ps1 (${bytes.length} bytes)`);
+  } else console.warn("sync-docs: installer/install.ps1 missing; public/install.ps1 left as it is");
+
+  const prof = join(REPO, "installer/profile.txt");
+  if (!existsSync(prof)) { console.warn("sync-docs: installer/profile.txt missing; src/data/profile.json left as it is"); return; }
+  const plugins = parseProfile(readFileSync(prof, "utf8"));
+  writeFileSync(join(SITE, "src/data/profile.json"), JSON.stringify({ source: "installer/profile.txt", plugins }, null, 2) + "\n");
+  const on = plugins.filter((p) => p.state === "on").map((p) => p.name);
+  console.log(`sync-docs: installer/profile.txt -> src/data/profile.json (${plugins.length} plugins; on: ${on.join(", ")})`);
+}
+
 function main() {
   if (!existsSync(REPO)) {
-    console.log(`sync-docs: ${REPO} not found; using the committed copies in src/content/docs/`);
+    console.log(`sync-docs: ${REPO} not found; using the committed copies (src/content/docs/, public/install.ps1, src/data/profile.json)`);
     return;
   }
+  syncInstaller();
   // docs/*.md the list above does not know yet are still published, at the end of the modders group
   for (const f of readdirSync(join(REPO, "docs")).sort()) {
     const src = "docs/" + f;
     if (!f.endsWith(".md") || f === "README.md" || DOCS.some((d) => d.src === src)) continue;
+    if (isExcluded(src)) { console.log(`sync-docs: ${src} not published (agent report or gitignored)`); continue; }
     DOCS.push({ src, slug: f.replace(/\.md$/, ""), group: "modders", order: 50, summary: "" });
     console.log(`sync-docs: new doc ${src} added (give it a summary in scripts/sync-docs.ts)`);
   }
@@ -131,6 +195,7 @@ function main() {
   const manifest: Record<string, unknown>[] = [];
   for (const d of DOCS) {
     const abs = join(REPO, d.src);
+    if (isExcluded(d.src)) { console.warn(`sync-docs: ${d.src} is not published (agent report or gitignored), skipped`); continue; }
     if (!existsSync(abs)) { console.warn(`sync-docs: missing ${d.src}, skipped`); continue; }
     const raw = readFileSync(abs, "utf8").replace(/\r\n/g, "\n");
     const mtime = statSync(abs).mtime.toISOString().slice(0, 10);
@@ -146,7 +211,7 @@ function main() {
       body = rewriteLinks(body, d.src);
       for (const a of d.append ?? []) {
         const p = join(REPO, a.src);
-        if (!existsSync(p)) continue;
+        if (!existsSync(p) || isExcluded(a.src)) continue;
         const name = posix.basename(a.src);
         body += `\n\n## Source: \`${name}\`\n\n[${a.src} on GitHub](${GITHUB + a.src})\n\n` +
           "```" + a.lang + "\n" + readFileSync(p, "utf8").replace(/\r\n/g, "\n").replace(/\n$/, "") + "\n```\n";
@@ -173,7 +238,7 @@ function main() {
   const assetDir = join(REPO, "docs/assets");
   let n = 0;
   for (const f of readdirSync(assetDir)) {
-    if (!f.endsWith(".svg")) continue;
+    if (!f.endsWith(".svg") || isExcluded("docs/assets/" + f)) continue;
     copyFileSync(join(assetDir, f), join(ASSETS, f));
     n++;
   }

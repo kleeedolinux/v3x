@@ -3,7 +3,7 @@ import Base from "../../layouts/Base.astro";
 import DocsShell from "../../components/DocsShell.astro";
 import CopyCmd from "../../components/CopyCmd.astro";
 import PluginTable from "../../components/PluginTable.astro";
-import { RELEASES_URL } from "../../data/facts";
+import { RELEASES_URL, onAfterInstall, isOn } from "../../data/facts";
 
 const toc = [
   ["antes", "Antes de começar"], ["instalar", "Instalar"], ["primeira-vez", "A primeira abertura"],
@@ -11,7 +11,7 @@ const toc = [
   ["conquistas", "Conquistas, ironman, multijogador"], ["atualizar", "Atualizar, reparar, desinstalar"], ["problemas", "Quando algo dá errado"],
 ];
 const ini = `[plugins]
-ironman_console=0
+keep_history=1
 loc_fallback=1`;
 ---
 <Base lang="pt-BR" title="Como instalar o V3X no Victoria 3: guia do jogador" ogType="article" crumbs={[{ name: "V3X", href: "/pt-br/" }, { name: "Guia do jogador", href: "/pt-br/guia/" }]} jsonLd={[{ "@type": "TechArticle", headline: "Como instalar e usar o V3X", inLanguage: "pt-BR", about: "Victoria 3", proficiencyLevel: "Beginner" }]} description="Como instalar o V3X no Victoria 3, usar o botão V3X do menu principal, ligar e desligar partes, manter as conquistas, desinstalar e o que fazer quando algo dá errado." section="guide" alternate="/guide/">
@@ -96,7 +96,7 @@ loc_fallback=1`;
       
 
       <h2 id="partes">O que vem ligado e desligado</h2>
-        <p>O V3X é um conjunto de partes (plugins). O instalador liga as que corrigem ou protegem sem mudar o seu jogo, e instala as outras desligadas, para você experimentar.</p>
+        <p>O V3X é uma plataforma; as partes listadas aqui são plugins feitos com ela. O instalador liga só o mínimo: {onAfterInstall.map((n, i) => <>{i ? ", " : ""}<code>{n}</code></>)}. Todo o resto vem instalado e desligado: ligue em menu principal › <b>V3X</b> ou no <code>v3x.ini</code>. Ferramentas de desenvolvedor não são instaladas.</p>
         <PluginTable lang="pt-BR" />
       
 
@@ -112,7 +112,7 @@ loc_fallback=1`;
       
 
       <h2 id="conquistas">Conquistas, ironman, multijogador</h2>
-        <p><b>Conquistas.</b> O V3X não mexe no código das conquistas nem na posse de DLCs e não desbloqueia nada. Uma parte ligada por padrão, <code>ironman_console</code>, libera o console no ironman. Se as conquistas importam para você, coloque <code>ironman_console=0</code> e deixe desligadas as partes que mudam a simulação (o throttle do <code>sim_opt</code>).</p>
+        <p><b>Conquistas.</b> O V3X não mexe no código das conquistas nem na posse de DLCs e não desbloqueia nada. Uma parte, <code>ironman_console</code> ({isOn("ironman_console") ? "ligada por padrão" : "instalada desligada"}), libera o console no ironman. Se as conquistas importam para você, mantenha <code>ironman_console=0</code> e deixe desligadas as partes que mudam a simulação (o throttle do <code>sim_opt</code>).</p>
         <p><b>Multijogador.</b> Não use o V3X online: os outros jogadores estariam rodando um código diferente, e as partes que mudam a simulação dessincronizariam a partida. Antes de uma sessão multijogador, renomeie <code>binaries\version.dll</code> para <code>version.dll.off</code> e depois renomeie de volta. Ou desinstale.</p>
       
 

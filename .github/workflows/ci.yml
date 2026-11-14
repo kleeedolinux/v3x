@@ -183,7 +183,7 @@ jobs:
               extra=(); [[ -d test/fuzz/corpus/$t ]] && extra=("test/fuzz/corpus/$t")
               echo "== fuzz_$h / $t"
               if ! FUZZ_TARGET=$t "$exe" -max_total_time="$FUZZ_SECONDS" -timeout=10 -rss_limit_mb=2048 -print_final_stats=1 \
-                  -artifact_prefix="$out/crash-$t-" "$corpus" "${extra[@]}" 2>&1 | tail -25; then
+                  -artifact_prefix="$out/crash-$t-" "$corpus" "${extra[@]}" 2>&1 | tail -120; then
                 echo "::error::fuzz target $t (test/fuzz/fuzz_$h.c) found a crash; input in the fuzz-crashes artifact"
                 fail=1
               fi

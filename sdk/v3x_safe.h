@@ -645,7 +645,8 @@ static V3X_SAFE_UNUSED_ V3X_MUST_USE V3xResult v3x_path_join_checkedW(wchar_t *V
 #endif
 
 /* out = base + separator (if base does not end in one) + rel (separators normalised to '\' on
- * Windows, '/' elsewhere). rel must pass v3x_path_rel_ok_ex(rel, flags) (on Windows checked as CP_ACP
+ * every platform: V3X runs on Windows only, the V3X_SAFE_NO_WINDOWS / non-Windows build exists for
+ * fuzzing and must apply exactly the Windows rules). rel must pass v3x_path_rel_ok_ex(rel, flags) (on Windows checked as CP_ACP
  * text, see v3x_path_rel_ok_cp). base is trusted (your own directory) and may be "" (then out = rel).
  * On Windows base and rel are in the ANSI code page (CP_ACP: api->v3x_dir(), the *A functions) and
  * the reparse check converts with CP_ACP; for UTF-8 text use v3x_path_join_checkedW. On any error
@@ -663,11 +664,7 @@ static V3X_SAFE_UNUSED_ V3X_MUST_USE V3xResult v3x_path_join_checked(char *V3X_N
     V3xResult r = v3x_path_rel_ok_ex(rel, flags);
 #endif
     if (r != V3X_R_OK) return r;
-#if defined(_WIN32)
-    const char sep = '\\';
-#else
-    const char sep = '/';
-#endif
+    const char sep = '\\';   /* on every platform: the non-Windows (fuzz) build must give Windows output */
     V3xStr s;
     v3x_str_init(&s, out, cap);
     size_t bl = strlen(base);

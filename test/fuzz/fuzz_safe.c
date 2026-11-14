@@ -93,7 +93,10 @@ static void fuzz_str(const uint8_t *d, size_t n)
     memset(store, 'Z', sizeof store);
     V3xStr s;
     v3x_str_init(&s, cap ? store : NULL, cap);
-    for (size_t i = 1; i + 1 < n;) {
+    /* one v3x_fuzz_cstr copy per chunk: the drivers allow 16 copies per input and abort beyond
+     * (test/fuzz/fuzz_main.c MAX_GUARDED, which also spends one on the input itself;
+     * .github/scripts/libfuzzer_adapter.c MAX_COPIES), so at most 15 chunks */
+    for (size_t i = 1, chunks = 0; i + 1 < n && chunks < 15; chunks++) {
         uint8_t op = d[i], ln = d[i + 1];
         i += 2;
         size_t k = ln < n - i ? ln : n - i;

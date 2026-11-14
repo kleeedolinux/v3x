@@ -1,28 +1,45 @@
 /* Offline test of plugins/mod_loader (no game needed).
- *   python -m ziglang cc -target x86_64-windows-gnu -O2 -Iinclude -o D:/v3x_tmp/modload/mlt.exe test/mod_loader_test.c
- *   D:/v3x_tmp/modload/mlt.exe                 -> ALL OK (run from v3x/: parses plugins/mod_loader/mod_loader.ini.example)
- *   D:/v3x_tmp/modload/mlt.exe <victoria3.exe> also maps the real exe (no code runs) and resolves the PhysFS DIR
+ *   python -m ziglang cc -target x86_64-windows-gnu -O2 -Iinclude -o $V3X_TMP/mlt.exe test/mod_loader_test.c
+ *   $V3X_TMP/mlt.exe                 -> ALL OK (run from v3x/: parses plugins/mod_loader/mod_loader.ini.example)
+ *   $V3X_TMP/mlt.exe <victoria3.exe> also maps the real exe (no code runs) and resolves the PhysFS DIR
  *                                              archiver (stat / openRead / error slot) with the plugin's own code
  * Covers ml_core (config, path rules, set, playset / error.log parsers, root classes) and the runtime probe
- * logic against fake DIR stat/openRead functions over real temp folders (D:/v3x_tmp/modload/t): index build,
+ * logic against fake DIR stat/openRead functions over real temp folders ($V3X_TMP/modload/t): index build,
  * measure-mode predictions + mismatch detection, mode=on skips with the PhysFS error code set, verify
  * sampling that turns the cache off, hidden roots, 8-argument forwarding, report file. */
 #include "../plugins/mod_loader/ml_core.c"
 #include "../plugins/mod_loader/mod_loader.c"
 #include <stdarg.h>
+#include "test_tmp.h"
 
 static int fails;
 #define CHECK(c) do { if (!(c)) { printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #c); fails++; } } while (0)
 
-#define TROOT "D:/v3x_tmp/modload/t"
+/* scratch root <V3X_TMP or %TEMP%>/modload/t (no trailing '/'), set by set_troot() in main */
+static char g_troot[MAX_PATH], g_v3xdir[MAX_PATH], g_gamedir[MAX_PATH];
+static void set_troot(void)
+{
+    test_tmp_dir(g_troot, sizeof g_troot, "modload/t");
+    g_troot[strlen(g_troot) - 1] = 0;
+    snprintf(g_v3xdir, sizeof g_v3xdir, "%s/v3x/", g_troot);
+    snprintf(g_gamedir, sizeof g_gamedir, "%s/game_install/binaries/", g_troot);
+}
+/* g_troot + rel ("/x/y"); 8 rotating buffers, so several may be live in one call */
+static const char *TP(const char *rel)
+{
+    static char b[8][MAX_PATH]; static int k;
+    char *o = b[k++ & 7];
+    snprintf(o, MAX_PATH, "%s%s", g_troot, rel);
+    return o;
+}
 
 static void x_log(const char *tag, const char *fmt, ...)
 { va_list ap; va_start(ap, fmt); printf("[%s] ", tag); vprintf(fmt, ap); putchar('\n'); va_end(ap); }
 static int x_print(const char *fmt, ...)
 { va_list ap; va_start(ap, fmt); int n = vprintf(fmt, ap); putchar('\n'); va_end(ap); return n; }
 static const char *x_ver(void) { return "test"; }
-static const char *x_v3x(void) { return TROOT "/v3x/"; }
-static const char *x_game(void) { return TROOT "/game_install/binaries/"; }
+static const char *x_v3x(void) { return g_v3xdir; }
+static const char *x_game(void) { return g_gamedir; }
 
 /* ---- fake PhysFS DIR functions ------------------------------------------------------------------ */
 static int f_err, f_calls;
@@ -58,8 +75,8 @@ static uintptr_t fake_open(PASS8_ARGS)
 static void mkfile(const char *rel)
 {
     char p[600];
-    snprintf(p, sizeof p, TROOT "/%s", rel);
-    for (char *c = p + strlen(TROOT) + 1; *c; c++)
+    snprintf(p, sizeof p, "%s/%s", g_troot, rel);
+    for (char *c = p + strlen(g_troot) + 1; *c; c++)
         if (*c == '/') { *c = 0; CreateDirectoryA(p, NULL); *c = '/'; }
     FILE *f = fopen(p, "wb");
     if (f) { fputs(strstr(rel, ".yml") ? "l_english:\n" : "x = 1\n", f); fclose(f); }
@@ -72,7 +89,7 @@ static void mkfile(const char *rel)
 static void bump_dir_mtime(const char *rel)
 {
     char p[600];
-    snprintf(p, sizeof p, TROOT "/%s", rel);
+    snprintf(p, sizeof p, "%s/%s", g_troot, rel);
     HANDLE h = CreateFileA(p, FILE_WRITE_ATTRIBUTES | FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                            NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
     FILETIME ft; ULARGE_INTEGER u;
@@ -212,30 +229,30 @@ static void test_runtime(void)
     g_err_off = 0x5918;               /* only gates hiding; the test sink replaces the TLS write */
     ml_config_defaults(&cfg);
     o_stat = fake_stat; o_open = fake_open;
-    CreateDirectoryA(TROOT, NULL);
-    CreateDirectoryA(TROOT "/v3x", NULL);
+    CreateDirectoryA(g_troot, NULL);
+    CreateDirectoryA(TP("/v3x"), NULL);
     mkfile("ws/steamapps/workshop/content/529340/111/common/Foo.txt");
     mkfile("ws/steamapps/workshop/content/529340/111/gfx/a b/x.dds");
     mkfile("ws/steamapps/workshop/content/529340/111/localization/english/m_l_english.yml");   /* no BOM */
     mkfile("ws/steamapps/workshop/content/529340/222/common/Foo.txt");
     mkfile("ws/steamapps/workshop/content/529340/333/common/z.txt");
     mkfile("game_install/game/common/Foo.txt");
-    snprintf(g_game_native, sizeof g_game_native, TROOT "/game_install");
+    snprintf(g_game_native, sizeof g_game_native, "%s/game_install", g_troot);
     ml_norm_root(g_game_native, g_game_norm, sizeof g_game_norm);
     g_nplay = 0;
-    add_play(TROOT "/ws/steamapps/workshop/content/529340/111", NULL);
-    add_play(TROOT "/ws/steamapps/workshop/content/529340/222", NULL);
-    add_play(TROOT "/ws/steamapps/workshop/content/529340/333", NULL);
-    add_play(TROOT "/ws/steamapps/workshop/content/529340/444", NULL);   /* never mounted */
+    add_play(TP("/ws/steamapps/workshop/content/529340/111"), NULL);
+    add_play(TP("/ws/steamapps/workshop/content/529340/222"), NULL);
+    add_play(TP("/ws/steamapps/workshop/content/529340/333"), NULL);
+    add_play(TP("/ws/steamapps/workshop/content/529340/444"), NULL);   /* never mounted */
     g_play[2].hidden = 1;
-    remove(TROOT "/ws/steamapps/workshop/content/529340/111/common/new.txt");
-    remove(TROOT "/ws/steamapps/workshop/content/529340/222/common/late.txt");
+    remove(TP("/ws/steamapps/workshop/content/529340/111/common/new.txt"));
+    remove(TP("/ws/steamapps/workshop/content/529340/222/common/late.txt"));
 
     /* opaque strings like DIR_openArchive builds them: path + '\\' */
-    static char op1[] = TROOT "/ws/steamapps/workshop/content/529340/111\\";
-    static char op2[] = TROOT "/ws/steamapps/workshop/content/529340/222\\";
-    static char op3[] = TROOT "/ws/steamapps/workshop/content/529340/333\\";
-    static char opg[] = TROOT "/game_install/game\\";
+    static char op1[MAX_PATH]; snprintf(op1, sizeof op1, "%s/ws/steamapps/workshop/content/529340/111\\", g_troot);
+    static char op2[MAX_PATH]; snprintf(op2, sizeof op2, "%s/ws/steamapps/workshop/content/529340/222\\", g_troot);
+    static char op3[MAX_PATH]; snprintf(op3, sizeof op3, "%s/ws/steamapps/workshop/content/529340/333\\", g_troot);
+    static char opg[MAX_PATH]; snprintf(opg, sizeof opg, "%s/game_install/game\\", g_troot);
 
     /* measure mode */
     cfg.mode = ML_MEASURE;
@@ -272,8 +289,8 @@ static void test_runtime(void)
     LONG64 w0 = rg ? rg->would_n : 0;
     CHECK((int)stat_detour(opg, "common/bar.txt", 0, 0, 0, 0, 0, 0) == 0 && rg && rg->would_n == w0 + 1);
     /* a root that is not install/mod/DLC/pack (user dir): passthrough, never indexed, misses sampled */
-    static char opu[] = TROOT "/userdir\\";
-    CreateDirectoryA(TROOT "/userdir", NULL);
+    static char opu[MAX_PATH]; snprintf(opu, sizeof opu, "%s/userdir\\", g_troot);
+    CreateDirectoryA(TP("/userdir"), NULL);
     LONG u0 = g_nunpred;
     CHECK((int)stat_detour(opu, "save games/x.v3", 0, 0, 0, 0, 0, 0) == 0);
     root_t *ru = root_find(opu);
@@ -311,7 +328,7 @@ static void test_runtime(void)
     snprintf(g_last_event, sizeof g_last_event, "test");
     write_report();
     size_t n = 0;
-    char *rep = read_file(TROOT "/v3x/mod_report.txt", 1 << 20, &n);
+    char *rep = read_file(TP("/v3x/mod_report.txt"), 1 << 20, &n);
     CHECK(rep != NULL);
     if (rep) {
         CHECK(strstr(rep, "## playset") && strstr(rep, "NOT MOUNTED") && strstr(rep, "HIDDEN"));
@@ -443,9 +460,9 @@ static int replay(const char *game, const char *docs, int step)
     int u = 0;
     for (int i = 0; i < g_npaths; i++) if (!u || _stricmp(g_paths[u - 1], g_paths[i])) g_paths[u++] = g_paths[i];
     g_npaths = u;
-    CreateDirectoryA(TROOT, NULL);
-    CreateDirectoryA(TROOT "/v3x", NULL);
-    remove(TROOT "/v3x/mod_loader.index");
+    CreateDirectoryA(g_troot, NULL);
+    CreateDirectoryA(TP("/v3x"), NULL);
+    remove(TP("/v3x/mod_loader.index"));
     cfg.index_cache = 1;
     g_ncache = 0;
     /* pass A: fresh build */
@@ -595,12 +612,12 @@ static void test_index(void)
 /* after test_runtime: save, "relaunch", reuse unchanged roots, rebuild a changed one, ignore a corrupt file */
 static void test_cache(void)
 {
-    static char op1[] = TROOT "/ws/steamapps/workshop/content/529340/111\\";
-    static char op5[] = TROOT "/ws/steamapps/workshop/content/529340/555\\";
+    static char op1[MAX_PATH]; snprintf(op1, sizeof op1, "%s/ws/steamapps/workshop/content/529340/111\\", g_troot);
+    static char op5[MAX_PATH]; snprintf(op5, sizeof op5, "%s/ws/steamapps/workshop/content/529340/555\\", g_troot);
     static const char *names[] = {"common/Foo.txt", "common/new.txt", "common/bar.txt", "gfx/a b", "gfx/a b/x.dds",
                                   "gfx/zz.dds", "localization/english/m_l_english.yml", "gfx/sub/deep/q.txt"};
     mkfile("ws/steamapps/workshop/content/529340/555/gfx/sub/deep/q.txt");
-    remove(TROOT "/ws/steamapps/workshop/content/529340/555/gfx/sub/deep/added.txt");
+    remove(TP("/ws/steamapps/workshop/content/529340/555/gfx/sub/deep/added.txt"));
     cfg.mode = ML_MEASURE; cfg.index_cache = 1; g_disabled = 0;
     g_ncache = 0;
     stat_detour(op5, "gfx", 0, 0, 0, 0, 0, 0);
@@ -655,7 +672,7 @@ static void test_cache(void)
     if (r5) { int kl = ml_norm("gfx/sub/deep/added.txt", k, sizeof k); CHECK(ml_hv_has(&r5->hv, ml_hash(k, kl))); }
     /* corrupt file -> ignored, full rebuild */
     CHECK(cache_save() > 0);
-    FILE *f = fopen(TROOT "/v3x/mod_loader.index", "r+b");
+    FILE *f = fopen(TP("/v3x/mod_loader.index"), "r+b");
     if (f) { fseek(f, 40, SEEK_SET); fputc('#', f); fclose(f); }
     g_nroots = 0;
     cache_load();
@@ -669,6 +686,7 @@ static void test_cache(void)
 int main(int argc, char **argv)
 {
     setvbuf(stdout, NULL, _IONBF, 0);
+    set_troot();
     if (argc > 3 && !strcmp(argv[1], "--replay")) {
         int bad = replay(argv[2], argv[3], argc > 4 ? atoi(argv[4]) : 1);
         printf(bad ? "REPLAY FAILED\n" : "REPLAY OK\n");

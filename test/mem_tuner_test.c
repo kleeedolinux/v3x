@@ -1,9 +1,9 @@
 /* Offline test of mem_tuner's table walk and byte patterns (no game run).
- *   python -m ziglang cc -target x86_64-windows-gnu -O2 -o D:/v3x_tmp/mem/mtt.exe test/mem_tuner_test.c
- *   D:/v3x_tmp/mem/mtt.exe ["<game>/binaries/victoria3.exe"]     -> prints ALL OK
+ *   python -m ziglang cc -target x86_64-windows-gnu -O2 -o $V3X_TMP/mtt.exe test/mem_tuner_test.c
+ *   $V3X_TMP/mtt.exe ["<game>/binaries/victoria3.exe"]     -> prints ALL OK
  * With the exe path it also maps the real exe (DONT_RESOLVE_DLL_REFERENCES: relocated, no code runs)
  * and resolves every anchor exactly the way the plugin does.
- *   D:/v3x_tmp/mem/mtt.exe "<exe>" D:/v3x_tmp/mem/mem_tuner.dll [api_version]
+ *   $V3X_TMP/mtt.exe "<exe>" build/plugins/mem_tuner.dll [api_version]
  * also loads the built plugin and runs v3x_plugin_load against a fake V3X_API over the mapped exe
  * (hooks are recorded, not installed; no game code runs): checks option writes, hook targets and
  * the API v3 "load_transition" subscription (api_version 3, default) vs own hook (api_version 2). */

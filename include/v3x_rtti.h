@@ -26,7 +26,10 @@
  * Bounds (audit L7): every RVA read from the image is checked against img_size in 64-bit arithmetic
  * (no 32-bit wrap), a TypeDescriptor name must be NUL-terminated within the image (and within
  * V3X_RTTI_NAME_MAX bytes) before it is accepted, and the PE headers are checked against `size`. The
- * index then only points at validated names, so lookups never read past the image. */
+ * index then only points at validated names, so lookups never read past the image.
+ *
+ * NULL safety (audit action 12): a NULL V3xRtti, name or prefix is refused (build: -1, find: NULL,
+ * enum: 0, free: no-op); a zeroed V3xRtti (never built, or freed) is an empty index. */
 #ifndef V3X_RTTI_H
 #define V3X_RTTI_H
 
@@ -55,6 +58,7 @@ typedef void (*v3x_rtti_cb)(const char *name, void *vtable, void *user);
 
 static void v3x_rtti_free(V3xRtti *r)
 {
+    if (!r) return;
     if (r->e) HeapFree(GetProcessHeap(), 0, r->e);
     r->e = 0; r->n = r->cap = 0;
 }
@@ -74,8 +78,10 @@ static int v3x_rtti__col_cmp_find(const V3xRtti *r, uint32_t col)   /* e[] sorte
 static int v3x_rtti_build_range(V3xRtti *r, uintptr_t base, uint64_t ptr_base, uint32_t img_size,
                                 uint32_t lo, uint32_t hi)
 {
+    if (!r) return -1;
     r->base = base; r->ptr_base = ptr_base; r->img_size = img_size;
     r->e = 0; r->n = r->cap = 0;
+    if (!base) return 0;                       /* nothing mapped: an empty index */
     if (hi > img_size) hi = img_size;          /* [lo, hi) must lie inside the image */
     uint64_t lo64 = ((uint64_t)lo + 3) & ~(uint64_t)3;
     if ((uint64_t)hi < lo64 + 24) return 0;
@@ -123,6 +129,7 @@ static int v3x_rtti_build_ex(V3xRtti *r, uintptr_t base, size_t size, uint64_t p
 {
     IMAGE_DOS_HEADER dos;
     IMAGE_NT_HEADERS64 nt;
+    if (!r) return -1;
     r->e = 0; r->n = r->cap = 0;
     /* size = bytes mapped at base (0 = trust SizeOfImage: a loaded module). Every header read is checked
      * and copied out with memcpy (a crafted e_lfanew may be unaligned). */
@@ -155,6 +162,7 @@ static int v3x_rtti_build(V3xRtti *r, uintptr_t base, size_t size)
 
 static const char *v3x_rtti_mangled(const V3xRtti *r, const V3xRttiEntry *e)
 {
+    if (!r || !e || !r->base) return "";
     return (const char *)(r->base + e->td + 16);
 }
 
@@ -182,6 +190,7 @@ static int v3x_rtti__match(const char *m, const char *name, int prefix_only)
 /* Primary vtable of class `name`, or NULL. If several (namespaces) match, the first wins. */
 static void *v3x_rtti_find_vtable(const V3xRtti *r, const char *name)
 {
+    if (!r || !r->e || !name || !name[0]) return 0;
     for (uint32_t i = 0; i < r->n; i++) {
         const V3xRttiEntry *e = &r->e[i];
         if (e->off || !e->vt) continue;
@@ -195,6 +204,7 @@ static int v3x_rtti_enum(const V3xRtti *r, const char *prefix, v3x_rtti_cb cb, v
 {
     int n = 0;
     char buf[256];
+    if (!r || !r->e || !prefix) return 0;
     for (uint32_t i = 0; i < r->n; i++) {
         const V3xRttiEntry *e = &r->e[i];
         if (e->off || !e->vt) continue;

@@ -57,7 +57,7 @@ typedef struct { entry_t *data; int cap, count; } vec_t;
 static char *files[NF];
 typedef struct { uint32_t h[512]; int n; } res_t;
 static res_t res[NF];
-static char outbuf[1 << 20]; static size_t outn;
+static uint64_t outh;   /* FNV-1a over the merged output, streamed (the text is over 1 MB: no fixed buffer) */
 static uint32_t keys[NF * 512]; static int nkeys, ndup;
 static void tokenize(int i, void *ctx)
 {
@@ -82,16 +82,16 @@ static void merge(int i, void *ctx)
         uint32_t h = res[i].h[k]; int dup = 0;
         for (int j = nkeys - 1; j >= 0 && j >= nkeys - 64; j--) dup |= keys[j] == h;
         if (dup) ndup++; else keys[nkeys++] = h;
-        outn += (size_t)snprintf(outbuf + outn, sizeof outbuf - outn, "%d:%08x%s;", i, h, dup ? "d" : "");
+        char tmp[32];
+        int len = snprintf(tmp, sizeof tmp, "%d:%08x%s;", i, h, dup ? "d" : "");
+        for (int q = 0; q < len && q < (int)sizeof tmp; q++) outh = (outh ^ (uint8_t)tmp[q]) * 1099511628211ull;
     }
 }
 static uint64_t run_fj(int threads, int *started)
 {
-    outn = 0; nkeys = 0; ndup = 0; memset(res, 0, sizeof res);
+    outh = 1469598103934665603ull; nkeys = 0; ndup = 0; memset(res, 0, sizeof res);
     *started = pl_forjoin(NF, threads, tokenize, merge, NULL);
-    uint64_t h = 1469598103934665603ull;
-    for (size_t i = 0; i < outn; i++) h = (h ^ (uint8_t)outbuf[i]) * 1099511628211ull;
-    return h ^ (uint64_t)ndup << 1;
+    return outh ^ (uint64_t)ndup << 1;
 }
 
 static long long fake_t;

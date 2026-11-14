@@ -34,6 +34,8 @@
 #include "v3x_scan.h"
 #include "v3x_mem.h"
 
+V3X_NN_BEGIN
+
 #define V3X_GAME_RNG_ASSERT "Calling global random function without having called ALLOW_RANDOM_IN_SCOPE in this thread"
 
 typedef struct V3xGame {
@@ -43,9 +45,14 @@ typedef struct V3xGame {
 } V3xGame;
 
 /* Returns 0 if everything resolved, -1 otherwise (g->err says why; the checks then return -1). */
-static int v3x_game_resolve(const V3X_API *api, V3xGame *g)
+static int v3x_game_resolve(const V3X_API *V3X_NN api, V3xGame *V3X_NN g)
 {
+    if (!g) return -1;
     memset(g, 0, sizeof *g);
+    if (!api || !api->image_base || !api->find_string || !api->function_start) {
+        snprintf(g->err, sizeof g->err, "no API");
+        return -1;
+    }
     V3xSection text, data;
     uintptr_t base = api->image_base();
     if (!v3x_section(base, ".text", &text) || !v3x_section(base, ".data", &data)) {
@@ -65,8 +72,9 @@ static int v3x_game_resolve(const V3X_API *api, V3xGame *g)
         /* mov rdi, [rip+X] (48 8B 3D X) then test rdi, rdi (48 85 FF) within 16 bytes */
         for (uint8_t *p = fn; p + 7 <= (uint8_t *)x[i]; p++) {
             if (p[0] != 0x48 || p[1] != 0x8B || p[2] != 0x3D) continue;
-            if (!v3x_scan_near(p + 7, 16, "48 85 FF")) continue;
-            uint8_t *t = (uint8_t *)v3x_rip_target(p, 3, 7);
+            if (!v3x_scan_near_in(&text, p + 7, 16, "48 85 FF")) continue;
+            uint8_t *t = (uint8_t *)v3x_rip_target_in(&text, p, 3, 7, &data);   /* NULL unless in .data */
+            if (!t) continue;
             if (found && t != found) {
                 snprintf(g->err, sizeof g->err, "RNG owner global ambiguous (+0x%llx vs +0x%llx)",
                          (unsigned long long)(found - (uint8_t *)base), (unsigned long long)(t - (uint8_t *)base));
@@ -106,5 +114,7 @@ static int v3x_on_main_thread(const V3X_API *api)
     if (!V3X_HAS(api, main_thread_id)) return -1;
     return api->main_thread_id() == GetCurrentThreadId();
 }
+
+V3X_NN_END
 
 #endif

@@ -92,8 +92,12 @@ keys are in `installer/release_keys.h` (CURRENT + NEXT rotation slot), compiled 
 (`--verify-release`) and the updater (`plugins/updater/up_sig.c`, Monocypher), and copied into
 `installer/install.ps1` (`$ReleaseKeyCurrent` / `$ReleaseKeyNext`, checked in PowerShell).
 
-How the updater (`plugins/updater/up_logic.c` `up_select`) picks a release:
+How the updater (`plugins/updater/up_logic.c` `up_select`) picks a release. The signature comes
+first: nothing in `compat.json` (builds, API, hash, size) is trusted before `compat.json.sig` verified.
 
+- If the release lists a `compat.json.sig`, it must verify first (bad signature, unknown key or a `.sig`
+  that cannot be downloaded = the release is rejected). Then the setup's SHA-256 and size come from the
+  signed `compat.json` only.
 - It considers non-draft releases whose tag is a semantic version (`v0.6.0`). Pre-releases (a `-` in the
   version, or GitHub's pre-release flag) count only with `channel = beta`.
 - The version must be newer than the running loader (`api->loader_version()`). Equal or older is never
@@ -102,13 +106,16 @@ How the updater (`plugins/updater/up_logic.c` `up_select`) picks a release:
   the running loader's API version.
 - A `game_builds` entry with a `build_id` matches only that exact build. An entry with just a `branch`
   matches every build of that branch, including hotfixes.
-- If the release lists a `compat.json.sig`, it must verify (bad signature, unknown key or a `.sig` that
-  cannot be downloaded = the release is rejected). Then the setup's SHA-256 and size come from the
-  signed `compat.json` only. Without a `.sig` the release is *unsigned*: its SHA-256 may also come from
-  `SHA256SUMS.txt`, it is offered, but only `update now` installs it (`auto = 1` never does).
 - The version must not be below `update/floor.txt` (the highest version that ran here or that the
   updater started).
 - Of all releases that pass, the newest one wins.
+
+> **Unsafe — when you really need it:** a release without `compat.json.sig` is *unsigned*: its SHA-256
+> may also come from `SHA256SUMS.txt` (same server, so it only catches broken downloads, not a swapped
+> release). The updater announces it but never installs it on its own (`auto = 1` never does); only an
+> explicit `update now` installs it, with a warning. What can go wrong: whoever can change the release
+> files can run code on your machine. Contain it: publish only signed releases; as a player, install an
+> unsigned one only when you built it yourself.
 
 The cache (`binaries/v3x/update_cache.json`) keeps a signed `compat.json` and its signature verbatim and
 verifies them again on every read; a cache entry never makes a release "signed" by itself, and the setup
@@ -154,9 +161,18 @@ One-time setup. The private key never enters the repository or a checkout.
    deletions (bypass: you / repository admin), so nobody else can push or move a release tag.
    Settings > Actions > General: Workflow permissions = "Read repository contents" (the workflows ask
    for more only where needed). Optionally Settings > General > Releases > "Enable release immutability".
-5. Check a published release: `python tools/sign_release.py verify compat.json` (uses
-   `release_keys.h`), `V3X-Setup.exe --verify-release <folder with the downloaded assets>`, and
+5. Check a published release: `python tools/sign_release.py verify compat.json` and
+   `python tools/sign_release.py verify plugins.json` (use `release_keys.h`),
+   `V3X-Setup.exe --verify-release <folder with the downloaded assets>`, and
    `gh attestation verify V3X-Setup.exe --repo kleeedolinux/v3x` (build provenance).
+
+What the `publish` job signs, in this order (`.github/workflows/release.yml`):
+`plugins.json` (the official plugin list: name, file, SHA-256, version of every shipped DLL; the
+loader treats a plugin as official only when `binaries/v3x/plugins.json.sig` verifies), then
+`python installer/make_dist.py --add-sig dist` puts `plugins.json.sig` into the setup payload and the
+zip (refused if `plugins.json` is not byte-identical to the payload's) and rewrites the asset hashes,
+then `compat.json`, which names those final hashes. The release notes print the SHA-256 of
+`install.ps1` for the verifiable two-step install (installer/README.md "Verifiable install").
 
 Key rotation: generate the next key, put its public key into the NEXT slots (`V3X_RELEASE_KEY_NEXT`,
 `$ReleaseKeyNext`) and publish at least one release signed with the CURRENT key, so installed updaters
@@ -165,6 +181,8 @@ already trust the next key. Then replace the secret, move the key to CURRENT and
 Dry run with a development key (never for a published release):
 `python tools/sign_release.py keygen --out-dir D:/v3x_keys --name v3x-dev`, then
 `python installer/make_dist.py --no-build --out <dir> --version 0.6.0 --trust-key <dev public key>`,
+`V3X_SIGNING_KEY=<seed> python tools/sign_release.py sign <dir>/plugins.json --allow-key <dev public key>`,
+`python installer/make_dist.py --add-sig <dir>`,
 `V3X_SIGNING_KEY=<seed> python tools/sign_release.py sign <dir>/compat.json --allow-key <dev public key>`
 and `<dir>/V3X-Setup.exe --verify-release <dir>`. The installer tests do the same with the public TEST
 key of `tools/sign_release.py` (`TEST_SEED`), which no release build trusts.

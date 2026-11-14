@@ -1,5 +1,6 @@
 /* up_logic.c - see up_logic.h. Pure C + stdio; no V3X API, no network (that is up_http_fn). */
 #include "up_logic.h"
+#include "v3x_safe.h"   /* v3x_alloc_array (windows.h-free on non-Windows: the Linux fuzz job) */
 
 #include <ctype.h>
 #include <stdarg.h>
@@ -1072,7 +1073,7 @@ int up_sha256_file(const char *path, char out[65])
     if (!f) return -1;
     up_sha256 s;
     uint8_t d[32];
-    char *buf = (char *)malloc(65536);   /* heap: may run on the updater thread and at process exit */
+    char *buf = (char *)v3x_alloc_array(65536, 1);   /* heap: may run on the updater thread and at process exit */
     if (!buf) { fclose(f); return -1; }
     up_sha256_init(&s);
     size_t k;

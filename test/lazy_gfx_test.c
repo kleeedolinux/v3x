@@ -1,8 +1,8 @@
 /* Offline test of plugins/lazy_gfx (no game needed).
- *   export TEMP=D:/v3x_tmp/lazygfx TMP=D:/v3x_tmp/lazygfx ZIG_GLOBAL_CACHE_DIR=D:/v3x_tmp/lazygfx/zcache ZIG_LOCAL_CACHE_DIR=D:/v3x_tmp/lazygfx/zcache
- *   python -m ziglang cc -target x86_64-windows-gnu -O2 -Iinclude -Isdk -o D:/v3x_tmp/lazygfx/lgt.exe test/lazy_gfx_test.c
- *   D:/v3x_tmp/lazygfx/lgt.exe                               -> ALL OK (writes only under D:/v3x_tmp/lazygfx/t*)
- *   D:/v3x_tmp/lazygfx/lgt.exe ../binaries/victoria3.exe     also maps the real exe (no code runs): resolves all
+ *   (normally run by test/run_all.sh; scratch root = $V3X_TMP, else %TEMP%, see test/test_tmp.h)
+ *   python -m ziglang cc -target x86_64-windows-gnu -O2 -Iinclude -Isdk -o $V3X_TMP/lgt.exe test/lazy_gfx_test.c
+ *   $V3X_TMP/lgt.exe                               -> ALL OK (writes only under $V3X_TMP/lazygfx/t*)
+ *   $V3X_TMP/lgt.exe ../binaries/victoria3.exe     also maps the real exe (no code runs): resolves all
  *                                                            anchors with the plugin's own lg_resolve(), checks the
  *                                                            1.15.1 RVAs, fail-closed on a broken byte, and runs
  *                                                            v3x_plugin_load end to end (7 hook_safe calls)
@@ -18,11 +18,13 @@
 #include "../plugins/lazy_gfx/lazy_gfx.c"
 #include "v3x_testkit.h"
 #include <stdarg.h>
+#include "test_tmp.h"
 
 static int fails;
 #define CHECK(c) do { if (!(c)) { printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #c); fails++; } } while (0)
 
-#define TDIR "D:/v3x_tmp/lazygfx/t/"
+static char g_tdir[MAX_PATH], g_tdir2[MAX_PATH];   /* <scratch>/lazygfx/t/ and t2/, set in main */
+#define TDIR g_tdir
 
 /* ------------------------------------------------------------------ fake API */
 static void x_log(const char *tag, const char *fmt, ...)
@@ -432,8 +434,7 @@ static void cache_tests(void)
 static int real_exe(const char *exe)
 {
     static V3X_API rx;
-    CreateDirectoryA("D:/v3x_tmp/lazygfx/t2", NULL);
-    if (v3x_testkit_map_exe_dir(exe, "D:/v3x_tmp/lazygfx/t2/", &rx)) { printf("cannot map %s\n", exe); return 1; }
+    if (v3x_testkit_map_exe_dir(exe, g_tdir2, &rx)) { printf("cannot map %s\n", exe); return 1; }
     api = &rx;
     int bad = lg_resolve();
     static const uint32_t fn_rva[H_N] = { 0x3c5df50, 0x3dffd50, 0x3e3c720, 0x3c5e0d0, 0x3c6ac30, 0x3c42ef0, 0x3e14180 };
@@ -469,7 +470,8 @@ static int real_exe(const char *exe)
 
 int main(int argc, char **argv)
 {
-    CreateDirectoryA("D:/v3x_tmp", NULL); CreateDirectoryA("D:/v3x_tmp/lazygfx", NULL); CreateDirectoryA(TDIR, NULL);
+    test_tmp_dir(g_tdir, sizeof g_tdir, "lazygfx/t");
+    test_tmp_dir(g_tdir2, sizeof g_tdir2, "lazygfx/t2");
     core_tests();
     request_path_tests();
     cache_tests();

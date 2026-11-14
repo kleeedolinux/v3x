@@ -25,6 +25,7 @@ plugins/*            the bundled plugins (docs/plugins.md)
 installer/           player installer V3X-Setup.exe (setup.c, make_dist.py, profile.txt, test_installer.py)
 test/*.c, test/*.py  tests without the game (this page)
 tools/*.py           reverse-engineering helpers (docs/reverse-engineering.md)
+tools/check_unsafe.sh  grep ban for unbounded C idioms (+ tools/check_unsafe.allow)
 mcp/v3x_mcp.py       MCP server for the devbridge pipe
 docs/*.md            documentation (docs/README.md); docs/re/*.md reverse-engineering notes
 third_party/minhook  inline hooking (BSD-2), git submodule
@@ -33,10 +34,63 @@ third_party/zydis    x86 disassembler, amalgamated (MIT); used by devconsole
 
 ## Test runner
 
-There is no CI. A single runner `test/run_all.sh` is being written by the sdk worker (2026-11-13; the
-file does not exist yet at the time of writing). `test/api_v5_test.c`, `test/compat_test.c` (mode
-`old`) and `test/compat_check.py` say in their headers that `run_all.sh` builds their setup. Until it
-lands, run each test by hand as below.
+`test/run_all.sh` builds V3X (`./build.sh`, nothing is installed into `../binaries`), runs every
+offline and end-to-end test and prints one summary table; the exit code is the number of failed
+tests (0 = all passed). CI (`.github/workflows/ci.yml`) runs the same script.
+
+```sh
+bash test/run_all.sh                          # everything (the shutdown test takes ~1 min)
+QUICK=1 bash test/run_all.sh                  # without the shutdown test
+ONLY="abi compat fuzz" bash test/run_all.sh   # only the named tests (names as in the table)
+V3X_TMP=D:/v3x_tmp/me bash test/run_all.sh    # scratch root (default $TEMP/v3x); compiler caches go there too
+SANITIZE=1 bash test/run_all.sh               # test executables built with UBSan in trap mode
+FUZZ_ITERS=200000 ONLY=fuzz bash test/run_all.sh   # long fuzzing run (default 2000 inputs per target)
+V3X_WERROR=1 bash test/run_all.sh             # plugins also build with -Werror
+```
+
+* **`SANITIZE=1`** adds `-fsanitize=undefined -fno-sanitize=alignment,function -fsanitize-trap=undefined`
+  to every test executable. Undefined behaviour (out-of-bounds index, signed overflow, bad shift, ...)
+  executes a trap instruction, so the test fails with exit 132 ("Illegal instruction"). Not checked:
+  `alignment` (the x86 decoders read rel32 / disp fields unaligned on purpose) and `function` (calls
+  through hook stubs and trampolines). MinHook and the deliberately faulting `api_v5` plugin variants
+  are built without it. To find the line of a trap, build the test with `-fsanitize=bounds
+  -fno-sanitize-trap=bounds` and link a small C file that defines the `__ubsan_handle_*` functions the
+  linker reports as missing (their first argument points to the source location).
+* Two runs with the same `V3X_TMP` at the same time collide (they share `$V3X_TMP/t`); give each run
+  its own directory.
+* With `../binaries/victoria3.exe` present, tests that check anchors get it as an argument (the exe is
+  mapped as an image, no game code runs). Without it `keep_history` and `ai_par` are skipped.
+* Log of each test: `$V3X_TMP/t/run_all_logs/<name>.log`.
+
+Hardening checks in the runner:
+
+| name | what | by hand |
+|---|---|---|
+| `api_proxy` | `test/api_proxy_test.c`: the `version.dll` forwards of `src/proxy.c` fail closed (before or without a resolve every export returns its failure value with `ERROR_MOD_NOT_FOUND`) | `$CC -o $T/proxy.exe test/api_proxy_test.c && $T/proxy.exe` |
+| `fuzz` | every `test/fuzz/fuzz_*.c` harness linked with the driver `test/fuzz/fuzz_main.c`, always `-O1 -fsanitize=undefined -fsanitize-trap=undefined`; `FUZZ_ITERS` inputs per target (deterministic); seeds in the harness and in `test/fuzz/corpus/<target>/*` | see below |
+| `check_unsafe` | `bash tools/check_unsafe.sh`: no `n += snprintf(buf + n, ...)` accumulation, `strcpy`, `strcat`, `sprintf`, `gets`, `wcscpy`, `lstrcpy*`, `wsprintf*` ... in `src include sdk plugins installer templates` (exceptions: `v3x-unsafe-ok: <reason>` on the line, or `tools/check_unsafe.allow`) | `bash tools/check_unsafe.sh` |
+| `harness_unicode` | the `harness` test copied into a folder whose name is outside the ANSI code page: the loader still loads its plugin and writes `v3x.log` (wide paths in the core) | via `run_all.sh` |
+
+Fuzzing by hand (from `v3x/`; a crash input is written to `$FUZZ_OUT/crash-<target>-<iter>.bin`):
+
+```sh
+FUZZCC="python -m ziglang cc -target x86_64-windows-gnu -O1 -fsanitize=undefined -fsanitize-trap=undefined -Iinclude -Isdk -Isrc"
+$FUZZCC -o $T/fuzz_safe.exe test/fuzz/fuzz_safe.c test/fuzz/fuzz_main.c
+FUZZ_OUT=$T FUZZ_ITERS=20000 $T/fuzz_safe.exe
+FUZZ_REPRO=$T/crash-<target>-<iter>.bin $T/fuzz_safe.exe <target>     # replay one crash input
+```
+
+A new harness is `test/fuzz/fuzz_<name>.c` with `#include "v3x_fuzz.h"`, the parser source,
+`V3X_FUZZ_TARGET(name, fn)` and `V3X_FUZZ_SEED(name, "...")` (API in `test/fuzz/v3x_fuzz.h`);
+`run_all.sh` picks it up automatically.
+
+**Static analysis** (not part of `run_all.sh`, non-blocking): `bash test/static_analysis.sh` runs
+whatever is installed of clang-tidy (bugprone-*, cert-*, clang-analyzer-*), cppcheck, or
+`clang --analyze`, writes one log per tool to `build/static_analysis/` and prints
+`static analysis: <tool> <N> findings`. It exits 0 unless `STATIC_STRICT=1` (then 1 on findings);
+with no tool installed it prints a note and exits 0.
+
+The sections below are the hand recipes of the individual tests.
 
 ## Setup (once per shell)
 
@@ -72,15 +126,20 @@ plugin's anchors against it. The build line of each test is copied from its head
 | `test/rtti_test.c` | `include/v3x_rtti.h` on fake RTTI; with `$EXE`, the CTickTask_ count | unit |
 | `test/harness.c` | loader end to end + `ironman_console` | e2e |
 | `test/api_v4_test.c` + `test/v4_plugin.c` | API v4 via the loader: hook_safe, ids, enum_commands, manifests, `[plugins]` skip list | e2e |
-| `test/api_v5_test.c` + `test/api_v5_plugin.c` | API v5 + loader hardening: log levels, `reload`, fault isolation, rollback, crash-loop marker, build gate | e2e (in progress, sdk worker) |
+| `test/api_v5_test.c` + `test/api_v5_plugin.c` | API v5 + loader hardening: log levels, `reload`, fault isolation, rollback, crash-loop marker, build gate, `loader_version()`, command / `on_frame` threading | e2e |
+| `test/api_proxy_test.c` | `src/proxy.c`: version.dll forwards fail closed | unit |
+| `test/fuzz/fuzz_*.c` + `test/fuzz/fuzz_main.c` | fuzz harnesses: `v3x_safe.h`, `src/core_ini.h`, `v3x_rtti.h`, and the parsers of devbridge, mod_loader, loc_fallback, lazy_gfx, par_load, doctor, mod_menu, console_plus, script_ext | fuzz (UBSan trap) |
+| `tools/check_unsafe.sh` | banned unsafe C idioms | grep |
 | `test/compat_test.c` + `test/compat_plugin.c` + `test/compat_v1..v4.h` | plugins built for API v1-v5 load on the current loader; v5 plugin degrades on a v4 loader | e2e |
 | `test/compat_check.py` | `sdk/build_plugin.py check` (DLL validation without loading) | python |
 | `test/shutdown_test.c` + `test/shutdown_probe.c` | every plugin lets the process exit within 10 s, 20 runs x 2 modes | e2e |
 | `test/crash_test.c` | crash_logger: C++ throws, AV, abort, stack overflow | e2e |
 | `test/devconsole_test.c` | devconsole commands, fault-proof reads, `exec_capture` | e2e |
-| `test/devbridge_test.c` | devbridge pipe protocol | e2e |
+| `test/devbridge_test.c` | devbridge pipe protocol, session token (`auth <token>`), allow list | e2e |
 | `test/test_mcp.py` | `mcp/v3x_mcp.py` against `devbridge_test.exe --serve N` | python |
 | `test/devtools_test.c` | devtools thread / profiler / memory reports, per-phase CSVs | e2e |
+| `test/doctor_test.c` | doctor checks (`plugins/doctor/dr_core.c`) on fake inputs, `doctor fix` ini edits, then `doctor.dll` in a fake game folder | offline + e2e |
+| `test/updater_test.c` | updater release selection, version order, signature and floor rules (`plugins/updater/up_logic.c`), then `updater.dll` in a fake game folder (`V3X_UPDATER_NO_NET=1`) | offline + e2e |
 | `test/ai_par_test.c` | ai_par logic, RRP hook + lever, anchors on `$EXE` | offline |
 | `test/alloc_tracker_test.c` | alloc_tracker tables, sampler; built DLL against `$EXE` | offline |
 | `test/asset_stream_test.c` | asset_stream config, anchors, detour end to end | offline |
@@ -154,8 +213,11 @@ $CC -o $T/tpar.exe test/tick_par_test.c && $T/tpar.exe
 $CC -o $T/tpt.exe test/tick_profiler_test.c && $T/tpt.exe
 ```
 
-Notes: the header of `loc_fallback_test.c` has only the usage line; the build line above was
-checked on 2026-11-13 (ALL OK without the optional arguments). `loc_fallback_test.c`,
+`doctor` and `updater` also need a fake game folder with `version.dll` and their DLL; the exact
+setup is the `t doctor` / `t updater` line of `test/run_all.sh`.
+
+Notes: the header of `loc_fallback_test.c` has only the usage line; the build line above runs
+ALL OK without the optional arguments. `loc_fallback_test.c`,
 `mod_menu_test.c` and `script_ext_test.c` want an *empty* temp dir.
 
 ## End-to-end tests
@@ -192,11 +254,11 @@ API v5 and loader hardening (`test/api_v5_test.c`, modes: none, `gate`, `gateloa
 variants are `-DV5_FRAME_FAULT`, `-DV5_CMD_FAULT`, `-DV5_EVENT_FAULT`, `-DV5_MAIN_FAULT`,
 `-DV5_LOAD_FAULT`, `-DV5_LOAD_FAIL`, `-DV5_RELOAD`, `-DV5_MARKED`, `-DV5_GATE_STAR/_VER/_PREFIX/_NONE`
 of `test/api_v5_plugin.c`, each built as `v5_<variant>.dll`; the directory also needs a `v3x.ini`,
-`loading.marker` and fake `crash.log` (header of `test/api_v5_test.c`). The exact setup is in
-`test/run_all.sh` (not written yet), so no hand recipe is given here.
+`loading.marker` and fake `crash.log` (header of `test/api_v5_test.c`). The exact setup is the
+`t api_v5*` lines of `test/run_all.sh`.
 
 Compatibility (`test/compat_test.c`; mode `old` needs a v4 loader built from git `317e574`, which
-`run_all.sh` will build):
+`run_all.sh` builds in its `compat_old_loader` test):
 
 ```sh
 D=$T/compat; mkdir -p $D/v3x/plugins && cp build/version.dll $D/
@@ -229,4 +291,4 @@ python installer/test_installer.py [--exe build/dist/V3X-Setup.exe] [--root D:/v
                                    [--real-exe $EXE] [--keep]
 ```
 
-Last reported result: 49/49 (installer worker, team chat #4374, 2026-11-13; not re-run for this page).
+CI runs it too (`.github/workflows/ci.yml`).

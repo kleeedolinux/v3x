@@ -2,8 +2,7 @@
 
 V3X is a native code loader for Victoria 3 (single player). It runs inside the game process with the
 game's rights. This page says what is supported, how to report a problem, and what V3X does and does
-not defend against. The full audit is in [docs/security-audit.md](docs/security-audit.md); decisions are
-in [docs/adr/](docs/adr/).
+not defend against. Decisions are in [docs/adr/](docs/adr/).
 
 ## Supported versions
 

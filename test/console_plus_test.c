@@ -19,11 +19,14 @@
  *   WriteConsoleInput and checks the ReadConsoleA hook: plain read on other threads, Tab
  *   completion on the thread named "v3x_console_input" (unique, ambiguous + listing).
  * Build (from v3x/, see README for TEMP/ZIG cache variables):
- *   python -m ziglang cc -target x86_64-windows-gnu -O2 -Iinclude -o D:/v3x_tmp/namecomplete/cpt.exe test/console_plus_test.c
+ *   python -m ziglang cc -target x86_64-windows-gnu -O2 -Iinclude -o $V3X_TMP/cpt.exe test/console_plus_test.c
  * Run:
- *   D:/v3x_tmp/namecomplete/cpt.exe [../binaries/victoria3.exe] */
+ *   $V3X_TMP/cpt.exe [../binaries/victoria3.exe]
+ * Scratch files go to $V3X_TMP/namecomplete/ (else %TEMP%, see test/test_tmp.h). Part D prints a SKIP
+ * line (not a failure) when the child cannot get a console (no window station, e.g. a service). */
 #include "../plugins/console_plus/console_plus.c"
 #include <stdarg.h>
+#include "test_tmp.h"
 
 static int fails;
 #define CHECK(c, ...) do { if (c) { printf("ok   "); printf(__VA_ARGS__); printf("\n"); } \
@@ -114,7 +117,7 @@ static int t_hook(void *t, void *d, void **o) { (void)d; *o = t; g_nhooks++; ret
 static int t_unhook(void *t) { (void)t; return 0; }
 static int t_patch(void *a, const void *b, size_t n) { (void)a; (void)b; (void)n; return -1; }
 static int t_on_frame(v3x_frame_fn f, void *u) { (void)f; (void)u; g_nframe_cbs++; return 0; }
-static char g_dir[MAX_PATH] = "D:\\v3x_tmp\\namecomplete\\";
+static char g_dir[MAX_PATH];   /* <scratch>/namecomplete/, set in main */
 static const char *t_dir(void) { return g_dir; }
 static int t_register(const char *name, const char *help, v3x_command_fn fn, void *user) { (void)name; (void)help; (void)fn; (void)user; g_ncmds_reg++; return 0; }
 static int t_run_on_main(v3x_frame_fn fn, void *user) { fn(user); return 0; }
@@ -1220,13 +1223,14 @@ static void part_c(const char *exe)
         CHECK(cp_decode_overlord(g_base + 0x93a030, 0x80, &r2, &c2, &k2, &v2) && r2 == W.root && c2 == W.cnt, "GetOverlord is exe+0x93a030");
     }
     /* plugin load against the real image: game part on, V3X console off (ini), no hooks in game code */
-    FILE *f = fopen("D:/v3x_tmp/namecomplete/console_plus.ini", "w");
+    char ini[MAX_PATH]; snprintf(ini, sizeof ini, "%sconsole_plus.ini", g_dir);
+    FILE *f = fopen(ini, "w");
     if (f) { fputs("[console_plus]\nv3x_console=0\n", f); fclose(f); }
     g_nhooks = g_nframe_cbs = g_ncmds_reg = 0;
     int rc = v3x_plugin_load(api);
     CHECK(rc == 0 && A.ok && g_nframe_cbs == 1 && g_nhooks == 3 && g_hooks == 3 && A.execline && g_ncmds_reg == 2,
           "v3x_plugin_load: rc %d, on_frame %d, hooks %d (matcher + Autocomplete for display names, ExecuteLine for wildcards), `complete` + `find` registered (%d)", rc, g_nframe_cbs, g_nhooks, g_ncmds_reg);
-    remove("D:/v3x_tmp/namecomplete/console_plus.ini");
+    remove(ini);
 }
 
 
@@ -1296,16 +1300,24 @@ static int console_child(const char *outfile)
 static void part_d(const char *self)
 {
     printf("== part D: V3X console Tab completion in a child process with its own console\n");
-    const char *rf = "D:/v3x_tmp/namecomplete/console_child.txt";
+    char rf[MAX_PATH]; snprintf(rf, sizeof rf, "%sconsole_child.txt", g_dir);
     remove(rf);
-    char cmd[MAX_PATH * 2]; snprintf(cmd, sizeof cmd, "\"%s\" --console-child %s", self, rf);
+    char cmd[MAX_PATH * 2]; snprintf(cmd, sizeof cmd, "\"%s\" --console-child \"%s\"", self, rf);
     STARTUPINFOA si; PROCESS_INFORMATION pi; memset(&si, 0, sizeof si); si.cb = sizeof si;
     si.dwFlags = STARTF_USESHOWWINDOW; si.wShowWindow = SW_MINIMIZE;
-    if (!CreateProcessA(NULL, cmd, NULL, NULL, FALSE, CREATE_NEW_CONSOLE, NULL, NULL, &si, &pi)) { CHECK(0, "spawn child (%lu)", GetLastError()); return; }
+    if (!CreateProcessA(NULL, cmd, NULL, NULL, FALSE, CREATE_NEW_CONSOLE, NULL, NULL, &si, &pi)) {
+        DWORD e = GetLastError();
+        if (e == ERROR_NOT_SUPPORTED || e == ERROR_ACCESS_DENIED) { printf("SKIP part D: cannot create a process with its own console (error %lu)\n", e); return; }
+        CHECK(0, "spawn child (%lu)", e); return;
+    }
     DWORD wr = WaitForSingleObject(pi.hProcess, 20000);
     if (wr != WAIT_OBJECT_0) TerminateProcess(pi.hProcess, 9);
     DWORD ec = 99; GetExitCodeProcess(pi.hProcess, &ec);
     CloseHandle(pi.hProcess); CloseHandle(pi.hThread);
+    if (wr == WAIT_OBJECT_0 && ec == 4) {   /* child: CONIN$/CONOUT$ unavailable = no console could be created */
+        printf("SKIP part D: the child got no console (CONIN$/CONOUT$ unavailable); Tab completion not tested\n");
+        remove(rf); return;
+    }
     CHECK(wr == WAIT_OBJECT_0 && ec == 0, "child finished (exit %lu)", ec);
     char t[2048] = {0};
     FILE *f = fopen(rf, "r"); if (f) { size_t k = fread(t, 1, sizeof t - 1, f); t[k] = 0; fclose(f); }
@@ -1320,6 +1332,7 @@ static void part_d(const char *self)
 int main(int argc, char **argv)
 {
     if (argc > 2 && !strcmp(argv[1], "--console-child")) { static V3X_API ca; ca = make_api(); api = &ca; return console_child(argv[2]); }
+    test_tmp_dir(g_dir, sizeof g_dir, "namecomplete");
     static V3X_API a;
     a = make_api();
     api = &a;

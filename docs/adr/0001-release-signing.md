@@ -1,6 +1,6 @@
 # ADR 0001: Releases are authenticated by an Ed25519 signature over compat.json
 
-Status: accepted (2026-11-13). Audit finding H1, actions 1, 2 and 6 (`docs/security-audit.md`).
+Status: accepted (2026-11-13). Security audit finding H1.
 
 ## Context
 

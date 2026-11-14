@@ -1,6 +1,6 @@
 /* Offline test of the log_filter rule engine (no game needed).
- *   python -m ziglang cc -target x86_64-windows-gnu -O2 -o D:/v3x_tmp/log-filter/lft.exe test/log_filter_test.c
- *   D:/v3x_tmp/log-filter/lft.exe plugins/log_filter/log_filter.ini.example     -> prints ALL OK */
+ *   python -m ziglang cc -target x86_64-windows-gnu -O2 -o $V3X_TMP/lft.exe test/log_filter_test.c
+ *   $V3X_TMP/lft.exe plugins/log_filter/log_filter.ini.example     -> prints ALL OK */
 #include "../plugins/log_filter/lf_rules.c"
 #include <stdio.h>
 

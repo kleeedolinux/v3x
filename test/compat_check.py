@@ -3,7 +3,7 @@
     python test/compat_check.py <T>     T = scratch dir where test/run_all.sh built $T/api_v4_test
 
 Uses the manifest test plugins of test/api_v4_test (v4_ok, v4_minapi, v4_require), build/version.dll
-(API v5 loader with the v3x_loader_* exports), build/plugins/*.dll and the real victoria3.exe when it is
+(API v6 loader with the v3x_loader_* exports), build/plugins/*.dll and the real victoria3.exe when it is
 next to the repo. A test exe stands in for "an unknown game build". Exit code 0 = ALL OK.
 """
 import json
@@ -44,7 +44,7 @@ def main():
     unknown_exe = os.path.join(t, "api_v4_test", "api_v4_test.exe")   # any x64 exe = a build the loader does not know
 
     rc, r = run(os.path.join(plug, "v4_ok.dll"), "--loader", loader, "--exe", unknown_exe)
-    check(rc == 0 and r["result"] == "ok" and r["info"]["loader_api"] == 5, "v4_ok ('*' builds) compatible with the v5 loader")
+    check(rc == 0 and r["result"] == "ok" and r["info"]["loader_api"] == 6, "v4_ok ('*' builds) compatible with the v6 loader")
     check(r["info"].get("manifest", {}).get("version") == "2.3.4" and r["info"]["name"] == "v4_ok", "manifest fields read from the file")
     check(has(r["ok"], "unknown to the loader, but the manifest declares it"), "'*' passes the unknown-build gate")
 

@@ -19,6 +19,9 @@ cd "$(dirname "$0")/.."
 S=${V3X_TMP:-${TEMP:-/tmp}/v3x}
 mkdir -p "$S"
 export TEMP=$S TMP=$S ZIG_GLOBAL_CACHE_DIR=$S/zcache ZIG_LOCAL_CACHE_DIR=$S/zcache
+# tests write scratch files only under $S (test/test_tmp.h: $V3X_TMP, else %TEMP%, which is $S here)
+# the v6 loader refuses plugin dirs it does not trust; the e2e test dirs under $T need dev trust
+export V3X_TRUST=dev
 # SANITIZE=1: UBSan in trap mode for the test executables. Not checked there: `alignment` (x86 code
 # decoders read rel32/disp fields unaligned on purpose) and `function` (calls through hook stubs and
 # trampolines carry no type signature). MinHook (third party) and the deliberately faulting api_v5
@@ -79,10 +82,10 @@ s=open('include/v3x.h').read(); a='    uintptr_t (*image_base)(void);\n'; b='   
 assert a+b in s; open('$T/abineg/v3x.h','w').write(s.replace(a+b, b+a))\" &&
   ! python -m ziglang cc -target x86_64-windows-gnu -I$T/abineg -fsyntax-only test/abi_test.c 2>$T/abineg/err.txt &&
   grep -c 'static assertion failed' $T/abineg/err.txt && echo '1 checks, 0 failed (swapped fields are rejected)'"
-t cxx_headers "printf '#include \"v3x_sdk.h\"\n#include \"v3x_util.h\"\nint main(){return V3X_API_VERSION==5?0:1;}\n' > $T/cxx.cpp &&
+t cxx_headers "printf '#include \"v3x_sdk.h\"\n#include \"v3x_util.h\"\nint main(){return V3X_API_VERSION>=5?0:1;}\n' > $T/cxx.cpp &&
   python -m ziglang c++ -target x86_64-windows-gnu -Iinclude -Isdk -Wno-unused-function -c -o $T/cxx.o $T/cxx.cpp && echo '1 checks, 0 failed (headers compile as C++)'"
 t compat "D=$T/compat; rm -rf \$D; mkdir -p \$D/v3x/plugins && cp build/version.dll \$D/ &&
-  for v in 1 2 3 4 5; do $CC -shared -DCOMPAT_V=\$v -o \$D/v3x/plugins/compat_v\$v.dll test/compat_plugin.c || exit 1; done &&
+  for v in 1 2 3 4 5 6; do $CC -shared -DCOMPAT_V=\$v -o \$D/v3x/plugins/compat_v\$v.dll test/compat_plugin.c || exit 1; done &&
   $CC -o \$D/compat_test.exe test/compat_test.c -Lbuild -l:version.dll -luser32 && cd \$D && V3X_NO_CONSOLE=1 ./compat_test.exe"
 t compat_old_loader "O=$T/oldloader; rm -rf \$O; mkdir -p \$O/src \$O/include &&
   for f in src/core.c src/proxy.c src/safe_hook.c include/v3x.h; do git show 317e574:\$f > \$O/\$f || exit 1; done &&
@@ -119,6 +122,30 @@ t api_v5_gate_safe "gate_dir g1 && cd $T/g1 && V3X_NO_CONSOLE=1 V3X_BUILD_GATE=1
 t api_v5_gate_load_env "gate_dir g2 && cd $T/g2 && V3X_NO_CONSOLE=1 V3X_BUILD_GATE=1 V3X_UNKNOWN_BUILD=load ./api_v5_test.exe gateload"
 t api_v5_gate_load_ini "gate_dir g3 && printf 'console=0\nunknown_build = load\n[plugins]\n' > $T/g3/v3x/v3x.ini && cd $T/g3 && V3X_NO_CONSOLE=1 V3X_BUILD_GATE=1 ./api_v5_test.exe gateload"
 t check_tool "python test/compat_check.py $T"
+# API v6 containment (test/api_v6_test.c): the main dir holds every variant of test/api_v6_plugin.c plus a
+# corrupt and a truncated copy of v6_plain.dll (made here); the trust dir holds one plugin for the trust
+# scenarios, which the test runs in child processes with other environments. V3X_TRUST=dev only for the main run.
+v6_dirs() {
+    local D=$T/api_v6 v
+    rm -rf "$D"; mkdir -p "$D/main/v3x/plugins" "$D/trust/v3x/plugins" || return 1
+    cp build/version.dll "$D/main/" && cp build/version.dll "$D/trust/" || return 1
+    for v in MAIN OTHER CAPS_HOOK CAPS_PATCH FAULT QUOTA ROLLBACK MINAPI REQBUILD NOLOAD PLAIN; do
+        $CCNS -shared -DV6_$v -o "$D/main/v3x/plugins/v6_$(echo $v | tr A-Z a-z).dll" test/api_v6_plugin.c || return 1
+    done
+    cp "$D/main/v3x/plugins/v6_plain.dll" "$D/trust/v3x/plugins/" || return 1
+    python -I -c "
+import sys
+d = sys.argv[1]
+b = bytearray(open(d + '/v6_plain.dll', 'rb').read())
+c = bytearray(b); c[0x3c:0x40] = b'\xff\xff\xff\x7f'
+open(d + '/v6_corrupt.dll', 'wb').write(c)
+open(d + '/v6_trunc.dll', 'wb').write(b[:300])" "$D/main/v3x/plugins" || return 1
+    for v in main trust; do
+        $CC -o "$D/$v/api_v6_test.exe" test/api_v6_test.c -Lbuild -l:version.dll -luser32 || return 1
+    done
+}
+t api_v6 "v6_dirs && cd $T/api_v6/main && V3X_TRUST=dev V3X_NO_CONSOLE=1 ./api_v6_test.exe $T/api_v6/trust"
+t core_parse "$CC -o $T/coreparse.exe test/core_parse_test.c && $T/coreparse.exe build/plugins/hello.dll"
 # fuzzing (action 15): every test/fuzz/fuzz_*.c harness (other than the driver) with the driver, UBSan trap,
 # FUZZ_ITERS inputs per target (deterministic). Crash inputs land in $T/fuzz/.
 fuzz_all() {
@@ -137,6 +164,8 @@ fuzz_all() {
 t fuzz "fuzz_all"
 # banned unsafe C idioms (tools/check_unsafe.sh by sec-plugins: += snprintf accumulate, strcpy, sprintf, ...)
 [[ -f tools/check_unsafe.sh ]] && t check_unsafe "bash tools/check_unsafe.sh && echo '1 checks, 0 failed'"
+# code samples in the docs compile / match the headers (tools/check_doc_samples.py)
+t doc_samples "python tools/check_doc_samples.py"
 
 # ---- plugin offline tests (docs/testing.md)
 t alloc_tracker "$CC -o $T/att.exe test/alloc_tracker_test.c && $T/att.exe ${EXE:+$EXE build/plugins/alloc_tracker.dll}"

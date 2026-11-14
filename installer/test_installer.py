@@ -11,6 +11,7 @@ fake folder's victoria3.exe. <root> is deleted at the end unless --keep. Exit 0 
 """
 import argparse
 import hashlib
+import json
 import os
 import shutil
 import struct
@@ -264,6 +265,18 @@ def main():
     check("foreign: uninstall --purge rc=0", rc == 0, out)
     check("foreign: original version.dll restored byte-identical", open(os.path.join(B2, "version.dll"), "rb").read() == foreign)
     check("foreign: binaries/v3x deleted by --purge", not os.path.exists(os.path.join(B2, "v3x")))
+    # 6b. N14: a backup that changed after install (swapped DLL) is never restored as version.dll
+    g2b = make_game(root, "foreign_swapped", header)
+    B2b = os.path.join(g2b, "binaries")
+    open(os.path.join(B2b, "version.dll"), "wb").write(foreign)
+    rc, out = run(exe, "--game-dir", g2b)
+    bk2 = os.path.join(B2b, "v3x", "backup", "version.dll")
+    evil = b"MZ swapped after install" + os.urandom(32)
+    open(bk2, "wb").write(evil)
+    rc, out = run(exe, "--uninstall", "--game-dir", g2b)
+    check("backup swapped after install: uninstall rc=0, the changed backup is NOT moved to version.dll (backup_sha checked)",
+          rc == 0 and not os.path.exists(os.path.join(B2b, "version.dll")) and open(bk2, "rb").read() == evil
+          and "changed since install" in out, out)
 
     # 7. a manual V3X install (version.dll from build.sh, no manifest) is not backed up as foreign
     g3 = make_game(root, "manual", header)
@@ -604,6 +617,55 @@ def main():
         sign_dir(d)
     rc, out = verify(variant("version", other_version))
     check("verify-release: validly signed compat.json of another version -> rc=8", rc == 8 and "compat.json is for V3X 0.0.2" in out, out)
+
+    # 16. plugins.json (official plugin list) + the release step make_dist.py --add-sig (release.yml publish)
+    pj = json.load(open(os.path.join(sd, "plugins.json"), encoding="utf-8"))
+    shipped = {rel[len("v3x/plugins/"):-4]: data for k, rel, h, data in payload(vexe) if rel.startswith("v3x/plugins/")}
+    ok_list = pj.get("schema") == 1 and pj.get("v3x_version") == "0.0.1-sigtest" and \
+        sorted(p["name"] for p in pj["plugins"]) == sorted(shipped) and \
+        all(p["file"] == "plugins/%s.dll" % p["name"] and p["sha256"] == hashlib.sha256(shipped[p["name"]]).hexdigest()
+            and p["version"] for p in pj["plugins"])
+    check("plugins.json: every shipped plugin with file plugins/<name>.dll, its sha256 and version", ok_list, json.dumps(pj)[:300])
+    pin = [data for k, rel, h, data in payload(vexe) if rel == "v3x/plugins.json"]
+    check("plugins.json: the same bytes are in the setup payload (installed as binaries/v3x/plugins.json)",
+          pin == [open(os.path.join(sd, "plugins.json"), "rb").read()])
+    ad = variant("addsig", lambda d: None)
+    data = open(os.path.join(ad, "plugins.json"), "rb").read()
+    open(os.path.join(ad, "plugins.json.sig"), "w", newline="\n").write(sr.sig_line(sr.public_key(sr.TEST_SEED), sr.sign(sr.TEST_SEED, data)))
+    r = subprocess.run([sys.executable, os.path.join(HERE, "make_dist.py"), "--add-sig", ad], capture_output=True, text=True)
+    check("add-sig: make_dist.py --add-sig rc=0", r.returncode == 0, r.stdout + r.stderr)
+    r2 = subprocess.run([sys.executable, os.path.join(HERE, "make_dist.py"), "--add-sig", ad], capture_output=True, text=True)
+    check("add-sig: a second --add-sig is refused", r2.returncode != 0 and "already contains" in r2.stderr, r2.stdout + r2.stderr)
+    aexe = os.path.join(ad, "V3X-Setup.exe")
+    rc, out = verify(ad, use=aexe)
+    check("add-sig: before compat.json is re-signed, --verify-release refuses (compat.json changed)", rc == 8, out)
+    sign_dir(ad)
+    rc, out = verify(ad, use=aexe)
+    check("add-sig: compat.json signed after --add-sig -> verify-release ok", rc == 0 and "verify-release: ok" in out, out)
+    sums_ok = all(hashlib.sha256(open(os.path.join(ad, n), "rb").read()).hexdigest() == h
+                  for h, n in (l.split() for l in open(os.path.join(ad, "SHA256SUMS.txt"))))
+    check("add-sig: SHA256SUMS.txt matches the rewritten files", sums_ok)
+    import zipfile
+    zf = [f for f in os.listdir(ad) if f.endswith(".zip")][0]
+    with zipfile.ZipFile(os.path.join(ad, zf)) as z:
+        zsig = z.read("v3x/plugins.json.sig") if "v3x/plugins.json.sig" in z.namelist() else b""
+    check("add-sig: the zip has v3x/plugins.json.sig", zsig == open(os.path.join(ad, "plugins.json.sig"), "rb").read())
+    g17 = make_game(root, "plugins_json", header)
+    rc, out = run(os.path.join(ad, "V3X-Setup.exe"), "--game-dir", g17)
+    V17 = os.path.join(g17, "binaries", "v3x")
+    ok17 = rc == 0 and os.path.isfile(os.path.join(V17, "plugins.json")) and os.path.isfile(os.path.join(V17, "plugins.json.sig"))
+    if ok17:
+        line = open(os.path.join(V17, "plugins.json.sig")).read().split()
+        ok17 = sr.verify(sr.public_key(sr.TEST_SEED), open(os.path.join(V17, "plugins.json"), "rb").read(), __import__("base64").b64decode(line[3]))
+    check("add-sig: the repacked setup installs binaries/v3x/plugins.json + plugins.json.sig, and the signature verifies", ok17, out)
+    rc, out = run(os.path.join(ad, "V3X-Setup.exe"), "--uninstall", "--game-dir", g17)
+    check("add-sig: uninstall removes plugins.json and plugins.json.sig",
+          rc == 0 and not os.path.exists(os.path.join(V17, "plugins.json")) and not os.path.exists(os.path.join(V17, "plugins.json.sig")), out)
+    bad = variant("addsig_bad", lambda d: None)
+    open(os.path.join(bad, "plugins.json"), "ab").write(b" ")
+    open(os.path.join(bad, "plugins.json.sig"), "w").write("v3x-sig 1 0000000000000000 AAAA\n")
+    r = subprocess.run([sys.executable, os.path.join(HERE, "make_dist.py"), "--add-sig", bad], capture_output=True, text=True)
+    check("add-sig: refused when DIR/plugins.json is not the payload's", r.returncode != 0 and "differs" in r.stderr, r.stdout + r.stderr)
 
     fails =[n for n, ok in RESULTS if not ok]
     print("\n%d/%d passed%s" % (len(RESULTS) - len(fails), len(RESULTS), "" if not fails else "; FAILED: " + "; ".join(fails)))

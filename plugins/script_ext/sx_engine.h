@@ -158,7 +158,7 @@ static int sx_share_caller(const V3X_API *api, const V3xSection *text, const voi
     int na = 0, nb = 0;
     for (size_t i = 0; i + 5 <= text->size; i++) {
         if (text->ptr[i] != 0xE8) continue;
-        void *t = v3x_rel32_target(text->ptr + i);
+        void *t = v3x_rel32_target_in(text, text->ptr + i, NULL);   /* bounded, no syscall (hot loop over .text) */
         if (t == a && na < 64) fa[na++] = api->function_start(text->ptr + i);
         else if (t == b && nb < 64) fb[nb++] = api->function_start(text->ptr + i);
     }

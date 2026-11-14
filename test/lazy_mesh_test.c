@@ -1,9 +1,9 @@
 /* Offline test of plugins/lazy_mesh (no game needed).
- *   export TEMP=D:/v3x_tmp/lazymesh TMP=D:/v3x_tmp/lazymesh ZIG_GLOBAL_CACHE_DIR=D:/v3x_tmp/lazymesh/zcache ZIG_LOCAL_CACHE_DIR=D:/v3x_tmp/lazymesh/zcache
- *   python -m ziglang cc -target x86_64-windows-gnu -O2 -Iinclude -o D:/v3x_tmp/lazymesh/lmt.exe test/lazy_mesh_test.c
- *   D:/v3x_tmp/lazymesh/lmt.exe                         -> ALL OK (run from v3x/: reads plugins/lazy_mesh/lazy_mesh.ini.example,
- *                                                          writes only under D:/v3x_tmp/lazymesh/t/)
- *   D:/v3x_tmp/lazymesh/lmt.exe ../binaries/victoria3.exe  also maps the real exe (no code runs) and resolves all
+ *   (normally run by test/run_all.sh; scratch root = $V3X_TMP, else %TEMP%, see test/test_tmp.h)
+ *   python -m ziglang cc -target x86_64-windows-gnu -O2 -Iinclude -o $V3X_TMP/lmt.exe test/lazy_mesh_test.c
+ *   $V3X_TMP/lmt.exe                         -> ALL OK (run from v3x/: reads plugins/lazy_mesh/lazy_mesh.ini.example,
+ *                                                          writes only under $V3X_TMP/lazymesh/t/)
+ *   $V3X_TMP/lmt.exe ../binaries/victoria3.exe  also maps the real exe (no code runs) and resolves all
  *                                                          6 anchors with the plugin's own resolve_all()
  * Covers: config + example, eager name set (incl. reading the plugin's own report back), path rules,
  * the lock-free table (8 threads), lm_ensure (once, wait, re-entrancy, timeout), the report format, and
@@ -13,6 +13,7 @@
 #include "../plugins/lazy_mesh/lazy_mesh.c"
 #include <stdio.h>
 #include <stdarg.h>
+#include "test_tmp.h"
 
 static int fails;
 #define CHECK(c) do { if (!(c)) { printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #c); fails++; } } while (0)
@@ -23,7 +24,8 @@ static void x_log(const char *tag, const char *fmt, ...)
 static int x_print(const char *fmt, ...)
 { va_list ap; va_start(ap, fmt); int n = vprintf(fmt, ap); putchar('\n'); va_end(ap); return n; }
 static const char *t_ver(void) { return "test"; }
-static const char *t_dir(void) { return "D:/v3x_tmp/lazymesh/t/"; }
+static char g_tdir[MAX_PATH];   /* <scratch>/lazymesh/t/, set in main */
+static const char *t_dir(void) { return g_tdir; }
 static int t_on_frame(v3x_frame_fn fn, void *u) { (void)fn; (void)u; return 0; }
 
 /* real exe mapped as an image (resolution only) */
@@ -176,7 +178,6 @@ static void plugin_logic(void)
     fake.api_version = 3; fake.struct_size = sizeof fake;
     fake.log = x_log; fake.print = x_print; fake.game_version = t_ver; fake.v3x_dir = t_dir; fake.on_frame = t_on_frame;
     api = &fake;
-    CreateDirectoryA("D:/v3x_tmp/lazymesh", NULL); CreateDirectoryA(t_dir(), NULL);
     snprintf(g_report_path, sizeof g_report_path, "%slazy_mesh_used.txt", t_dir());
     QueryPerformanceFrequency(&g_freq); QueryPerformanceCounter(&g_qpc0);
 
@@ -559,6 +560,7 @@ static void core_tests(void)
 
 int main(int argc, char **argv)
 {
+    test_tmp_dir(g_tdir, sizeof g_tdir, "lazymesh/t");
     core_tests();
     plugin_logic();
     race();

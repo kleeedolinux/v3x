@@ -9,7 +9,7 @@ admin rights. Player guide: [docs/install.md](../docs/install.md).
 | `setup.rc`, `setup.manifest` | embedded manifest: asInvoker (no UAC prompt), Common Controls v6 (TaskDialog), per-monitor DPI |
 | `profile.txt` | which plugins ship on (1), ship off (0) or are not shipped (-), with the reason. Edit this to change the player set |
 | `builds.txt` | supported game builds (`game_build_id` + `caligula_branch.txt`); setup refuses (CLI) or warns (GUI) on others |
-| `make_dist.py` | builds `build/dist/V3X-Setup.exe`, `v3x-<version>.zip` (manual install), a copy of `install.ps1` and `SHA256SUMS.txt` (all three) |
+| `make_dist.py` | builds `build/dist/V3X-Setup.exe`, `v3x-<version>.zip` (manual install), a copy of `install.ps1`, `compat.json`, `plugins.json` (official plugin list) and `SHA256SUMS.txt`; `--add-sig DIR` is the release step that puts `plugins.json.sig` into the setup and the zip |
 | `install.ps1` | the one-line installer `irm https://v3extender.pages.dev/install.ps1 \| iex`: finds the game, downloads `V3X-Setup.exe` + `compat.json` + `compat.json.sig`, verifies the Ed25519 signature itself (PowerShell, `Test-Ed25519`) and the setup's hash, runs `--verify-release`, then the setup `--silent`. Options and exit codes: its header |
 | `release_keys.h` | the release signing public keys (CURRENT + NEXT rotation slot); same values as `$ReleaseKeyCurrent` / `$ReleaseKeyNext` in `install.ps1` |
 | `release_sig.h` | header-only signature check (Monocypher Ed25519, `third_party/monocypher`), used by `setup.c` and `plugins/updater/up_sig.c` |
@@ -28,11 +28,33 @@ of PROBLEMs; GUI button "Check my install"; writes `binaries/v3x/doctor_offline.
 `--update [--wait-pid <pid>]` (for `plugins/updater`: wait for the game to exit, silent repair,
 exit 0/1, last `install.log` line `update-result: ...`; `V3X_WAIT_TIMEOUT_SEC` shortens the
 10-minute wait for tests). `make_dist.py` also writes `compat.json` (schema 1: v3x_version,
-loader_semver, api_version, game_builds from `builds.txt`, assets with size + sha256).
+loader_semver, api_version, game_builds from `builds.txt`, assets with size + sha256; the
+`install.ps1` asset there is the hash of the bootstrap script, see "Verifiable install" below) and
+`plugins.json` (schema 1: v3x_version, plugins = [{name, file `plugins/<name>.dll`, sha256, version}]
+for every shipped plugin; installed as `binaries/v3x/plugins.json`. The loader treats a plugin as
+official only when `binaries/v3x/plugins.json.sig` verifies with a release key and the DLL's hash is
+listed; dev builds have no signature).
+
+## Verifiable install (two steps instead of `irm | iex`)
+
+The one-liner runs whatever the server sends. To check the script first (PowerShell):
+
+```powershell
+$v = "v0.5.1"   # the release you install
+irm "https://github.com/kleeedolinux/v3x/releases/download/$v/install.ps1" -OutFile install.ps1
+(Get-FileHash .\install.ps1 -Algorithm SHA256).Hash   # compare: release notes / signed compat.json
+$env:V3X_VERSION = $v; powershell -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+The expected hash is the `install.ps1` asset of that release's `compat.json`, which is signed
+(`compat.json.sig`; check it with `python tools/sign_release.py verify compat.json`), and is printed
+in the release notes. `gh attestation verify install.ps1 --repo kleeedolinux/v3x` checks the build
+provenance. install.ps1 then verifies the setup it downloads on its own (signature + hash).
 
 Releases: `.github/workflows/release.yml` builds and tests these files on a `v*` tag (job `build`,
-read-only), then job `publish` (environment `release`) signs `compat.json` with
-`tools/sign_release.py` (secret `V3X_SIGNING_KEY`), records build provenance and creates the release
+read-only), then job `publish` (environment `release`) signs `plugins.json`, adds the signature
+to the setup and the zip (`make_dist.py --add-sig`), then signs `compat.json` (it names the final
+setup hash) with `tools/sign_release.py` (secret `V3X_SIGNING_KEY`), records build provenance and creates the release
 (never replaces an existing one). `ci.yml` builds and tests on every push / pull request and uploads
 the files as an artifact. `make_dist.py --trust-key <hex>` builds a setup that also trusts a dev/test
 key (dry runs and `test_installer.py`; never published). Signing: docs/updating.md "Release signing". The site

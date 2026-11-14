@@ -109,7 +109,9 @@ static void fake_step(int n, uint32_t flags, int mode_set, uint32_t mode, int co
     *(uint32_t *)(f_step + STEP_FLAGS) = flags;
     *(int32_t *)(f_step + STEP_BEGIN) = 0; *(int32_t *)(f_step + STEP_END) = n;
     *(uint32_t *)(f_step + STEP_MODE) = mode; f_step[STEP_MODE_SET] = (uint8_t)mode_set;
-    *(int32_t **)(f_step + STEP_COST_B) = f_cost; *(int32_t **)(f_step + STEP_COST_E) = f_cost + n;
+    *(int32_t **)(f_step + STEP_COST_B) = f_cost; /* the cost vector may be shorter than the range (n=1068 > 64): the plugin
+     * checks ce - cb >= end itself; never form a pointer past the end of f_cost */
+    *(int32_t **)(f_step + STEP_COST_E) = f_cost + (n < 64 ? n : 64);
     f_step[STEP_COST_SET] = (uint8_t)cost_set;
 }
 

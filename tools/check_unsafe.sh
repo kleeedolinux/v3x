@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tools/check_unsafe.sh - grep ban for unbounded / overflow-prone C idioms (docs/security-audit.md M1).
+# tools/check_unsafe.sh - grep ban for unbounded / overflow-prone C idioms (the security review M1).
 #
 #   bash tools/check_unsafe.sh            scan src include sdk plugins installer templates
 #   bash tools/check_unsafe.sh DIR...     scan only these

@@ -33,14 +33,17 @@
 #endif
 #include <windows.h>
 #include "v3x.h"
+#include "v3x_safe.h"   /* v3x_widen, v3x_path_join_checkedW, reparse checks */
+V3X_NN_BEGIN
 
 /* ---- paths under <game>/binaries/v3x/ */
 
 /* out = v3x_dir() + printf(fmt, ...). Returns out, or NULL (out = "") if it does not fit. */
-static char *v3x_path(const V3X_API *api, char *out, size_t cap, const char *fmt, ...) V3X_PRINTF(4, 5);
+static char *v3x_path(const V3X_API *api, char *V3X_NN out, size_t cap, const char *V3X_NN fmt, ...) V3X_PRINTF(4, 5);
 static char *v3x_path(const V3X_API *api, char *out, size_t cap, const char *fmt, ...)
 {
     if (!out || !cap) return NULL;
+    if (!fmt) { out[0] = 0; return NULL; }
     const char *dir = api && api->v3x_dir ? api->v3x_dir() : "";
     int n = snprintf(out, cap, "%s", dir ? dir : "");
     if (n < 0 || (size_t)n >= cap) { out[0] = 0; return NULL; }
@@ -53,37 +56,176 @@ static char *v3x_path(const V3X_API *api, char *out, size_t cap, const char *fmt
 }
 
 /* <v3x_dir><plugin><suffix>, e.g. ("my_plugin", ".ini") or ("my_plugin", "_report.txt"). */
-static char *v3x_plugin_file(const V3X_API *api, const char *plugin, const char *suffix, char *out, size_t cap)
+static char *v3x_plugin_file(const V3X_API *api, const char *plugin, const char *suffix, char *V3X_NN out, size_t cap)
 {
     return v3x_path(api, out, cap, "%s%s", plugin ? plugin : "", suffix ? suffix : "");
 }
 
-/* Writes n bytes to path through "<path>.<tid>.tmp" + MoveFileEx(REPLACE_EXISTING): readers (the
- * player, another tool, the next game start) see the old file or the whole new one, never a
- * partial one. Returns 0, or -1 (GetLastError() set; the temp file is removed). Any thread. */
-static int v3x_file_write_atomic(const char *path, const void *data, size_t n)
+/* ---- atomic file writes (audit N6: no reparse point in the chain, temp file created exclusively)
+ *
+ * v3x_file_write_atomicW(path, data, n) writes n bytes so that readers (the player, another tool, the
+ * next game start) see the old file or the whole new one, never a partial one:
+ *   1. the parent directory is opened with FILE_FLAG_OPEN_REPARSE_POINT, must not be a reparse point,
+ *      and is HELD (no FILE_SHARE_DELETE) until the end: neither it nor any directory above it can be
+ *      renamed, deleted or swapped for a junction while the write is in progress;
+ *   2. the temp file "<name>.<pid>.<tid>.<n>.v3xtmp" is created with CREATE_NEW +
+ *      FILE_FLAG_OPEN_REPARSE_POINT (never an existing file, never through a planted link) and its
+ *      final path is verified to be inside the held directory;
+ *   3. data is written and flushed, then the temp file is renamed over path THROUGH ITS HANDLE
+ *      (SetFileInformationByHandle FileRenameInfo, replace existing): no name lookup of the temp file
+ *      after it was created. On any failure the temp file is deleted through its handle.
+ * v3x_file_write_atomic_inW(base, rel, ...) additionally validates rel (v3x_path_rel_ok_exW) and
+ * checks that no component of rel below base is a reparse point - after step 1, so the check cannot
+ * race. The char versions take CP_ACP paths (like api->v3x_dir()). All return 0, or -1 with
+ * GetLastError() set (ERROR_REPARSE_POINT_ENCOUNTERED = a reparse point refused). Any thread. */
+#ifndef ERROR_REPARSE_POINT_ENCOUNTERED
+#define ERROR_REPARSE_POINT_ENCOUNTERED 4395L
+#endif
+
+/* internal: dir handle held, path = full path, name = its last component (inside path) */
+static int v3x_write_atomic_held_(HANDLE dir, const wchar_t *path, const wchar_t *name, const void *data, size_t n)
 {
-    char tmp[MAX_PATH + 24];
-    if (!path || (!data && n)) { SetLastError(ERROR_INVALID_PARAMETER); return -1; }
-    int k = snprintf(tmp, sizeof tmp, "%s.%lu.tmp", path, (unsigned long)GetCurrentThreadId());
-    if (k < 0 || (size_t)k >= sizeof tmp) { SetLastError(ERROR_FILENAME_EXCED_RANGE); return -1; }
-    HANDLE h = CreateFileA(tmp, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (h == INVALID_HANDLE_VALUE) return -1;
+    static volatile LONG seq;
+    wchar_t fdir[V3X_PATH_WMAX], ftmp[V3X_PATH_WMAX], tmp[V3X_PATH_WMAX];
+    if (v3x_final_path_w_(dir, fdir, V3X_PATH_WMAX)) return -1;
+    size_t dl = (size_t)(name - path);   /* path[0..dl) = directory incl. the separator */
+    HANDLE h = INVALID_HANDLE_VALUE;
+    DWORD err = 0;
+    for (int attempt = 0; attempt < 16 && h == INVALID_HANDLE_VALUE; attempt++) {
+        int k = _snwprintf(tmp, V3X_PATH_WMAX, L"%ls.%lu.%lu.%ld.v3xtmp", path, (unsigned long)GetCurrentProcessId(),
+                           (unsigned long)GetCurrentThreadId(), (long)InterlockedIncrement(&seq));
+        if (k < 0 || k >= V3X_PATH_WMAX) { SetLastError(ERROR_FILENAME_EXCED_RANGE); return -1; }
+        h = CreateFileW(tmp, GENERIC_WRITE | DELETE, 0, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+        err = GetLastError();
+        if (h == INVALID_HANDLE_VALUE && err != ERROR_FILE_EXISTS && err != ERROR_ALREADY_EXISTS) return -1;
+    }
+    if (h == INVALID_HANDLE_VALUE) { SetLastError(err); return -1; }
+    /* the temp file must be <final dir>\<temp name> */
+    int ok = v3x_final_path_w_(h, ftmp, V3X_PATH_WMAX) == 0;
+    if (ok) {
+        size_t fl = wcslen(fdir), tl = wcslen(tmp + dl);
+        ok = fl + 1 + tl < V3X_PATH_WMAX;
+        if (ok) {
+            fdir[fl] = L'\\';
+            memcpy(fdir + fl + 1, tmp + dl, (tl + 1) * sizeof(wchar_t));
+            ok = v3x_path_ieq_w_(ftmp, fdir);
+        }
+        if (!ok) err = ERROR_REPARSE_POINT_ENCOUNTERED;
+    } else err = GetLastError();
     const char *p = (const char *)data;
     size_t left = n;
-    BOOL ok = TRUE;
     while (ok && left) {
         DWORD w = 0, chunk = left > (1u << 30) ? (1u << 30) : (DWORD)left;
         ok = WriteFile(h, p, chunk, &w, NULL) && w == chunk;
+        if (!ok) err = GetLastError();
         p += w; left -= w;
     }
-    DWORD err = ok ? 0 : GetLastError();
+    if (ok && !FlushFileBuffers(h)) { ok = 0; err = GetLastError(); }
+    if (ok) {   /* rename through the handle */
+        size_t pl = wcslen(path);
+        size_t bytes = offsetof(FILE_RENAME_INFO, FileName) + (pl + 1) * sizeof(wchar_t);
+        FILE_RENAME_INFO *ri = (FILE_RENAME_INFO *)calloc(1, bytes);
+        if (!ri) { ok = 0; err = ERROR_NOT_ENOUGH_MEMORY; }
+        else {
+            ri->ReplaceIfExists = TRUE;
+            ri->RootDirectory = NULL;
+            ri->FileNameLength = (DWORD)(pl * sizeof(wchar_t));
+            memcpy(ri->FileName, path, (pl + 1) * sizeof(wchar_t));
+            ok = SetFileInformationByHandle(h, FileRenameInfo, ri, (DWORD)bytes) != 0;
+            if (!ok) err = GetLastError();
+            free(ri);
+        }
+    }
+    if (!ok) v3x_delete_by_handle_(h);
     CloseHandle(h);
-    if (ok && MoveFileExA(tmp, path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) return 0;
-    if (ok) err = GetLastError();
-    DeleteFileA(tmp);
+    if (ok) return 0;
     SetLastError(err ? err : ERROR_WRITE_FAULT);
     return -1;
+}
+
+/* internal: full = absolute path of the target. from = length of the trusted base incl. its separator
+ * (SIZE_MAX: none): the chain full[from..] is checked, and the parent may be a reparse point only if
+ * it IS the trusted base. The parent is opened with FILE_LIST_DIRECTORY so that the missing
+ * FILE_SHARE_DELETE really blocks renames (an attributes-only handle takes no part in sharing). */
+static int v3x_write_atomic_full_(const wchar_t *full, size_t from, const void *data, size_t n)
+{
+    const wchar_t *name = NULL;
+    for (const wchar_t *q = full; *q; q++)
+        if (*q == L'\\' || *q == L'/') name = q + 1;
+    if (!name || !*name) { SetLastError(ERROR_INVALID_NAME); return -1; }
+    wchar_t dir[V3X_PATH_WMAX];
+    size_t dl = (size_t)(name - full);
+    memcpy(dir, full, dl * sizeof(wchar_t));
+    dir[dl] = 0;
+    if (dl > 1 && dir[dl - 2] != L':') dir[dl - 1] = 0;   /* "C:\a\" -> "C:\a"; keep "C:\" */
+    int parent_trusted = from != SIZE_MAX && dl <= from;
+    const DWORD acc = FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES, sh = FILE_SHARE_READ | FILE_SHARE_WRITE;
+    HANDLE hd = CreateFileW(dir, acc, sh, NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+    if (hd == INVALID_HANDLE_VALUE) return -1;
+    BY_HANDLE_FILE_INFORMATION fi;
+    int rc = -1;
+    if (!GetFileInformationByHandle(hd, &fi)) { /* GetLastError set */ }
+    else if ((fi.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) && !parent_trusted) SetLastError(ERROR_REPARSE_POINT_ENCOUNTERED);
+    else {
+        if (fi.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) {   /* the trusted base is a link: hold its target */
+            CloseHandle(hd);
+            hd = CreateFileW(dir, acc, sh, NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+            if (hd == INVALID_HANDLE_VALUE) return -1;
+        }
+        if (from != SIZE_MAX && v3x_path_has_reparseW(full, from)) SetLastError(ERROR_REPARSE_POINT_ENCOUNTERED);
+        else rc = v3x_write_atomic_held_(hd, full, name, data, n);
+    }
+    DWORD e = GetLastError();
+    CloseHandle(hd);
+    SetLastError(e);
+    return rc;
+}
+
+static int v3x_file_write_atomicW(const wchar_t *V3X_NN path, const void *data, size_t n)
+{
+    wchar_t full[V3X_PATH_WMAX];
+    if (!path || !path[0] || (!data && n)) { SetLastError(ERROR_INVALID_PARAMETER); return -1; }
+    DWORD k = GetFullPathNameW(path, V3X_PATH_WMAX, full, NULL);
+    if (k == 0 || k >= V3X_PATH_WMAX) { SetLastError(k ? ERROR_FILENAME_EXCED_RANGE : GetLastError()); return -1; }
+    return v3x_write_atomic_full_(full, SIZE_MAX, data, n);
+}
+
+/* path in the ANSI code page (CP_ACP), e.g. built from api->v3x_dir() */
+static int v3x_file_write_atomic(const char *V3X_NN path, const void *data, size_t n)
+{
+    wchar_t w[V3X_PATH_WMAX];
+    if (!path || (!data && n)) { SetLastError(ERROR_INVALID_PARAMETER); return -1; }
+    if (v3x_widen(CP_ACP, path, SIZE_MAX, w, V3X_PATH_WMAX) != V3X_R_OK) { SetLastError(ERROR_NO_UNICODE_TRANSLATION); return -1; }
+    return v3x_file_write_atomicW(w, data, n);
+}
+
+/* base\rel: rel validated, no reparse point in base\rel's chain below base (checked while the
+ * parent directory is held), parent directories must exist. */
+static int v3x_file_write_atomic_inW(const wchar_t *V3X_NN base, const wchar_t *V3X_NN rel, const void *data, size_t n)
+{
+    wchar_t joined[V3X_PATH_WMAX], full[V3X_PATH_WMAX], fbase[V3X_PATH_WMAX];
+    if (!base || !base[0] || !rel || (!data && n)) { SetLastError(ERROR_INVALID_PARAMETER); return -1; }
+    V3xResult r = v3x_path_join_checkedW(joined, V3X_PATH_WMAX, base, rel, 0);
+    if (r != V3X_R_OK) { SetLastError(r == V3X_R_ETRUNC ? ERROR_FILENAME_EXCED_RANGE : ERROR_INVALID_NAME); return -1; }
+    DWORD k = GetFullPathNameW(joined, V3X_PATH_WMAX, full, NULL);
+    DWORD kb = GetFullPathNameW(base, V3X_PATH_WMAX, fbase, NULL);
+    if (k == 0 || k >= V3X_PATH_WMAX || kb == 0 || kb >= V3X_PATH_WMAX) { SetLastError(ERROR_FILENAME_EXCED_RANGE); return -1; }
+    while (kb > 0 && (fbase[kb - 1] == L'\\' || fbase[kb - 1] == L'/')) fbase[--kb] = 0;
+    /* full must still start with base\ (GetFullPathName cannot move it: rel has no "..") */
+    if (wcsncmp(full, fbase, kb) != 0 || full[kb] != L'\\') { SetLastError(ERROR_INVALID_NAME); return -1; }
+    return v3x_write_atomic_full_(full, (size_t)kb + 1, data, n);
+}
+
+static int v3x_file_write_atomic_in(const char *V3X_NN base, const char *V3X_NN rel, const void *data, size_t n)
+{
+    wchar_t wb[V3X_PATH_WMAX], wr[V3X_PATH_REL_MAX + 1];
+    if (!base || !rel || (!data && n)) { SetLastError(ERROR_INVALID_PARAMETER); return -1; }
+    if (v3x_widen(CP_ACP, base, SIZE_MAX, wb, V3X_PATH_WMAX) != V3X_R_OK ||
+        strnlen(rel, V3X_PATH_REL_MAX + 1) > V3X_PATH_REL_MAX || v3x_widen(CP_ACP, rel, SIZE_MAX, wr, V3X_PATH_REL_MAX + 1) != V3X_R_OK) {
+        SetLastError(ERROR_INVALID_NAME);
+        return -1;
+    }
+    return v3x_file_write_atomic_inW(wb, wr, data, n);
 }
 
 /* Cross-process lock for read-modify-write of the shared v3x.ini (audit L11: mod_menu, doctor and the
@@ -168,4 +310,5 @@ static int v3x_reload_is_for(const void *data, const char *plugin)
     return !data || (plugin && !_stricmp((const char *)data, plugin));
 }
 
+V3X_NN_END
 #endif

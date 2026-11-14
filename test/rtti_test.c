@@ -86,7 +86,22 @@ int main(int argc, char **argv)
     CHECK(n == 3 && s.n == 3, "enum CTickTask_: %d (expect 3)", n);
     CHECK(seen_has(&s, "CTickTask_Foo", img + 0x2008) && seen_has(&s, "CTickTask_Bar", img + 0x2108) &&
           seen_has(&s, "CTickTask_Struct", img + 0x2608), "enum names + vtables");
+    /* NULL safety (audit action 12) */
+    CHECK(v3x_rtti_find_vtable(NULL, "COther") == 0 && v3x_rtti_find_vtable(&r, NULL) == 0 && v3x_rtti_find_vtable(&r, "") == 0,
+          "find: NULL index / NULL or empty name -> NULL");
+    CHECK(v3x_rtti_enum(NULL, "C", cb, &s) == 0 && v3x_rtti_enum(&r, NULL, cb, &s) == 0 && v3x_rtti_enum(&r, "CTickTask_", NULL, NULL) == 3,
+          "enum: NULL index / prefix -> 0, NULL callback just counts");
+    CHECK(v3x_rtti_build_range(NULL, (uintptr_t)img, (uintptr_t)img, SZ, 0, SZ) == -1 &&
+              v3x_rtti_build_ex(NULL, (uintptr_t)img, SZ, (uintptr_t)img) == -1 && v3x_rtti_build(NULL, 0, 0) == -1,
+          "build: NULL V3xRtti -> -1");
+    CHECK(!strcmp(v3x_rtti_mangled(NULL, r.e), "") && !strcmp(v3x_rtti_mangled(&r, NULL), ""), "mangled: NULL -> \"\"");
     v3x_rtti_free(&r);
+    v3x_rtti_free(NULL);
+    CHECK(r.e == 0 && r.n == 0 && v3x_rtti_find_vtable(&r, "COther") == 0 && v3x_rtti_enum(&r, "C", cb, &s) == 0,
+          "freed index is empty; free(NULL) is a no-op");
+    V3xRtti empty;
+    CHECK(v3x_rtti_build_range(&empty, 0, 0, SZ, 0, SZ) == 0 && empty.n == 0 && v3x_rtti_build(&empty, 0, 0) == -2,
+          "build over base 0: empty index (range) / bad PE (build)");
     VirtualFree(img, 0, MEM_RELEASE);
 
     if (argc >= 2) {

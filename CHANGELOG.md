@@ -5,7 +5,74 @@ is append-only (plugins built for an older version keep working).
 
 ## Unreleased
 
-### Security hardening (core, SDK, build; docs/security-audit.md actions 7-10, 14, 15)
+Nothing yet.
+
+## Loader 0.6.0, API v6 (security hardening and containment)
+
+API v6 only appends (seven `V3X_API` fields, one manifest field, new constants and events): plugins
+built for API v1-v5 load unchanged ([ADR 0005](docs/adr/0005-api-v6-containment.md)). Behaviour changes
+only where the old behaviour let one plugin damage others or the loader (listed under "Changed").
+**Plugin DLLs must now be trusted** ([ADR 0002](docs/adr/0002-trust-model.md)): the plugins installed by
+`V3X-Setup.exe` are; for your own builds use `trust <plugin>` in the console or `V3X_TRUST=dev`.
+
+### API v6: trust and containment
+
+#### Added
+- **Plugin trust** (ADR 0002): a plugin DLL loads only if its SHA-256 is listed in
+  `binaries/v3x/plugins.json` with a valid release signature `plugins.json.sig` ("official"), or is in
+  the per-user allowlist `%LOCALAPPDATA%\V3X\trusted_plugins.txt` ("trusted"), or env `V3X_TRUST=dev` is
+  set ("dev"). Other DLLs are never mapped. New console command `trust [plugin]` lists the refused
+  plugins and allows one (its exact hash, next start). `plugins` shows each plugin's trust and
+  capabilities. The installer writes `plugins.json` (`installer/make_dist.py`).
+- **Pre-load checks on the file**: the manifest and the `v3x_plugin_load` / `v3x_plugin_name` exports are
+  read from the DLL file with a bounded PE reader (`src/v3x_pe.h`) before `LoadLibrary`; a plugin refused
+  by trust, `min_api`, `V3X_MANIFEST_REQUIRE_BUILD`, the unknown-build gate, a malformed PE or a missing
+  `v3x_plugin_load` never runs (not even `DllMain`). The file is held open without write/delete sharing
+  from the hash until `LoadLibrary` returned.
+- **Capabilities**: `V3X_PluginManifest.capabilities` (appended, offset 56; struct 64 bytes) and
+  `V3X_PLUGIN_MANIFEST_CAPS(..., "hook fs")`. Declared `hook`, `patch`, `exec` are enforced (`hook` /
+  `hook_safe` / `unhook`, `patch`, `exec_command` / `exec_capture` without the word return `V3X_EPERM` /
+  `ERROR_ACCESS_DENIED`, logged once); `fs`, `net`, `script` are advisory. Undeclared = all allowed.
+- **Quotas** per plugin module: `V3X_QUOTA_FRAME` (16) `on_frame` callbacks, `V3X_QUOTA_EVENTS` (24) event
+  subscriptions, `V3X_QUOTA_COMMANDS` (24) commands (-1 above, `v3x.log` names the quota).
+- **Removal**: `off_frame`, `off_event`, `unregister_command` (remove only the caller's own
+  registration; `V3X_ENOTFOUND`, `V3X_EPERM`).
+- **Unicode paths**: `game_dir_w`, `v3x_dir_w` (UTF-16) and `game_dir_utf8`, `v3x_dir_utf8`.
+- **Events** `plugin_disabled` (data `const V3X_PluginDisabled *`: `struct_size`, `name`, `module`,
+  `reason`; synchronously when a plugin is disabled after a fault or rollback) and `plugins_loaded`
+  (main thread, once after the last `v3x_plugin_load`). Event payloads from v6 on start with
+  `struct_size`.
+- Return codes `V3X_EARG` (-1), `V3X_ENOTFOUND` (-3), `V3X_EPERM` (-4); `V3X_PATCH_MAX` (65536).
+- Contracts block in `include/v3x.h`: ownership, pointer rules, lifetimes, limits, quotas, guards.
+- `src/core_parse.h`: the loader's parsers for `plugins.json`, the allowlist, capabilities and patterns,
+  stateless, for unit tests and fuzzing.
+
+#### Changed
+- **Ownership**: every hook, patch and registration belongs to the calling module (return address; a
+  tail call from a loader-started callback counts for that plugin). Code in no module with no plugin
+  callback running is the "unknown" owner and owns nothing (`V3X_EPERM`). The loader's own hooks
+  (entry point, `PeekMessageW`, `RtlExitUserProcess`) belong to the core and cannot be removed.
+- **Patch rules**: the whole range must be committed and accessible (`ERROR_INVALID_ADDRESS`), at most
+  `V3X_PATCH_MAX` bytes (`ERROR_INVALID_PARAMETER`); refused with `ERROR_ACCESS_DENIED` over the loader,
+  another plugin's module, the first 16 bytes of a function hooked by another module or the core, for
+  the unknown owner and without the `patch` capability. Least page rights (RWX only for code pages, only
+  while copying), other threads suspended like MinHook under the same lock; a full record table (512)
+  refuses the patch instead of applying it untracked.
+- **Reserved events**: `emit_event` of `process_exit`, `plugin_disabled` or `plugins_loaded` returns -1
+  and calls nobody; only the core emits them.
+- **Strict `pattern_scan`**: tokens must be two hex digits or `?` / `??`; a bad token or more than 256
+  bytes returns NULL with a WARNING (a bad token used to be read as `00`, long patterns were cut).
+  `find_xref` with a negative index returns NULL.
+- Plugin-supplied pointers (names, help texts, patch bytes, `original`) are read or written before the
+  loader takes a lock, so a bad pointer faults in the caller.
+- Loader version 0.6.0 (`loader_version()`, `v3x_loader_semver`).
+
+#### Fixed
+- `unhook(NULL)` disabled every hook in the process, including the loader's own; it now returns
+  `V3X_EARG` and does nothing. `unhook` of a target the loader never hooked returns
+  `MH_ERROR_NOT_CREATED` and touches nothing.
+
+### Security hardening (core, SDK, build)
 
 #### Added
 - `sdk/v3x_safe.h` (header-only, C99/C++): `V3xStr` bounded string builder (never overruns,
@@ -13,7 +80,7 @@ is append-only (plugins built for an older version keep working).
   (`v3x_add_ok`, `v3x_mul_ok`, `v3x_alloc_array`), `V3xResult` + `V3X_MUST_USE`,
   `v3x_path_rel_ok` / `v3x_path_join_checked` (no `..`, `:`, absolute, device names, optional
   reparse-point refusal), `v3x_sanitize_line`, atomics, `V3X_ASSERT_MAIN`. [ADR 0004](docs/adr/0004-sdk-safety.md)
-- `sdk/v3x_util.h` `v3x_config_lock` / `v3x_config_unlock`: the shared `Local3x_ini` mutex for
+- `sdk/v3x_util.h` `v3x_config_lock` / `v3x_config_unlock`: the shared `Local\v3x_ini` mutex for
   v3x.ini read-modify-write.
 - `V3X_PRINTF(fmt, args)` in `include/v3x.h`; `log`, `print`, `log_at` are format-checked (no ABI change).
 - Thread rule of every API entry written in `include/v3x.h`.
@@ -47,7 +114,14 @@ is append-only (plugins built for an older version keep working).
   `SANITIZE=1 test/run_all.sh` builds the test executables with UBSan (trap).
 - `v3x.ini` scanner of the loader moved to `src/core_ini.h` (unchanged rules) so it can be fuzzed.
 
-### Loader 0.5.0, API v5 (stability release)
+#### Fixed
+- `test/par_load_test.c`: the fork/join determinism check accumulated more than 1 MB of `snprintf`
+  output into a 1 MB buffer (the size argument wrapped, writes ran past the buffer); the output is now
+  hashed as it is produced. Found by `SANITIZE=1` (`-fsanitize=bounds`).
+- `test/ai_par_test.c`: the fake Step's cost-vector end pointer was formed 1004 elements past the
+  end of its 64-entry array; it is now clamped (the plugin already checks the vector length).
+
+## Loader 0.5.0, API v5 (stability release)
 
 The loader now has a version of its own (`loader_version()`, semver, "0.5.0"), separate from the
 API version (5) and the game build. The contract is written down in `docs/api-stability.md`.
@@ -100,6 +174,8 @@ API version (5) and the game build. The contract is written down in `docs/api-st
 - The core is built with `-fms-extensions` (SEH); `build.sh` skips plugin folders without `.c` files.
 - `sdk/v3x_ini.h`: `V3xIniKv` is declared at file scope (the header now compiles as C++ too).
 - Template: `v3x_util.h` timing, `V3X_LOGD`, `reload my_plugin`; README shows `check`.
+
+## API v4
 
 ### Added (API v4)
 - **API v4** (`include/v3x.h`, `src/core.c`, `src/safe_hook.c`):

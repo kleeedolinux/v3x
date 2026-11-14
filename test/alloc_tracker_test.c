@@ -1,7 +1,8 @@
 /* Offline test of alloc_tracker's lock-free tables and sampler (no game needed).
- *   python -m ziglang cc -target x86_64-windows-gnu -O2 -o D:/v3x_tmp/mem/att.exe test/alloc_tracker_test.c
- *   D:/v3x_tmp/mem/att.exe        -> prints ALL OK
- *   D:/v3x_tmp/mem/att.exe "<game>/binaries/victoria3.exe" D:/v3x_tmp/mem/alloc_tracker.dll
+ *   python -m ziglang cc -target x86_64-windows-gnu -O2 -o $V3X_TMP/att.exe test/alloc_tracker_test.c
+ *   $V3X_TMP/att.exe        -> prints ALL OK
+ *   $V3X_TMP/att.exe "<game>/binaries/victoria3.exe" build/plugins/alloc_tracker.dll
+ * Scratch files: $V3X_TMP/mem/at/ (else %TEMP%, see test/test_tmp.h).
  * The second form maps the real exe (DONT_RESOLVE_DLL_REFERENCES: relocated, no game code runs), loads
  * the built plugin with a fake V3X_API and checks the resolved hook targets. The fake hook hands the
  * plugin stub allocators as "originals", so its detours, live/free matching and report run for real. */
@@ -10,6 +11,7 @@
 #include <stdarg.h>
 #include "../plugins/alloc_tracker/at_core.h"
 #include "../include/v3x.h"
+#include "test_tmp.h"
 
 static int fails;
 #define CHECK(c) do { if (!(c)) { printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #c); fails++; } } while (0)
@@ -150,8 +152,8 @@ static void test_plugin(const char *exe, const char *dll)
     g_base = (unsigned char *)h;
     IMAGE_NT_HEADERS *nt = (IMAGE_NT_HEADERS *)(g_base + ((IMAGE_DOS_HEADER *)g_base)->e_lfanew);
     g_size = nt->OptionalHeader.SizeOfImage;
-    CreateDirectoryA("D:\\v3x_tmp\\mem\\at", NULL);
-    strcpy(g_dir, "D:\\v3x_tmp\\mem\\at\\");
+    test_tmp_dir(g_dir, sizeof g_dir, "mem/at");
+    for (char *c = g_dir; *c; c++) if (*c == '/') *c = '\\';   /* WritePrivateProfileString wants a full Windows path */
     char ini[MAX_PATH]; snprintf(ini, sizeof ini, "%salloc_tracker.ini", g_dir);
     WritePrivateProfileStringA("alloc_tracker", "enabled", "1", ini);
     WritePrivateProfileStringA("alloc_tracker", "report_interval_s", "1", ini);

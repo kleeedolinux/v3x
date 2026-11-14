@@ -1,6 +1,6 @@
 /* Offline test of frame_pacer (no game run).
- *   python -m ziglang cc -target x86_64-windows-gnu -O2 -Iinclude -o D:/v3x_tmp/gfx/fpt.exe test/frame_pacer_test.c
- *   D:/v3x_tmp/gfx/fpt.exe plugins/frame_pacer/frame_pacer.ini.example [path/to/victoria3.exe]
+ *   python -m ziglang cc -target x86_64-windows-gnu -O2 -Iinclude -o $V3X_TMP/fpt.exe test/frame_pacer_test.c
+ *   $V3X_TMP/fpt.exe plugins/frame_pacer/frame_pacer.ini.example [path/to/victoria3.exe]
  * Part 1: config parser + policy. Part 2 (with the exe): runs the plugin's real anchor
  * resolution (fp_resolve) against victoria3.exe mapped as an image (read-only, nothing executes)
  * through a fake V3X_API that implements the scanners like src/core.c, and prints the RVAs. */

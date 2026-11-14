@@ -26,9 +26,74 @@ disassembling ones; numpy for a few `re_*` scanners). Run the tools without `pyt
 8. **Write it down** in `docs/re/<topic>.md`: RVAs *with* the anchor used to find each one, and
    tags **[V]** verified / **[I]** inferred / **[D]** from dumps / **[R]** measured at runtime.
 
-RVAs are relative to the image base (0x140000000 in the file). At runtime add
-`api->image_base()`. Every RVA in `docs/re/` is for **1.15.1** (PE TimeDateStamp `0x6af3094f`);
-re-anchor after a patch.
+RVAs are relative to the image base (0x140000000 in the file). Every RVA in `docs/re/` is for
+**1.15.1** (PE TimeDateStamp `0x6af3094f`) and is for orientation only: a plugin never computes
+`api->image_base() + rva`, it finds the address at runtime with an anchor (next section) and
+refuses to run when the anchor does not match.
+
+## From a finding to plugin code
+
+What you found with the tools becomes an anchor table (`sdk/v3x_anchor.h`): the string the
+function references, the prologue bytes it starts with, and a `check` callback that proves the
+detail your plugin relies on (here: the function reads the field at `+0x120` within its first
+0x100 bytes). If any of it fails, `v3x_anchor_resolve_all` logs why and the plugin installs
+nothing:
+
+<!-- sample: file -->
+```c
+/* the detail we rely on: mov rax, [rcx+0x120] near the function start */
+static int check_reads_field(const V3X_API *api, void *fn, void *user)
+{
+    (void)user;
+    V3xSection text;
+    if (!v3x_section(api->image_base(), ".text", &text)) return 1;
+    return v3x_scan_near_in(&text, fn, 0x100, "48 8B 81 20 01 00 00") ? 0 : 2;
+}
+
+static V3xAnchor g_anchors[] = {
+    {.name = "game_tick", .string = "Processing Tick: ",                  /* step 1-2: the string */
+     .pattern = "48 89 5C 24 ?? 48 89 74 24 ?? 48 89 7C 24",              /* step 3: its prologue */
+     .xref = V3X_ANCHOR_ALL_SAME,                                         /* every xref, one function */
+     .check = check_reads_field},                                         /* the shape we use */
+};
+
+int my_resolve(const V3X_API *api)   /* shared by v3x_plugin_load and the offline test */
+{
+    return v3x_anchor_resolve_all(api, "my_plugin", g_anchors, 1);
+}
+```
+
+The offline check runs the same code against the exe mapped as an image (no game process, nothing
+executes), so a game patch that moves or changes the function fails here, not in the game:
+
+<!-- sample: complete -->
+```c
+#include "v3x_testkit.h"
+#include "v3x_sdk.h"
+
+int my_resolve(const V3X_API *api);   /* from the plugin source, compiled into the test */
+
+int main(int argc, char **argv)
+{
+    V3X_API api;
+    if (argc > 1 && v3x_testkit_map_exe(argv[1], &api) == 0)
+        V3X_TEST_CHECK(my_resolve(&api) == 0, "anchors resolve on %s", argv[1]);
+    return v3x_testkit_done();   /* "N checks, M failed", exit code 1 on any failure */
+}
+```
+
+`python sdk/build_plugin.py <dir> --test ../binaries/victoria3.exe` builds and runs it (any
+`test_*.c` in the plugin folder). Then read the matched address back with the devconsole (`fn
+<addr>`) and compare with your notes.
+
+> **Unsafe — when you really need it:** `api->pattern_scan(...)` or `api->find_xref(s, 0)` used
+> directly as the hook target.
+> * What can go wrong: `pattern_scan` returns the first match, so a pattern with two matches is a
+>   coin flip after the next patch; xref index 0 is whichever reference the linker put first.
+>   Either way you hook or patch the wrong code and the game crashes later, somewhere else.
+> * How to contain it: use them only to explore (devconsole `scan`, `xref`). In a plugin use
+>   `V3xAnchor`: it insists on exactly one pattern match, on all xrefs agreeing on one function,
+>   on the prologue, and on your `check`.
 
 ## Static tools
 

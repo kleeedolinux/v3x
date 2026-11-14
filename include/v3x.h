@@ -36,7 +36,7 @@ extern "C" {
  * constants); nothing is reordered, resized or removed, and a documented return value keeps its
  * meaning. test/abi_test.c fails the build on any layout change; test/compat_test.c loads plugins
  * built against the frozen v1..v4 headers (test/compat_v*.h) into the current loader. */
-#define V3X_API_VERSION 5
+#define V3X_API_VERSION 6
 
 /* printf format checking for the variadic API entries (log, print, log_at) and SDK helpers. An attribute
  * on the function-pointer FIELD (a typedef does not carry it in clang); it changes no layout or calling
@@ -62,6 +62,14 @@ extern "C" {
 #define V3X_EFAIL (-1)          /* bad arguments, table/queue full, unknown command, or the process is
                                    exiting; also MinHook's MH_UNKNOWN */
 #define V3X_EEXIST (-2)         /* register_command: name taken; on_event: same (name, fn, user) */
+/* API v6 (loader 0.6.0) codes. V3X_EARG has the value of V3X_EFAIL: functions that already returned -1
+ * for bad arguments keep doing so. The other two are new and returned only where documented. */
+#define V3X_EARG (-1)           /* bad arguments (NULL target / name / fn, out of range) */
+#define V3X_ENOTFOUND (-3)      /* off_frame / off_event / unregister_command: no such registration */
+#define V3X_EPERM (-4)          /* the caller may not do this: it is not identifiable as a module ("unknown
+                                   owner", e.g. code in heap memory), the registration / hook belongs to
+                                   another module or to the core, or its manifest does not declare the
+                                   capability (V3X_PluginManifest.capabilities) */
 #define V3X_EMH_NOT_INITIALIZED 2   /* hooks: MinHook unavailable, or the process is exiting */
 #define V3X_EMH_ALREADY_CREATED 3   /* hook_safe: this plugin already subscribed the same
                                        pre/post/user there (a raw hook on a hooked target is V3X_EHOOKBUSY) */
@@ -85,6 +93,9 @@ extern "C" {
 #define V3X_EVENT_LOAD_TRANSITION_BEGIN "load_transition_begin"
 #define V3X_EVENT_SAVE_BEGIN "save_begin"                      /* data: const V3X_SaveBegin * */
 #define V3X_EVENT_SAVE_END "save_end"
+#define V3X_EVENT_PLUGIN_DISABLED "plugin_disabled"            /* v6, data: const V3X_PluginDisabled * */
+#define V3X_EVENT_PLUGINS_LOADED "plugins_loaded"              /* v6, main thread, once after the last
+                                                                  v3x_plugin_load returned; data NULL */
 
 typedef void (*v3x_frame_fn)(void *user);
 typedef void (*v3x_command_fn)(const char *args, void *user);
@@ -133,7 +144,13 @@ typedef void (*v3x_hook_fn)(V3X_HookCall *call);
 
 /* Optional plugin manifest (API v4), exported as data named `v3x_plugin_manifest`. The loader
  * reads it before calling v3x_plugin_load and shows it in the `plugins` console command.
- * Use V3X_PLUGIN_MANIFEST(...) below instead of filling it by hand. All strings may be NULL. */
+ * Use V3X_PLUGIN_MANIFEST(...) below instead of filling it by hand. All strings may be NULL.
+ * Since loader 0.6.0 the manifest (and the v3x_plugin_load / v3x_plugin_name exports) are read from the
+ * DLL FILE with a bounded PE reader BEFORE LoadLibrary: a plugin refused by min_api, REQUIRE_BUILD, the
+ * unknown-build gate, the trust check (docs/adr/0002-trust-model.md) or a missing v3x_plugin_load is
+ * never mapped, so its DllMain and static constructors never run. Consequence: the manifest must be a
+ * constant initialised at compile time (the macros do that); values written at run time are not seen.
+ * String fields are read up to 4095 bytes and must point into the DLL's own image. */
 #define V3X_MANIFEST_REQUIRE_BUILD 1u   /* flags: refuse to load (v3x_plugin_load is not called)
                                            when the running game matches none of game_builds */
 typedef struct V3X_PluginManifest {
@@ -151,6 +168,15 @@ typedef struct V3X_PluginManifest {
                                   ("6af3094f-60fb000") or a prefix ending in '*' ("release/1.15*").
                                   NULL, "" or "*" = any build. A mismatch only logs a WARNING
                                   unless flags has V3X_MANIFEST_REQUIRE_BUILD. */
+    /* ---- API v6 (read only when struct_size covers it) */
+    const char *capabilities;  /* what the plugin uses: comma/space separated subset of
+                                  "hook patch fs net script exec". NULL (or a manifest built with an older
+                                  header) = undeclared = everything allowed, as before. When declared, the
+                                  loader ENFORCES hook (hook, hook_safe, unhook), patch and exec
+                                  (exec_command, exec_capture): a call without the capability returns
+                                  V3X_EPERM (patch: ERROR_ACCESS_DENIED) and is logged once. fs, net and
+                                  script are advisory (shown by `plugins`; a native DLL cannot be stopped
+                                  from calling the OS directly). Unknown words are logged and ignored. */
 } V3X_PluginManifest;
 
 #ifdef __cplusplus
@@ -159,11 +185,15 @@ typedef struct V3X_PluginManifest {
 #define V3X_MANIFEST_EXPORT_ __declspec(dllexport)
 #endif
 /* V3X_PLUGIN_MANIFEST("my_plugin", "1.0.0", "me", "does things", "release/1.15.1") at file scope.
- * V3X_PLUGIN_MANIFEST_EX adds flags and min_api. */
-#define V3X_PLUGIN_MANIFEST_EX(name_, version_, author_, desc_, builds_, flags_, min_api_)              \
+ * V3X_PLUGIN_MANIFEST_EX adds flags and min_api; V3X_PLUGIN_MANIFEST_CAPS (API v6) also capabilities,
+ * e.g. V3X_PLUGIN_MANIFEST_CAPS("me", "1.0", "me", "x", "*", 0u, 0u, "hook fs"). Older loaders ignore the
+ * capabilities field (they read only up to game_builds). */
+#define V3X_PLUGIN_MANIFEST_CAPS(name_, version_, author_, desc_, builds_, flags_, min_api_, caps_)       \
     V3X_MANIFEST_EXPORT_ const V3X_PluginManifest v3x_plugin_manifest = {                               \
         (uint32_t)sizeof(V3X_PluginManifest), (flags_), (min_api_), 0u, (name_), (version_), (author_), \
-        (desc_), (builds_)}
+        (desc_), (builds_), (caps_)}
+#define V3X_PLUGIN_MANIFEST_EX(name_, version_, author_, desc_, builds_, flags_, min_api_) \
+    V3X_PLUGIN_MANIFEST_CAPS(name_, version_, author_, desc_, builds_, flags_, min_api_, (const char *)0)
 #define V3X_PLUGIN_MANIFEST(name_, version_, author_, desc_, builds_) \
     V3X_PLUGIN_MANIFEST_EX(name_, version_, author_, desc_, builds_, 0u, 0u)
 
@@ -174,9 +204,15 @@ typedef struct V3X_PluginManifest {
  *   image_base, image_size, game_version, game_dir, v3x_dir, main_thread_id, game_build_id,
  *   loader_version, build_matches ............ any (immutable after boot)
  *   pattern_scan, find_string, find_xref, function_start ... any (read-only scans)
- *   hook, unhook, hook_safe, patch ........... any; they suspend other threads while writing code. unhook
- *                                               only DISABLES (the trampoline is never freed; a thread may
- *                                               still be inside it): docs/adr/0003-hook-lifetime.md
+ *   hook, unhook, hook_safe, patch ........... any; they suspend the other threads (patch: since loader 0.6.0,
+ *                                               with the same Toolhelp32 snapshot + SuspendThread scheme as
+ *                                               MinHook, under the same lock, so a hook and a patch never
+ *                                               suspend each other). unhook only DISABLES (the trampoline is
+ *                                               never freed; a thread may still be inside it):
+ *                                               docs/adr/0003-hook-lifetime.md. A thread that is executing
+ *                                               the patched bytes at that moment resumes in the middle of
+ *                                               the new ones: patch code no thread runs (or before it runs).
+ *   off_frame, off_event, unregister_command . any (v6); they remove only the caller's own registration
  *   on_frame ................................. any (registration is atomic); callbacks run on main
  *   run_on_main .............................. any; the callback runs on main (next frame tick)
  *   register_command, on_event, enum_commands  any
@@ -189,7 +225,45 @@ typedef struct V3X_PluginManifest {
  *                                               handler that touches game state must run_on_main.
  *   emit_event ............................... any; subscribers run synchronously on the emitting thread
  *   hook_safe pre/post callbacks ............. the thread that called the hooked function (often a worker)
- * After process exit started every entry returns at once without effect (see on_event below). */
+ *   game_dir_w, v3x_dir_w, game_dir_utf8, v3x_dir_utf8  any (v6, immutable after boot)
+ * After process exit started every entry returns at once without effect (see on_event below).
+ *
+ * ---- Contracts that hold for every entry (API v6 documents what earlier headers left implicit) ----
+ * Ownership. The loader attributes every hook, patch and registration to the MODULE (DLL) that called
+ *   the API, found from the return address. A call whose return address is inside the loader itself (a
+ *   tail call such as `return api->hook(...)` from a callback the loader invoked) is attributed to the
+ *   plugin whose callback is running on this thread. A call from code that is in no module (heap,
+ *   generated code) on a thread where no plugin callback runs has the "unknown" owner, which owns
+ *   nothing: hook / hook_safe / unhook return V3X_EPERM and patch ERROR_ACCESS_DENIED. Hooks the loader
+ *   itself needs (the exe entry point, PeekMessageW frame hook, RtlExitUserProcess) belong to the core:
+ *   no plugin can unhook them (V3X_EHOOKBUSY).
+ * Pointers a plugin passes in (names, help texts, patch bytes, `original` out-pointers) are read or
+ *   written before the loader takes any of its locks, never under one: a bad pointer faults in the
+ *   caller's own context and cannot leave a loader lock held.
+ * Lifetimes. Strings passed TO callbacks (command args, event names, exec_capture sink text, enum_commands
+ *   name/help, event data of core events) are valid only during that callback: copy what you keep. Strings
+ *   the loader returns (game_version, game_dir, loader_version, ...) live until process exit.
+ *   Callbacks registered with on_frame / on_event / register_command / run_on_main stay registered until
+ *   removed with off_frame / off_event / unregister_command (v6) or until the plugin is disabled after a
+ *   fault (then they are skipped). A call already in progress when a removal returns may still finish
+ *   (removal from another thread does not wait for it); no new call starts after the removal returned.
+ * Limits (truncation is silent unless stated): log line 2047 bytes incl. the "[time][tag] " prefix;
+ *   print 8191 bytes; exec_command / exec_capture: command name 63 chars (a longer first word is cut),
+ *   arguments 2047 bytes; register_command name 31 chars (longer = -1), help 159 bytes (cut); event names
+ *   1..63 chars (longer = -1); pattern_scan 256 bytes (longer = NULL, v6); patch 65536 bytes per call
+ *   (longer = ERROR_INVALID_PARAMETER, v6); find_xref index < 0 = NULL (v6).
+ * Quotas (v6): one plugin module may hold at most V3X_QUOTA_FRAME on_frame callbacks, V3X_QUOTA_EVENTS
+ *   event subscriptions and V3X_QUOTA_COMMANDS commands; above that the call returns -1 like a full table
+ *   and v3x.log names the quota. The global tables (64 / 64 / 128) and the patch table (512 live patches,
+ *   ERROR_NOT_ENOUGH_MEMORY when full, nothing is written then) stay.
+ * Guards. Callbacks the loader starts (v3x_plugin_load, on_frame, run_on_main, commands, events,
+ *   enum_commands) run inside a fault guard; hook detours, hook_safe pre/post, plugin threads and
+ *   DllMain do not (a fault there is the game's crash). hook_safe's thunk reads 12 stack slots of the
+ *   caller, whatever the function's real prototype (see V3X_HookCall). */
+#define V3X_QUOTA_FRAME 16
+#define V3X_QUOTA_EVENTS 24
+#define V3X_QUOTA_COMMANDS 24
+#define V3X_PATCH_MAX 65536
 typedef struct V3X_API {
     uint32_t api_version;   /* V3X_API_VERSION the loader was built with */
     uint32_t struct_size;   /* sizeof(V3X_API) of the loader; check before using newer fields */
@@ -208,7 +282,10 @@ typedef struct V3X_API {
      * find_xref:    the index-th instruction in .text that references `target` with a
      *               RIP-relative lea/mov (index 0 = first).
      * function_start: start of the function containing `addr` (from the .pdata unwind table).
-     * All return NULL when nothing is found. */
+     * All return NULL when nothing is found. pattern_scan is strict since loader 0.6.0: tokens are
+     * separated by spaces/tabs and are exactly two hex digits or "?" / "??"; any other token, or more than
+     * 256 bytes, returns NULL and logs a WARNING (it used to read a bad token as 00 and cut long
+     * patterns). find_xref with index < 0 returns NULL. */
     void *(*pattern_scan)(const char *ida_pattern);
     void *(*find_string)(const char *s);
     void *(*find_xref)(const void *target, int index);
@@ -224,11 +301,25 @@ typedef struct V3X_API {
      * subscriptions stay; the thunk is disabled and the original bytes restored when the last
      * subscriber leaves). Since the security hardening (CHANGELOG Unreleased): unhook only DISABLES; the trampoline `original` stays valid
      * (never freed) and a later hook on the same target reuses it. Returns V3X_EHOOKBUSY if only other plugins hold it,
-     * MH_ERROR_NOT_CREATED (4) if nothing is hooked. */
+     * MH_ERROR_NOT_CREATED (4) if nothing is hooked. Since loader 0.6.0: unhook(NULL) = V3X_EARG and does
+     * nothing (it used to disable EVERY hook in the process); a target the loader never hooked =
+     * MH_ERROR_NOT_CREATED and nothing is touched; hooks of the core cannot be removed (V3X_EHOOKBUSY);
+     * a caller with the unknown owner gets V3X_EPERM (see "Ownership" above). `original` is written
+     * before the hook is enabled, outside the loader's lock. */
     int (*hook)(void *target, void *detour, void **original);
     int (*unhook)(void *target);
 
-    /* Write bytes over code or read-only data (handles page protection + icache). 0 on success. */
+    /* Write bytes over code or read-only data (handles page protection + icache). 0 on success, else a
+     * Win32 error code. Loader 0.6.0 contract: the whole range [addr, addr+n) must be committed and
+     * accessible (else ERROR_INVALID_ADDRESS, nothing written); n <= V3X_PATCH_MAX
+     * (ERROR_INVALID_PARAMETER). Every page is made writable with the least rights needed (read-write for
+     * data; read-write-execute only for code pages, only while the bytes are copied) and restored to its
+     * original protection, all under one lock with the other threads suspended. Refused with
+     * ERROR_ACCESS_DENIED: memory of the loader (version.dll, its API table and hook stub pool), of
+     * another plugin's module, the first 16 bytes of a function hooked by another module or the core, a
+     * caller with the unknown owner, and a plugin whose manifest declares capabilities without "patch".
+     * The replaced bytes are recorded (rollback of a failed load); when the record table (512) is full the
+     * patch is refused with ERROR_NOT_ENOUGH_MEMORY instead of being applied untracked. */
     int (*patch)(void *addr, const void *bytes, size_t n);
 
     /* Called once per message-pump iteration on the game's main thread (about once per frame). */
@@ -279,11 +370,16 @@ typedef struct V3X_API {
     /* Named events between plugins (one plugin owns a hook and emits, others subscribe).
      * on_event: subscribe fn(name, data, user) to `name` (case-sensitive, 1..63 chars). The table is
      *   fixed at 64 subscriptions for all plugins together; the same (name, fn, user) may be
-     *   subscribed only once. Returns 0, -1 table full / bad args, -2 already subscribed.
+     *   subscribed only once. Returns 0, -1 table full / quota (V3X_QUOTA_EVENTS per plugin) / bad args,
+     *   -2 already subscribed. Remove with off_event (v6).
      * emit_event: calls every subscriber of `name` synchronously on the emitting thread, in
      *   subscription order, with `data` passed through untouched (meaning defined per event).
      *   Subscribers may subscribe or emit from inside the callback (a subscriber added during an
      *   emit is called from the next emit on). Returns the number of subscribers called, -1 on bad args.
+     *   Events carry no emitter identity: any plugin may emit any other plugin's event name; treat `data`
+     *   as untrusted input and check what you can (struct_size, NULL). Since loader 0.6.0 the core's own
+     *   events "process_exit", "plugin_disabled" and "plugins_loaded" are reserved: emit_event of them through the API
+     *   returns -1 and calls nobody.
      * Known events (emitter, thread, data):
      *   "load_transition"        fast_load, main thread, when a load-state transition ENDS;
      *                            data = const V3X_LoadTransition * (may be NULL).
@@ -362,6 +458,30 @@ typedef struct V3X_API {
     int (*log_level)(const char *tag);
     const char *(*loader_version)(void);
     int (*build_matches)(const char *game_builds);
+
+    /* ---- API v6 (loader 0.6.0; check with V3X_HAS(api, field) before using) ----
+     * off_frame: remove the on_frame registration (fn, user) the calling module made (or whose fn lives in
+     *   the calling module). 0, V3X_ENOTFOUND, V3X_EPERM (it belongs to another module), V3X_EARG. Any
+     *   thread; called from inside fn itself it is safe (fn is not called again).
+     * off_event: same for the on_event subscription (name, fn, user).
+     * unregister_command: remove the command `name` (case-insensitive) registered by the calling module.
+     *   Built-in commands belong to the core (V3X_EPERM). The name is free again afterwards.
+     * game_dir_w / v3x_dir_w: the same folders as game_dir / v3x_dir as UTF-16 (wchar_t) with a trailing
+     *   backslash, correct for any folder name (game_dir / v3x_dir are ANSI and lossy outside the ANSI
+     *   code page). game_dir_utf8 / v3x_dir_utf8: the same in UTF-8 (for logs and for
+     *   MultiByteToWideChar(CP_UTF8, ...)); "" if the path could not be read. Valid until process exit.
+     * Core event V3X_EVENT_PLUGIN_DISABLED ("plugin_disabled", v6): emitted synchronously on the thread
+     *   that disabled a plugin (fault guard, rollback after a failed v3x_plugin_load), right after it was
+     *   marked disabled and before any of its callbacks could run again; data = const V3X_PluginDisabled *.
+     *   Registries that call plugin code themselves (script_ext keywords, ...) must stop calling into
+     *   data->module. The disabled plugin's own subscribers are not called. */
+    int (*off_frame)(v3x_frame_fn fn, void *user);
+    int (*off_event)(const char *name, void (*fn)(const char *name, void *data, void *user), void *user);
+    int (*unregister_command)(const char *name);
+    const wchar_t *(*game_dir_w)(void);
+    const wchar_t *(*v3x_dir_w)(void);
+    const char *(*game_dir_utf8)(void);
+    const char *(*v3x_dir_utf8)(void);
 } V3X_API;
 
 /* True if the loader's API table has `field` and it is set (the loader was built with a header
@@ -380,6 +500,19 @@ typedef struct V3X_SaveBegin {
     const char *name;        /* save name as the engine passes it (NUL-terminated copy, valid only during the
                                 callback; exact form, e.g. with or without ".v3", not verified in game); may be NULL */
 } V3X_SaveBegin;
+
+/* Rule for event payloads added from API v6 on: the struct starts with uint32_t struct_size (the
+ * emitter's sizeof), so fields can be appended; read a field only if struct_size covers it.
+ * (V3X_LoadTransition and V3X_SaveBegin predate the rule and stay as they are.) */
+
+/* data of the "plugin_disabled" event (API v6). Valid only during the callback. */
+typedef struct V3X_PluginDisabled {
+    uint32_t struct_size;    /* sizeof(V3X_PluginDisabled) of the loader */
+    uint32_t reserved;
+    const char *name;        /* plugin file stem, e.g. "my_plugin" */
+    void *module;            /* its HMODULE (compare with what your registry stored) */
+    const char *reason;      /* one line, e.g. "FAULTED in on_frame callback (exception 0xc0000005)" */
+} V3X_PluginDisabled;
 
 typedef int (*v3x_plugin_load_fn)(const V3X_API *api);
 

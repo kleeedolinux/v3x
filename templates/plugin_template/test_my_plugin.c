@@ -1,8 +1,9 @@
 /* Offline test for my_plugin: no game process, nothing executes in the exe.
- *     python sdk/build_plugin.py templates/plugin_template --test [path/to/victoria3.exe]
- * Without an exe it checks the callbacks; with one it maps the exe read-only (sdk/v3x_testkit.h)
- * and runs the plugin's real anchor code against it, then loads the plugin against the fake API
- * (hooks are recorded, not installed). Exit code 0 = ALL OK. */
+ *     python sdk/build_plugin.py templates/plugin_template --werror --test [path/to/victoria3.exe]
+ * Without an exe it checks the callbacks, the bounded status line and the config clamping; with one
+ * it maps the exe read-only (sdk/v3x_testkit.h) and runs the plugin's real anchor code against it,
+ * then loads the plugin against the fake API (hooks are recorded, not installed).
+ * Exit code 0 = ALL OK. */
 #include "v3x_testkit.h"
 #include "my_plugin.c"
 
@@ -13,24 +14,39 @@ int main(int argc, char **argv)
     V3X_API fake;
     v3x_testkit_api(&fake);
     api = &fake;
-    V3X_HookCall c; memset(&c, 0, sizeof c);
+    V3X_HookCall c;
+    memset(&c, 0, sizeof c);
     tick_pre(&c);
     V3X_TEST_CHECK(c.scratch[0] != 0, "pre stores the start time in scratch[0]");
     tick_post(&c);
-    V3X_TEST_CHECK(g_ticks == 1, "post counts one tick");
-    g_log_every = 7;
-    on_reload("config_reload", (void *)"other_plugin", NULL);
-    V3X_TEST_CHECK(g_log_every == 7, "reload for another plugin is ignored");
-    on_reload("config_reload", NULL, NULL);   /* no my_plugin.ini in the testkit dir: defaults */
-    V3X_TEST_CHECK(g_log_every == 0, "reload (all) re-reads the config");
+    V3X_TEST_CHECK(load64(&g_ticks) == 1, "post counts one tick");
 
-    /* 2. anchors against the real exe */
+    /* 2. the status line is bounded: a tiny buffer is cut and still NUL-terminated */
+    char small[12];
+    memset(small, 'x', sizeof small);
+    V3X_TEST_CHECK(format_status(small, sizeof small) == V3X_R_ETRUNC && strlen(small) == sizeof small - 1,
+                   "status line truncates into a small buffer (\"%s\")", small);
+    char line[160];
+    V3X_TEST_CHECK(format_status(line, sizeof line) == V3X_R_OK && strstr(line, "1 ticks") != NULL,
+                   "status line fits: %s", line);
+
+    /* 3. config reload */
+    v3x_atomic_store_int(&g_log_every, 7);
+    on_reload("config_reload", (void *)"other_plugin", NULL);
+    V3X_TEST_CHECK(v3x_atomic_load_int(&g_log_every) == 7, "reload for another plugin is ignored");
+    on_reload("config_reload", NULL, NULL);   /* no my_plugin.ini in the testkit dir: defaults */
+    V3X_TEST_CHECK(v3x_atomic_load_int(&g_log_every) == 0, "reload (all) re-reads the config");
+
+    /* 4. anchors against the real exe */
     if (argc > 1) {
         V3X_API real;
         if (v3x_testkit_map_exe(argv[1], &real) != 0) V3X_TEST_CHECK(0, "map %s", argv[1]);
         else {
             V3X_TEST_CHECK(my_plugin_resolve(&real) == 0, "anchors resolve on %s", argv[1]);
             printf("  game_tick at exe+0x%llx (1.15.1: 0x1465690)\n", v3x_testkit_rva(my_plugin_anchors[0].result));
+            uint8_t *mid = (uint8_t *)my_plugin_anchors[0].result + 1;
+            V3X_TEST_CHECK(check_fn_start(&real, mid, NULL) != 0 && check_fn_start(&real, &fake, NULL) != 0,
+                           "anchor check fails closed on a mid-function address and on a non-exe address");
             V3X_TEST_CHECK(v3x_plugin_load(&real) == 0 && v3x_tk.hooks == 1, "plugin loads and installs exactly 1 hook");
         }
     } else

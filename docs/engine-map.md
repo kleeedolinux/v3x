@@ -3,7 +3,10 @@
 A one-page summary of what has been reverse-engineered, with links to the detailed notes in
 `docs/re/`. All addresses are RVAs in `victoria3.exe` 1.15.1 (PE TimeDateStamp `0x6af3094f`,
 SizeOfImage `0x60fb000`, `game_build_id()` = `6af3094f-60fb000`). They **will** move with the next
-patch: use the anchor in the "found by" column, never the number.
+patch: use the anchor in the "found by" column, never the number. How an entry becomes plugin
+code (an anchor table with a shape check, an offline test, `hook_safe`, fault-proof reads of the
+offsets listed here through `sdk/v3x_mem.h`): [reverse-engineering.md](reverse-engineering.md#from-a-finding-to-plugin-code)
+and [safe-coding.md](safe-coding.md).
 
 The engine is Paradox's Clausewitz + Jomini, one static exe (static CRT, mimalloc 2.0.x, spdlog,
 PhysFS 3, SDL, D3D11/Vulkan renderers), no symbols, with MSVC RTTI and `.pdata` for every
@@ -67,7 +70,7 @@ sets.
 
 * Backends: **DX11** and **Vulkan** (no DX12 game renderer; DX12 strings are SDL's). Launch args
   `-renderer=dx11|vulkan`, `-dx11`, `-vulkan`.
-* Present wrapper 0x3c7a8d0 (hook it rather than DXGI vtables). Frame cap is a **busy-wait**
+* Present wrapper 0x3c7a8d0 (observe it with `hook_safe` on an anchor rather than patching DXGI vtables). Frame cap is a **busy-wait**
   (0x379a540, `pause` loop at 0x379a710) driven by `owner+0x37/+0x38` (1/fps); `frame_pacer`
   replaces it with a high-resolution timer sleep.
 * Long ticks call `RenderFrameIfNeeded` so the UI keeps drawing during simulation.

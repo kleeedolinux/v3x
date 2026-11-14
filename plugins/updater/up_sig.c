@@ -1,4 +1,4 @@
-/* up_sig.c - release signature check for the updater (docs/security-audit.md H1): compat.json.sig
+/* up_sig.c - release signature check for the updater (the security review H1): compat.json.sig
  * must be an Ed25519 signature by a key of installer/release_keys.h over the exact compat.json
  * bytes. This unit compiles Monocypher (third_party/monocypher) through installer/release_sig.h. */
 #define V3X_RELEASE_SIG_IMPL

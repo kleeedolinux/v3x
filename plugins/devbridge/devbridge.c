@@ -3,7 +3,7 @@
  *
  * Pipe: \\.\pipe\v3x_devbridge (name overridable: pipe=<name> in v3x/devbridge.ini, or env
  *   V3X_DEVBRIDGE_PIPE, which wins; tests use it so they never touch a running game's pipe).
- *   Security (docs/security-audit.md M5):
+ *   Security (the security review M5):
  *   - DACL: only the user running the game (protected, no inherited ACEs), FILE_FLAG_FIRST_PIPE_INSTANCE
  *     (fails if anyone else already created the name), PIPE_REJECT_REMOTE_CLIENTS, one instance =
  *     one client at a time (others get ERROR_PIPE_BUSY).

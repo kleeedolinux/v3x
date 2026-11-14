@@ -17,8 +17,9 @@
  * Thread / timing rules:
  *   - Call it from v3x_plugin_load (main thread, before the game starts). Files written later are
  *     not read by the engine in this session (script databases are loaded once at startup).
- *   - Works before or after script_ext's own v3x_plugin_load (it needs no engine anchors): it finds
- *     the content_packs folder from the location of script_ext.dll (<game>/binaries/v3x/plugins/).
+ *   - Works before or after script_ext's own v3x_plugin_load (it needs no engine anchors), but only
+ *     once the loader has loaded script_ext.dll: v3x_script_get never loads it (load order: see
+ *     there). script_ext finds the content_packs folder from its own location.
  *   - Not thread-safe: one plugin thread at a time (v3x_plugin_load calls are sequential).
  *
  * Version 2 adds (docs/scripting.md): run_effect_text / eval_trigger_text (run script text once at
@@ -31,6 +32,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -39,6 +41,7 @@
 
 #define V3X_SCRIPT_VERSION 2   /* 2: features, run_effect_text, eval_trigger_text, register_effect, register_trigger */
 #define V3X_SCRIPT_DLL "script_ext.dll"
+#define V3X_SCRIPT_DLL_W L"script_ext.dll"
 
 /* return codes */
 #define V3X_SCRIPT_OK 0
@@ -54,6 +57,8 @@
 #define V3X_SCRIPT_ELATE (-9)    /* register_*: the engine already registered its script keywords (call it from v3x_plugin_load) */
 #define V3X_SCRIPT_EFULL (-10)   /* register_*: 64 keywords of that kind already */
 #define V3X_SCRIPT_EEXIST (-11)  /* register_*: that name is already registered */
+#define V3X_SCRIPT_EOWNER (-12)  /* pack calls: the pack belongs to another plugin, or the caller is disabled /
+                                    outside any module */
 
 /* features() bits */
 #define V3X_SCRIPT_F_RUN 1u         /* run_effect_text / eval_trigger_text can work (all engine anchors resolved) */
@@ -71,10 +76,13 @@ typedef struct V3X_ScriptScope {
 
 /* Native effect: `v3x_name = value` in script. `value` is the text after '=' (token or quoted string,
  * no quotes), "" if none. Called on WHATEVER thread the engine executes the effect on (tick worker
- * threads included): keep it short, thread-safe, no V3X API calls except log. */
+ * threads included): keep it short, thread-safe, no V3X API calls except log.
+ * Lifetimes: `scope` and `value` are BORROWED for the duration of the call only (they point into the
+ * engine's effect object / a stack copy): copy what you need, never keep the pointers. `user` is
+ * yours and must stay valid for the rest of the session (keywords cannot be unregistered). */
 typedef void (*v3x_script_effect_fn)(const V3X_ScriptScope *scope, const char *value, void *user);
-/* Native trigger: `v3x_name = value`. Return non-zero = true. Same thread rules; may be evaluated many
- * times per day by AI/tooltips: it must be pure and fast. */
+/* Native trigger: `v3x_name = value`. Return non-zero = true. Same thread and lifetime rules as the
+ * effect callback; may be evaluated many times per day by AI/tooltips: it must be pure and fast. */
 typedef int (*v3x_script_trigger_fn)(const V3X_ScriptScope *scope, const char *value, void *user);
 
 typedef struct V3X_ScriptExt {
@@ -88,7 +96,9 @@ typedef struct V3X_ScriptExt {
     /* Writes one file: relpath relative to the pack root, '/' or '\\' separators, no "..", no drive,
      * no leading separator, max 200 chars. Missing folders are created; the file is replaced
      * atomically (temp file + rename). A *.yml file without a UTF-8 BOM gets one (the engine needs it
-     * for localization). Returns V3X_SCRIPT_OK or an error above. */
+     * for localization). Returns V3X_SCRIPT_OK or an error above. Limit: at most 512 files per pack
+     * are recorded in the pack manifest; files beyond that are written (v3x.log says so) but NOT deleted by the next
+     * begin_pack (they can linger): keep a pack below 512 files (split into several packs). */
     int (*write_file)(const char *pack, const char *relpath, const void *data, size_t n);
     /* Writes the manifest of the pack. Returns the number of files written, or an error. */
     int (*end_pack)(const char *pack);
@@ -118,19 +128,45 @@ typedef struct V3X_ScriptExt {
 
 typedef const V3X_ScriptExt *(*v3x_script_ext_fn)(void);
 
-/* script_ext's table, or NULL. Loads <v3x_dir>/plugins/script_ext.dll if it is not loaded yet (the
- * loader then finds it already loaded and still calls its v3x_plugin_load). */
+/* script_ext's table, or NULL when script_ext.dll is not loaded (not installed, disabled with
+ * [plugins] script_ext = 0, skipped by the crash guard or the build gate) or its table is too small.
+ *
+ * It NEVER loads the DLL itself (audit N4/N11: that would bypass the loader's enable switch, crash
+ * guard, manifest and build gate). It looks for the module loaded from the SAME folder as the calling
+ * plugin (<v3x>/plugins/script_ext.dll: full-path match with the caller's own module path in UTF-16,
+ * no ANSI loss), so an unrelated "script_ext.dll" elsewhere in the process is never used.
+ *
+ * Load order: the loader loads plugins in directory order (FindFirstFile: alphabetical on NTFS). A
+ * plugin that sorts BEFORE script_ext gets NULL in its own v3x_plugin_load: call v3x_script_get
+ * again later (first on_frame / a command). Keyword registration (register_effect /
+ * register_trigger) must happen before the engine's static initialization, pack files before the
+ * game's VFS initializes (V3X_SCRIPT_ELATE / docs/scripting.md).
+ *
+ * Table check (N11): struct_size must cover every version 1 field (through packs_dir) and those four
+ * functions must be non-NULL; check version 2 fields with V3X_SCRIPT_HAS. The table belongs to
+ * script_ext.dll and stays valid for the session (plugins are never unloaded). */
 static const V3X_ScriptExt *v3x_script_get(const V3X_API *api)
 {
-    HMODULE h = GetModuleHandleA(V3X_SCRIPT_DLL);
-    if (!h && api && api->v3x_dir) {
-        char p[MAX_PATH];
-        snprintf(p, sizeof p, "%splugins\\%s", api->v3x_dir(), V3X_SCRIPT_DLL);
-        if (GetFileAttributesA(p) != INVALID_FILE_ATTRIBUTES) h = LoadLibraryA(p);
-    }
-    v3x_script_ext_fn f = h ? (v3x_script_ext_fn)(void *)GetProcAddress(h, "v3x_script_ext") : NULL;
+    (void)api;   /* kept for source compatibility: the folder comes from the calling module */
+    HMODULE self = NULL;
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            (LPCWSTR)(const void *)&v3x_script_get, &self) || !self)
+        return NULL;
+    static const wchar_t dll[] = V3X_SCRIPT_DLL_W;
+    wchar_t p[1024];
+    const DWORD cap = (DWORD)(sizeof p / sizeof p[0]);
+    DWORD n = GetModuleFileNameW(self, p, cap);
+    if (n == 0 || n >= cap) return NULL;
+    while (n > 0 && p[n - 1] != L'\\' && p[n - 1] != L'/') n--;   /* keep the folder incl. its separator */
+    if (n == 0 || n + sizeof dll / sizeof dll[0] > cap) return NULL;
+    memcpy(p + n, dll, sizeof dll);
+    HMODULE h = GetModuleHandleW(p);   /* full path: only the module loaded from exactly this file */
+    if (!h) return NULL;
+    v3x_script_ext_fn f = (v3x_script_ext_fn)(void *)GetProcAddress(h, "v3x_script_ext");
     const V3X_ScriptExt *t = f ? f() : NULL;
-    return t && t->struct_size >= offsetof(V3X_ScriptExt, packs_dir) ? t : NULL;
+    if (!t || t->struct_size < offsetof(V3X_ScriptExt, packs_dir) + sizeof(t->packs_dir)) return NULL;
+    if (!t->begin_pack || !t->write_file || !t->end_pack || !t->packs_dir) return NULL;
+    return t;
 }
 
 #endif

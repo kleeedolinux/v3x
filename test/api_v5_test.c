@@ -169,8 +169,13 @@ int main(int argc, char **argv)
     if (argc > 1 && !strcmp(argv[1], "gate")) return gate_test(api, 0);
     if (argc > 1 && !strcmp(argv[1], "gateload")) return gate_test(api, 1);
 
-    CHECK(api->api_version == 5 && V3X_HAS(api, build_matches), "api v%u with all v5 fields", api->api_version);
-    CHECK(!strcmp(api->loader_version(), "0.5.0"), "loader_version %s", api->loader_version());
+    CHECK(api->api_version >= 5 && V3X_HAS(api, build_matches), "api v%u with all v5 fields", api->api_version);
+    {
+        HMODULE vd = GetModuleHandleA("version.dll");
+        const char *sv = vd ? (const char *)(void *)GetProcAddress(vd, "v3x_loader_semver") : NULL;
+        CHECK(sv && !strcmp(api->loader_version(), sv) && api->loader_version()[0] >= '0',
+              "loader_version %s = the v3x_loader_semver export", api->loader_version());
+    }
     CHECK(api->build_matches(NULL) == 1 && api->build_matches("*") == 1 && api->build_matches(api->game_build_id()) == 1 &&
               api->build_matches("x;  UNKNOWN ") == 1 && api->build_matches("unk*") == 1 && api->build_matches("no-such-build") == 0,
           "build_matches: NULL, '*', own build id, case-insensitive version in a list, prefix; mismatch 0");

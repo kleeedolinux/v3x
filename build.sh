@@ -4,7 +4,7 @@
 #        ./build.sh install    build and copy into ../binaries (the game)
 #        ./build.sh dist       build and make build/dist/V3X-Setup.exe (installer/make_dist.py)
 #
-# Hardening (docs/security-audit.md action 14, docs/adr/0004-sdk-safety.md): every target gets
+# Hardening (the security review action 14, docs/adr/0004-sdk-safety.md): every target gets
 # V3X_HARDEN (stack protector, fortify, zero-initialised locals, no NULL-check deletion) and the
 # warning set V3X_WARN. The core (src/) and the SDK headers (include/, sdk/) build with -Werror.
 # Plugins get -Werror only with V3X_WERROR=1 (CI turns it on once every plugin is clean).
@@ -41,7 +41,7 @@ for f in buffer hook trampoline hde/hde64; do
     MHOBJ+=("$o")
 done
 # -fms-extensions: the core uses SEH __try/__except to isolate faults in plugin callbacks
-$CC $V3X_WARN $WERR_CORE -fms-extensions -shared -o build/version.dll -I$MH/include src/core.c src/proxy.c src/safe_hook.c \
+$CC $V3X_WARN $WERR_CORE -fms-extensions -shared -o build/version.dll -I$MH/include -Iinclude -Isdk src/core.c src/core_sig.c src/proxy.c src/safe_hook.c \
     "${MHOBJ[@]}" -lkernel32 -luser32
 for p in plugins/*/; do
     n=$(basename "$p")

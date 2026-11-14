@@ -8,13 +8,21 @@
  *   check callback), v3x_hook macros and the manifest macro, v3x_util (paths, atomic write, QPC,
  *   leveled logging on v5 and pre-v5 loaders, reload filter), v3x_safe (V3xStr builder incl. sizes 0/1,
  *   exact fit, overflow and UTF-8 cuts, V3xSpan readers, checked arithmetic, path validation/join,
- *   reparse refusal, log sanitising, atomics, V3X_ASSERT_MAIN).
+ *   reparse refusal, log sanitising, atomics, V3X_ASSERT_MAIN); audit #2: V3xStr/V3xSpan invariant
+ *   checks + accessors, UTF-16 / CP_ACP paths with non-ASCII folders and junctions, race-free open,
+ *   atomic writes (CREATE_NEW temp, held parent), bounded rel32/rip/scan_near, strict patterns,
+ *   checked V3X_ARG, NULL-safe + range ini getters, v3x_script_get (never loads, full-path match).
  * Part 2 (with the exe): v3x_testkit maps victoria3.exe; v3x_game_resolve finds the script-RNG
  *   owner global (1.15.1: exe+0x540ae80) and v3x_script_random_allowed is 0 / 1 for a fake owner.
  * Exit code 0 = ALL OK. */
+#define V3X_SAFE_STRICT 1   /* every fallible SDK helper is V3X_MUST_USE here (also V3xStr appends) */
 #include "v3x_sdk.h"
 #include "v3x_testkit.h"
 #include "v3x_safe.h"
+#include "v3x_script.h"
+/* NULL is passed on purpose below to test the run-time checks behind V3X_NN (which makes clang warn
+ * about a literal NULL argument at compile time). */
+#pragma clang diagnostic ignored "-Wnonnull"
 
 #define CHECK V3X_TEST_CHECK
 #define NOINL __attribute__((noinline))
@@ -87,6 +95,8 @@ static void test_mem(void)
     VirtualFree(pg, 0, MEM_RELEASE);
 }
 
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"   /* the old unbounded names keep working */
 static void test_scan(V3X_API *api)
 {
     V3xPattern p;
@@ -106,6 +116,7 @@ static void test_scan(V3X_API *api)
     CHECK(v3x_section(api->image_base(), ".text", &text), "section .text of this exe");
     CHECK(v3x_callers(&text, (void *)use_str, NULL, 0) >= 3, "callers of use_str found (%d)", v3x_callers(&text, (void *)use_str, NULL, 0));
 }
+#pragma clang diagnostic pop
 
 /* Anchor strings are assembled at run time on the stack: a literal in this function would be one
  * more xref (and the "missing" string would exist in .rdata). */
@@ -243,8 +254,11 @@ static void test_util(const V3X_API *tk)
     if (fp) fclose(fp);
     buf[n] = 0;
     char tmp[MAX_PATH + 24];
-    snprintf(tmp, sizeof tmp, "%s.%lu.tmp", f, (unsigned long)GetCurrentThreadId());
-    CHECK(!strcmp(buf, "second!") && GetFileAttributesA(tmp) == INVALID_FILE_ATTRIBUTES, "util: file has the new content, temp removed");
+    snprintf(tmp, sizeof tmp, "%s.*.v3xtmp", f);
+    WIN32_FIND_DATAA tfd;
+    HANDLE th = FindFirstFileA(tmp, &tfd);
+    if (th != INVALID_HANDLE_VALUE) FindClose(th);
+    CHECK(!strcmp(buf, "second!") && th == INVALID_HANDLE_VALUE, "util: file has the new content, temp removed");
     DeleteFileA(f);
     CHECK(v3x_file_write_atomic("Z:/no/such/dir/x.txt", "x", 1) == -1, "util: atomic write into a missing dir fails cleanly");
 
@@ -327,7 +341,7 @@ static void test_safe_str(void)
     char big[16 + 4];
     memset(big, 'Z', sizeof big);
     v3x_str_init(&s, big, 16);
-    for (int i = 0; i < 100; i++) v3x_str_appendf(&s, "%d,", i);
+    for (int i = 0; i < 100; i++) (void)v3x_str_appendf(&s, "%d,", i);
     CHECK(s.truncated && s.len == 15 && strlen(big) == 15 && big[16] == 'Z' && !strncmp(big, "0,1,2,3,4,5,6,7", 15),
           "str: 100 appendf into 16 bytes stays bounded (%s)", big);
     v3x_str_init(&s, big, 16);
@@ -518,6 +532,417 @@ static void test_safe_misc(void)
     CHECK(V3X_ASSERT_MAIN(&a) == 1 && V3X_ASSERT_MAIN(NULL) == 1, "assert_main: pre-v4 loader / NULL -> 1 (unknown)");
 }
 
+/* ---- audit #2 actions 10-13 (N6, N10, N11, 12) */
+
+/* N10: invariant checks and accessors */
+static void test_safe_invariants(void)
+{
+    char b[8], guard[8];
+    memset(guard, 'G', sizeof guard);
+    V3xStr s;
+    v3x_str_init(&s, b, sizeof b);
+    CHECK(v3x_str_append(&s, "abc") == V3X_R_OK && v3x_str_len(&s) == 3 && v3x_str_cap(&s) == 8 && !v3x_str_truncated(&s),
+          "str accessors: len / cap / truncated");
+    s.len = 50;   /* corrupted: len > cap would have made room = cap - 1 - len wrap */
+    CHECK(v3x_str_append(&s, "x") == V3X_R_EARG && v3x_str_truncated(&s) && !strcmp(v3x_str_cstr(&s), "") && v3x_str_len(&s) == 0 &&
+              guard[0] == 'G',
+          "str: len > cap is refused before any arithmetic (EARG, nothing written)");
+    CHECK(v3x_str_appendf(&s, "%d", 5) == V3X_R_EARG, "str: appendf refuses the corrupted builder too");
+    v3x_str_init(&s, b, sizeof b);
+    s.len = sizeof b;   /* len == cap: no room for the NUL */
+    CHECK(v3x_str_appendc(&s, 'x') == V3X_R_EARG, "str: len == cap refused");
+    s.buf = NULL; s.cap = 8; s.len = 0;   /* cap > 0 with no buffer */
+    CHECK(v3x_str_append(&s, "x") == V3X_R_EARG && !strcmp(v3x_str_cstr(&s), "") && v3x_str_cap(&s) == 0,
+          "str: NULL buf with cap > 0 refused");
+    v3x_str_clear(&s);
+    CHECK(s.cap == 0 && v3x_str_append(&s, "x") == V3X_R_EARG, "str: clear of a buffer-less builder keeps it unusable");
+    CHECK(v3x_str_len(NULL) == 0 && v3x_str_truncated(NULL) && !strcmp(v3x_str_cstr(NULL), ""), "str accessors: NULL safe");
+    /* overlapping append (t inside buf): memmove */
+    v3x_str_init(&s, b, sizeof b);
+    CHECK(v3x_str_append(&s, "ab") == V3X_R_OK && v3x_str_appendn(&s, b, 2) == V3X_R_OK && !strcmp(b, "abab"),
+          "str: appending its own content");
+
+    const uint8_t d[] = {1, 2, 3, 4};
+    V3xSpan r;
+    uint8_t x = 9;
+    v3x_span_init(&r, d, sizeof d);
+    CHECK(v3x_span_u8(&r, &x) == V3X_R_OK && v3x_span_pos(&r) == 1 && v3x_span_len(&r) == 4 && !v3x_span_failed(&r),
+          "span accessors: pos / len / failed");
+    r.pos = 99;   /* corrupted: pos > len */
+    CHECK(v3x_span_u8(&r, &x) == V3X_R_EBOUNDS && x == 0 && v3x_span_failed(&r) && v3x_span_remaining(&r) == 0 &&
+              v3x_span_take(&r, 0) == NULL && v3x_span_pos(&r) == 0,
+          "span: pos > len refused before any arithmetic (sticky)");
+    v3x_span_init(&r, d, sizeof d);
+    r.p = NULL;   /* corrupted: len > 0 with no data */
+    CHECK(v3x_span_skip(&r, 1) == V3X_R_EBOUNDS && v3x_span_failed(&r) && v3x_span_len(&r) == 0, "span: NULL p with len > 0 refused");
+    CHECK(v3x_span_failed(NULL) && v3x_span_remaining(NULL) == 0 && v3x_span_pos(NULL) == 0, "span accessors: NULL safe");
+}
+
+/* a character of `cands` that round-trips through the ANSI code page, as UTF-16; 0 if none */
+static wchar_t acp_char(void)
+{
+    static const wchar_t cands[] = {0x00E9, 0x00E4, 0x00F1, 0x00DF, 0x0436, 0x00E7, 0xAC00, 0x3042, 0};
+    for (int i = 0; cands[i]; i++) {
+        BOOL lossy = FALSE;
+        char a[8];
+        wchar_t w2[4];
+        int n = WideCharToMultiByte(CP_ACP, WC_NO_BEST_FIT_CHARS, &cands[i], 1, a, sizeof a, NULL, &lossy);
+        if (n <= 0 || lossy) continue;
+        if (MultiByteToWideChar(CP_ACP, 0, a, n, w2, 4) == 1 && w2[0] == cands[i]) return cands[i];
+    }
+    return 0;
+}
+
+static int mk_junction_w(const wchar_t *link, const wchar_t *target)
+{
+    wchar_t cmd[3 * MAX_PATH];
+    _snwprintf(cmd, sizeof cmd / sizeof cmd[0], L"cmd /c mklink /J \"%ls\" \"%ls\" >NUL 2>&1", link, target);
+    cmd[sizeof cmd / sizeof cmd[0] - 1] = 0;
+    _wsystem(cmd);
+    DWORD a = GetFileAttributesW(link);
+    return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_REPARSE_POINT);
+}
+
+static int count_tmp_files(const wchar_t *dir)
+{
+    wchar_t pat[MAX_PATH];
+    _snwprintf(pat, MAX_PATH, L"%ls\\*.v3xtmp", dir);
+    pat[MAX_PATH - 1] = 0;
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW(pat, &fd);
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    int n = 0;
+    do n++; while (FindNextFileW(h, &fd));
+    FindClose(h);
+    return n;
+}
+
+static int read_file_w(const wchar_t *p, char *buf, size_t cap)
+{
+    FILE *f = _wfopen(p, L"rb");
+    if (!f) return -1;
+    size_t n = fread(buf, 1, cap - 1, f);
+    fclose(f);
+    buf[n] = 0;
+    return (int)n;
+}
+
+/* N6: non-ASCII folders (UTF-16 and the ANSI code page), handle-based reparse checks, junctions,
+ * race-free open, atomic writes with CREATE_NEW temp files */
+static void test_safe_paths_w(void)
+{
+    wchar_t tmpw[MAX_PATH], base[MAX_PATH], real[MAX_PATH], link[MAX_PATH], p[V3X_PATH_WMAX];
+    GetTempPathW(MAX_PATH, tmpw);
+    /* a UTF-16-only name (not representable in most ANSI code pages) + a character of the ANSI code page */
+    wchar_t ac = acp_char();
+    _snwprintf(base, MAX_PATH, L"%lsv3x_w_%lu_\x0416\x00E9\x4E2D_%lc", tmpw, (unsigned long)GetCurrentProcessId(), ac ? ac : L'a');
+    base[MAX_PATH - 1] = 0;
+    _snwprintf(real, MAX_PATH, L"%ls\\r\x00E9" L"al", base);
+    _snwprintf(link, MAX_PATH, L"%ls\\link", base);
+    CreateDirectoryW(base, NULL);
+    CreateDirectoryW(real, NULL);
+    int made = mk_junction_w(link, real);
+
+    CHECK(v3x_path_rel_ok_exW(L"dir/\x00E9t\x00E9.txt", 0) == V3X_R_OK && v3x_path_rel_ok_exW(L"..\\x", 0) == V3X_R_EPATH &&
+              v3x_path_rel_ok_exW(L"a\xD800" L"b", 0) == V3X_R_EPATH && v3x_path_rel_ok_exW(L"CON", 0) == V3X_R_EPATH &&
+              v3x_path_rel_ok_exW(L"a/b", V3X_PATH_SINGLE) == V3X_R_EPATH,
+          "pathW: rel validation (non-ASCII ok, '..' / unpaired surrogate / device / SINGLE refused)");
+    CHECK(v3x_path_join_checkedW(p, V3X_PATH_WMAX, base, L"r\x00E9" L"al/x.txt", V3X_PATH_CHECK_REPARSE) == V3X_R_OK &&
+              wcsstr(p, L"\\r\x00E9" L"al\\x.txt") != NULL,
+          "joinW: non-ASCII base + rel pass the reparse check");
+    CHECK(v3x_path_join_checkedW(p, 8, L"C:\\g", L"abcd", 0) == V3X_R_ETRUNC && p[0] == 0 &&
+              v3x_path_join_checkedW(p, 10, L"C:\\g", L"abcd", 0) == V3X_R_OK && !wcscmp(p, L"C:\\g\\abcd"),
+          "joinW: exact fit / truncation");
+    if (made) {
+        CHECK(v3x_path_join_checkedW(p, V3X_PATH_WMAX, base, L"link/x.txt", V3X_PATH_CHECK_REPARSE) == V3X_R_EREPARSE && p[0] == 0 &&
+                  v3x_path_join_checkedW(p, V3X_PATH_WMAX, base, L"link", V3X_PATH_CHECK_REPARSE) == V3X_R_EREPARSE,
+              "joinW: junction under a non-ASCII base -> EREPARSE (component and last)");
+        CHECK(v3x_path_has_reparseW(link, 0) == 1 && v3x_path_has_reparseW(real, wcslen(base)) == 0,
+              "has_reparseW: handle-based (FILE_FLAG_OPEN_REPARSE_POINT) check");
+    } else printf("(mklink /J failed: junction checks skipped)\n");
+
+    /* ANSI variant: the old code converted ANSI bytes as UTF-8 (MB_ERR_INVALID_CHARS) and failed on
+     * non-ASCII folders; now CP_ACP */
+    if (ac) {
+        wchar_t abasew[MAX_PATH];
+        char abase[MAX_PATH * 2], ap[MAX_PATH * 3];
+        _snwprintf(abasew, MAX_PATH, L"%lsv3x_a_%lu_%lc", tmpw, (unsigned long)GetCurrentProcessId(), ac);
+        abasew[MAX_PATH - 1] = 0;
+        CreateDirectoryW(abasew, NULL);
+        BOOL lossy = FALSE;
+        int an = WideCharToMultiByte(CP_ACP, WC_NO_BEST_FIT_CHARS, abasew, -1, abase, sizeof abase, NULL, &lossy);
+        if (an > 0 && !lossy) {
+            char sub[16];
+            int sn = WideCharToMultiByte(CP_ACP, 0, &ac, 1, sub, sizeof sub - 4, NULL, NULL);
+            sub[sn] = 0;
+            strcat(sub, "_d");
+            char subw[MAX_PATH * 3];
+            snprintf(subw, sizeof subw, "%s\\%s", abase, sub);
+            CreateDirectoryA(subw, NULL);
+            CHECK(v3x_path_join_checked(ap, sizeof ap, abase, sub, V3X_PATH_CHECK_REPARSE) == V3X_R_OK &&
+                      GetFileAttributesA(ap) != INVALID_FILE_ATTRIBUTES,
+                  "join (ANSI): non-ASCII CP_ACP base + rel pass the reparse check (was EREPARSE with the UTF-8 conversion)");
+            wchar_t jl[MAX_PATH];
+            _snwprintf(jl, MAX_PATH, L"%ls\\jl", abasew);
+            wchar_t jt[MAX_PATH];
+            _snwprintf(jt, MAX_PATH, L"%ls\\jt", abasew);
+            CreateDirectoryW(jt, NULL);
+            if (mk_junction_w(jl, jt)) {
+                CHECK(v3x_path_join_checked(ap, sizeof ap, abase, "jl\\x.txt", V3X_PATH_CHECK_REPARSE) == V3X_R_EREPARSE,
+                      "join (ANSI): junction under a non-ASCII CP_ACP base -> EREPARSE");
+                RemoveDirectoryW(jl);
+            }
+            RemoveDirectoryW(jt);
+            HANDLE h = INVALID_HANDLE_VALUE;
+            CHECK(v3x_file_open_checked(abase, "f.txt", GENERIC_WRITE, 0, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, &h) == V3X_R_OK &&
+                      h != INVALID_HANDLE_VALUE,
+                  "open_checked (ANSI): non-ASCII base");
+            if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+            char fa[MAX_PATH * 3];
+            snprintf(fa, sizeof fa, "%s\\f.txt", abase);
+            DeleteFileA(fa);
+            snprintf(fa, sizeof fa, "%s\\atomic_a.txt", abase);
+            CHECK(v3x_file_write_atomic(fa, "ansi", 4) == 0 && GetFileAttributesA(fa) != INVALID_FILE_ATTRIBUTES,
+                  "write_atomic (ANSI): non-ASCII CP_ACP folder");
+            DeleteFileA(fa);
+            RemoveDirectoryA(subw);
+        } else printf("(ANSI base not representable: ANSI checks skipped)\n");
+        CHECK(RemoveDirectoryW(abasew), "ANSI test folder cleaned up");
+    } else printf("(no test character in the ANSI code page: ANSI checks skipped)\n");
+
+    /* race-free open */
+    HANDLE h = INVALID_HANDLE_VALUE;
+    CHECK(v3x_file_open_checkedW(base, L"r\x00E9" L"al/new.txt", GENERIC_WRITE, 0, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, &h) == V3X_R_OK &&
+              h != INVALID_HANDLE_VALUE,
+          "open_checkedW: plain non-ASCII chain -> handle");
+    if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+    h = INVALID_HANDLE_VALUE;
+    CHECK(v3x_file_open_checkedW(base, L"r\x00E9" L"al/NEW.TXT", GENERIC_READ, FILE_SHARE_READ, OPEN_EXISTING, 0, &h) == V3X_R_OK,
+          "open_checkedW: case-insensitive final-path verification");
+    if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+    CHECK(v3x_file_open_checkedW(base, L"../x", GENERIC_READ, 0, OPEN_EXISTING, 0, &h) == V3X_R_EPATH && h == INVALID_HANDLE_VALUE &&
+              v3x_file_open_checkedW(base, L"r\x00E9" L"al/missing.txt", GENERIC_READ, 0, OPEN_EXISTING, 0, &h) == V3X_R_EIO &&
+              GetLastError() == ERROR_FILE_NOT_FOUND,
+          "open_checkedW: traversal -> EPATH, missing -> EIO (GetLastError)");
+    if (made) {
+        CHECK(v3x_file_open_checkedW(base, L"link/new.txt", GENERIC_READ, FILE_SHARE_READ, OPEN_EXISTING, 0, &h) == V3X_R_EREPARSE &&
+                  h == INVALID_HANDLE_VALUE,
+              "open_checkedW: junction in the chain -> EREPARSE");
+        CHECK(v3x_file_open_checkedW(base, L"link", GENERIC_READ, FILE_SHARE_READ, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, &h) ==
+                  V3X_R_EREPARSE,
+              "open_checkedW: junction as the last component -> EREPARSE");
+    }
+    /* the post-open verification: a short (8.3) name passes the name checks but the opened handle's
+     * final path differs -> refused and the file this call created is deleted again */
+    wchar_t longdir[MAX_PATH], shortp[MAX_PATH];
+    _snwprintf(longdir, MAX_PATH, L"%ls\\a_long_directory_name", base);
+    CreateDirectoryW(longdir, NULL);
+    DWORD sl = GetShortPathNameW(longdir, shortp, MAX_PATH);
+    const wchar_t *sn = sl ? wcsrchr(shortp, L'\\') : NULL;
+    if (sn && wcscmp(sn + 1, L"a_long_directory_name") != 0) {
+        wchar_t rel[64], created[MAX_PATH];
+        _snwprintf(rel, 64, L"%ls\\made.txt", sn + 1);
+        _snwprintf(created, MAX_PATH, L"%ls\\made.txt", longdir);
+        CHECK(v3x_file_open_checkedW(base, rel, GENERIC_WRITE, 0, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, &h) == V3X_R_EREPARSE &&
+                  GetFileAttributesW(created) == INVALID_FILE_ATTRIBUTES,
+              "open_checkedW: final path mismatch after the open -> EREPARSE, created file removed");
+    } else printf("(no 8.3 names on this volume: post-open mismatch check skipped)\n");
+    RemoveDirectoryW(longdir);
+
+    /* atomic writes */
+    wchar_t f[MAX_PATH];
+    char buf[64];
+    _snwprintf(f, MAX_PATH, L"%ls\\r\x00E9" L"al\\\x00E9t\x00E9.txt", base);
+    CHECK(v3x_file_write_atomicW(f, "one", 3) == 0 && v3x_file_write_atomicW(f, "second", 6) == 0 && read_file_w(f, buf, sizeof buf) == 6 &&
+              !strcmp(buf, "second") && count_tmp_files(real) == 0,
+          "write_atomicW: non-ASCII path, replace, no .v3xtmp left");
+    CHECK(v3x_file_write_atomic_inW(base, L"r\x00E9" L"al/in.txt", "in", 2) == 0, "write_atomic_inW: plain chain");
+    CHECK(v3x_file_write_atomic_inW(base, L"../escape.txt", "x", 1) == -1 && GetLastError() == ERROR_INVALID_NAME,
+          "write_atomic_inW: traversal refused");
+    if (made) {
+        wchar_t lf[MAX_PATH];
+        _snwprintf(lf, MAX_PATH, L"%ls\\x.txt", link);
+        CHECK(v3x_file_write_atomicW(lf, "x", 1) == -1 && GetLastError() == ERROR_REPARSE_POINT_ENCOUNTERED,
+              "write_atomicW: parent directory is a junction -> refused");
+        CHECK(v3x_file_write_atomic_inW(base, L"link/x.txt", "x", 1) == -1 && GetLastError() == ERROR_REPARSE_POINT_ENCOUNTERED,
+              "write_atomic_inW: junction in the chain -> refused");
+        CHECK(v3x_file_write_atomic_inW(link, L"via_base.txt", "x", 1) == 0, "write_atomic_inW: a junction AS the trusted base is allowed");
+        wchar_t vb[MAX_PATH];
+        _snwprintf(vb, MAX_PATH, L"%ls\\via_base.txt", real);
+        DeleteFileW(vb);
+    }
+    /* a planted file at a temp name is never reused: CREATE_NEW picks the next name */
+    CHECK(count_tmp_files(real) == 0, "no temp files left after the failures");
+    /* OS assumption the writer relies on: a held directory handle without FILE_SHARE_DELETE blocks
+     * renaming that directory and its parent */
+    wchar_t ren[MAX_PATH], base2[MAX_PATH];
+    _snwprintf(ren, MAX_PATH, L"%ls_renamed", real);
+    _snwprintf(base2, MAX_PATH, L"%ls_renamed", base);
+    HANDLE hd = CreateFileW(real, FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING,
+                            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+    BOOL mv1 = MoveFileW(real, ren), mv2 = FALSE;
+    if (made) RemoveDirectoryW(link);   /* the parent can only be renamed without the junction pointing into it */
+    mv2 = MoveFileW(base, base2);
+    CHECK(hd != INVALID_HANDLE_VALUE && !mv1 && !mv2, "held directory: it and its parent cannot be renamed (%d %d)", mv1, mv2);
+    if (mv1) MoveFileW(ren, real);
+    if (mv2) MoveFileW(base2, base);
+    if (hd != INVALID_HANDLE_VALUE) CloseHandle(hd);
+
+    /* cleanup */
+    _snwprintf(f, MAX_PATH, L"%ls\\new.txt", real); DeleteFileW(f);
+    _snwprintf(f, MAX_PATH, L"%ls\\in.txt", real); DeleteFileW(f);
+    _snwprintf(f, MAX_PATH, L"%ls\\\x00E9t\x00E9.txt", real); DeleteFileW(f);
+    RemoveDirectoryW(link);
+    RemoveDirectoryW(real);
+    CHECK(RemoveDirectoryW(base), "test folder cleaned up");
+}
+
+/* 12: bounded decoders, strict patterns, checked V3X_ARG, NULL-safe ini */
+static void test_bounded_scan(void)
+{
+    uint8_t buf[32] = {0xE8, 0x10, 0, 0, 0, 0x48, 0x8B, 0x05, 0xF0, 0xFF, 0xFF, 0xFF, 0x0F, 0x84, 1, 0, 0, 0};
+    V3xSection sec = {buf, sizeof buf}, small = {buf, 12}, tail = {buf + 12, 4};
+    CHECK(v3x_rel32_target_in(&sec, buf, NULL) == buf + 0x15 && v3x_rel32_target_in(&small, buf, NULL) == NULL &&
+              v3x_rel32_target_in(&small, buf, &sec) == buf + 0x15,
+          "rel32_in: target must lie in dest (default: code)");
+    CHECK(v3x_rel32_target_in(&tail, buf + 12, &sec) == NULL, "rel32_in: instruction cut by the end of code -> NULL");
+    CHECK(v3x_rel32_target_in(&small, buf + 20, &sec) == NULL && v3x_rel32_target_in(&small, &sec, &sec) == NULL &&
+              v3x_rel32_target_in(&sec, buf + 5, NULL) == NULL,
+          "rel32_in: insn outside code / not a branch -> NULL");
+    CHECK(v3x_rip_target_in(&sec, buf + 5, 3, 7, NULL) == NULL && v3x_rip_target_in(&small, buf + 5, 3, 7, NULL) == NULL,
+          "rip_in: target before the range -> NULL");
+    uint8_t big[64] = {0};
+    memcpy(big + 16, buf + 5, 7);   /* mov rax, [rip-0x10] at big+16 -> big+23-16 = big+7 */
+    V3xSection bs = {big, sizeof big};
+    CHECK(v3x_rip_target_in(&bs, big + 16, 3, 7, NULL) == big + 7 && v3x_rip_target_in(&bs, big + 16, 3, 2, NULL) == NULL &&
+              v3x_rip_target_in(&bs, big + 16, -1, 7, NULL) == NULL,
+          "rip_in: in range; insn_len < disp_off + 4 / negative offset refused");
+    big[60] = 0x0F; big[61] = 0x84;
+    CHECK(v3x_scan_near_in(&bs, big + 50, 1000, "0F 84") == big + 60 && v3x_scan_near_in(&bs, big + 50, 1000, "0F 84 00 00 00") == NULL &&
+              v3x_scan_near_in(&bs, buf, 4, "00") == NULL,
+          "scan_near_in: clamped to the end of the section; from outside -> NULL");
+    V3xPattern p;
+    CHECK(v3x_pattern_compile("+F", &p) == 0 && v3x_pattern_compile("-1", &p) == 0 && v3x_pattern_compile("0x", &p) == 0 &&
+              v3x_pattern_compile("4G", &p) == 0 && v3x_pattern_compile("488B05", &p) == 3 && v3x_pattern_compile(NULL, &p) == 0,
+          "pattern: '+F' / '-1' / '0x' refused (strtoul accepted them), runs of hex still ok");
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    CHECK(v3x_rel32_target(buf) == buf + 0x15 && v3x_rip_target(buf + 5, 3, 7) == buf + 12 - 0x10 &&
+              v3x_scan_near(buf, sizeof buf, "0F 84") == buf + 12 && v3x_rel32_target(NULL) == NULL &&
+              v3x_rel32_target((void *)(uintptr_t)0x10) == NULL,
+          "deprecated wrappers: same results inside a committed region, NULL / unmapped -> NULL");
+    /* in an image: the range is the whole image (a .text call to a .text function, a rip load of .data) */
+    V3xSection text;
+    void *site = NULL;
+    if (v3x_section((uintptr_t)GetModuleHandleA(NULL), ".text", &text) && v3x_callers(&text, (void *)use_str, &site, 1) >= 1)
+        CHECK(v3x_rel32_target(site) == (void *)use_str && v3x_rel32_target_in(&text, site, NULL) == (void *)use_str,
+              "deprecated rel32 wrapper over this exe's image == bounded result");
+#pragma clang diagnostic pop
+    /* the end of a committed allocation: the wrapper must not read past it */
+    uint8_t *pg = (uint8_t *)VirtualAlloc(NULL, 0x2000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    DWORD old;
+    VirtualProtect(pg + 0x1000, 0x1000, PAGE_NOACCESS, &old);
+    pg[0xFFE] = 0xE8;
+    pg[0xFF0] = 0x0F; pg[0xFF1] = 0x84;
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    CHECK(v3x_rel32_target(pg + 0xFFE) == NULL && v3x_scan_near(pg + 0xFF0, 0x100, "0F 84 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00") == NULL,
+          "deprecated wrappers stop at the end of the readable region (no fault)");
+#pragma clang diagnostic pop
+    VirtualFree(pg, 0, MEM_RELEASE);
+}
+
+static char g_longdir[520];
+static const char *long_dir(void) { return g_longdir; }
+
+static void test_checked_arg_ini(const V3X_API *tk)
+{
+    V3X_HookCall c;
+    memset(&c, 0, sizeof c);
+    c.args[15] = 77;
+    volatile int i16 = 16, im1 = -1, i3 = 3, i4 = 4;
+    CHECK(V3X_ARG(&c, 15, int) == 77 && V3X_ARG(&c, i16, int) == 0 && V3X_ARG(&c, im1, int) == 0 && V3X_ARG((V3X_HookCall *)NULL, 0, int) == 0,
+          "V3X_ARG: run-time index out of range / NULL call -> 0");
+    V3X_ARGF(&c, i3) = 1.5;
+    V3X_ARGF(&c, i4) = 9.0;   /* goes to the dummy, not past xmm[3] */
+    CHECK(c.xmm[3].d == 1.5 && c.ret == 0 && V3X_ARGF(&c, i4) == 0.0, "V3X_ARGF: assignable, out of range -> dummy");
+
+    V3xIni ini;
+    CHECK(v3x_ini_parse(&ini, "[s]\nbig = 99999999999999999999\nneg = -5\nr = 2.5\nnan = nan\ninf = 1e999\nk = v\n") == 0, "ini parse");
+    CHECK(v3x_ini_int(&ini, "s", "big", 3) == 3, "ini: overflowing integer -> default (was LLONG_MAX)");
+    CHECK(v3x_ini_int_range(&ini, "s", "neg", 7, 0, 10) == 7 && v3x_ini_int_range(&ini, "s", "neg", 7, -10, 10) == -5 &&
+              v3x_ini_int_range(&ini, "s", "neg", 7, 10, 0) == 7 && v3x_ini_int_range(&ini, "s", "missing", 4, 0, 1) == 4,
+          "ini: int_range (out of range / lo > hi / missing -> default)");
+    CHECK(v3x_ini_double_range(&ini, "s", "r", 1.0, 0.0, 3.0) == 2.5 && v3x_ini_double_range(&ini, "s", "r", 1.0, 0.0, 2.0) == 1.0 &&
+              v3x_ini_double_range(&ini, "s", "nan", 1.0, -1e9, 1e9) == 1.0 && v3x_ini_double_range(&ini, "s", "inf", 1.0, -1e308, 1e308) == 1.0,
+          "ini: double_range refuses out of range, nan, inf");
+    char out[4] = "zz";
+    CHECK(v3x_ini_get(&ini, "s", NULL) == NULL && v3x_ini_int(&ini, "s", NULL, 5) == 5 && v3x_ini_bool(NULL, "s", "k", 1) == 1 &&
+              v3x_ini_get(NULL, NULL, "k") == NULL && !strcmp(v3x_ini_str(&ini, "s", NULL, "d", out, sizeof out), "d") &&
+              !strcmp(v3x_ini_str(&ini, "s", "k", "d", NULL, 0), ""),
+          "ini: NULL ini / key / out -> default, no crash");
+    CHECK(!strcmp(v3x_ini_str(&ini, "s", "big", NULL, out, sizeof out), "999"), "ini_str: cut to cap");
+    v3x_ini_free(&ini);
+    v3x_ini_free(NULL);
+    CHECK(v3x_ini_parse(&ini, NULL) == 0 && ini.n == 0 && v3x_ini_load(&ini, NULL) == 0 && !ini.found, "ini: NULL text / path = empty");
+    v3x_ini_free(&ini);
+    /* load_plugin: refuse instead of truncating */
+    char longname[600];
+    memset(longname, 'a', sizeof longname - 1);
+    longname[sizeof longname - 1] = 0;
+    longname[200] = 0;   /* 200 chars: a valid name, but dir + name + ".ini" > 520 once the dir is long */
+    CHECK(v3x_ini_load_plugin(&ini, tk, "../evil") == -1 && ini.n == 0 && v3x_ini_int(&ini, "a", "b", 6) == 6, "ini_load_plugin: '../evil' refused");
+    v3x_ini_free(&ini);
+    CHECK(v3x_ini_load_plugin(&ini, tk, "a/b") == -1 && v3x_ini_load_plugin(&ini, tk, NULL) == -1 && v3x_ini_load_plugin(&ini, NULL, "x") == -1,
+          "ini_load_plugin: path separators / NULL refused");
+    v3x_ini_free(&ini);
+    V3X_API a = *tk;
+    memset(g_longdir, 'd', 400);
+    g_longdir[400] = '\\';
+    g_longdir[401] = 0;
+    a.v3x_dir = long_dir;
+    CHECK(v3x_ini_load_plugin(&ini, &a, longname) == -1 && ini.n == 0 && !ini.found, "ini_load_plugin: path longer than its buffer -> -1 (never truncated)");
+    v3x_ini_free(&ini);
+    CHECK(v3x_ini_load_plugin(&ini, &a, "x") == 0 && !ini.found, "ini_load_plugin: a long dir that still fits is fine");
+    v3x_ini_free(&ini);
+}
+
+/* N11: v3x_script_get never loads the DLL, matches the plugin folder by full path, checks the table */
+static void test_script_get(void)
+{
+    CHECK(GetModuleHandleA(V3X_SCRIPT_DLL) == NULL && v3x_script_get(NULL) == NULL, "script_get: not loaded -> NULL");
+    const char *src = "build/plugins/script_ext.dll";
+    if (GetFileAttributesA(src) == INVALID_FILE_ATTRIBUTES) { printf("(no %s: script_get load checks skipped)\n", src); return; }
+    wchar_t exe[MAX_PATH], here[MAX_PATH], other[MAX_PATH], srcw[MAX_PATH];
+    GetModuleFileNameW(NULL, exe, MAX_PATH);
+    *wcsrchr(exe, L'\\') = 0;
+    _snwprintf(here, MAX_PATH, L"%ls\\%ls", exe, V3X_SCRIPT_DLL_W);
+    _snwprintf(other, MAX_PATH, L"%ls\\sdk_test_other_%lu", exe, (unsigned long)GetCurrentProcessId());
+    CreateDirectoryW(other, NULL);
+    wcscat(other, L"\\" V3X_SCRIPT_DLL_W);
+    MultiByteToWideChar(CP_ACP, 0, src, -1, srcw, MAX_PATH);
+    int copied = CopyFileW(srcw, here, FALSE) && CopyFileW(srcw, other, FALSE);
+    CHECK(copied, "copied script_ext.dll next to the test exe and into another folder");
+    if (!copied) return;
+    CHECK(v3x_script_get(NULL) == NULL && GetModuleHandleW(here) == NULL,
+          "script_get: a script_ext.dll file next to the caller is NOT loaded by the helper");
+    HMODULE ho = LoadLibraryW(other);
+    CHECK(ho && v3x_script_get(NULL) == NULL, "script_get: a script_ext.dll loaded from another folder is ignored");
+    HMODULE hh = LoadLibraryW(here);   /* what the loader does for <v3x>/plugins/script_ext.dll */
+    const V3X_ScriptExt *t = v3x_script_get(NULL);
+    CHECK(hh && t && t->struct_size >= offsetof(V3X_ScriptExt, packs_dir) + sizeof(t->packs_dir) && t->begin_pack && t->packs_dir &&
+              t->version >= 1,
+          "script_get: the module loaded from the caller's folder -> its table (v%u, %u bytes)", t ? t->version : 0, t ? t->struct_size : 0);
+    CHECK(!t || V3X_SCRIPT_HAS(t, features) == (t->struct_size >= offsetof(V3X_ScriptExt, features) + sizeof(void *)),
+          "V3X_SCRIPT_HAS uses offset + size");
+    if (hh) FreeLibrary(hh);
+    if (ho) FreeLibrary(ho);
+    DeleteFileW(here);
+    DeleteFileW(other);
+    *wcsrchr(other, L'\\') = 0;
+    RemoveDirectoryW(other);
+}
+
 static void test_safe(void)
 {
     test_safe_str();
@@ -525,6 +950,9 @@ static void test_safe(void)
     test_safe_math();
     test_safe_path();
     test_safe_misc();
+    test_safe_invariants();
+    test_safe_paths_w();
+    test_bounded_scan();
 }
 
 int main(int argc, char **argv)
@@ -542,6 +970,8 @@ int main(int argc, char **argv)
     test_hook_macros();
     test_util(&api);
     test_safe();
+    test_checked_arg_ini(&api);
+    test_script_get();
     if (argc > 1) test_game(argv[1]);
     else printf("(no exe given: game checks skipped)\n");
     return v3x_testkit_done();

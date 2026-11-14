@@ -15,11 +15,17 @@
  *     stores the value text in the object (CString at +0x40 / +0x38), so `v3x_x = "text"` just works.
  * The replaced slot finds the plugin callback by the token stored at object+8 and calls it with the scope
  * reference (ctx[0]) and the value text. Fail closed: every address and every vtable shape is checked;
- * on any mismatch nothing is hooked and nothing is registered (keywords then simply do not exist). */
+ * on any mismatch nothing is hooked and nothing is registered (keywords then simply do not exist).
+ * Containment (audit N5, sx_guard.h): a keyword belongs to the module that contains its callback; the
+ * callback runs under the per-thread fault guard (a fault switches that keyword off and logs
+ * module+offset) and is never called again once its keyword is off or its module was disabled by the
+ * core (V3X_EVENT_PLUGIN_DISABLED). An engine object of a keyword that is off behaves like an empty
+ * effect / a false trigger. */
 #ifndef SX_REG_H
 #define SX_REG_H
 
 #include "sx_engine.h"
+#include "sx_guard.h"
 
 #define SX_KW_MAX 64
 #define SX_KW_NAME 64
@@ -31,6 +37,9 @@ typedef struct SxKw {
     void *user;
     uint32_t token;
     int registered;
+    HMODULE owner;          /* module containing cb */
+    volatile LONG off;      /* 1 = never call cb again (fault, or owner disabled) */
+    volatile LONG faults;   /* faults caught (0 or 1: the first one switches it off) */
 } SxKw;
 
 typedef struct SxEntry { const void *vt; const char *desc; uint32_t token; uint32_t pad; } SxEntry;   /* 0x18 */
@@ -94,13 +103,29 @@ static int sx_kw_add(SxKw *tab, int *n, const char *name, void *cb, void *user, 
     for (int i = 0; i < *n; i++)
         if (!strcmp(tab[i].name, name)) return V3X_SCRIPT_EEXIST;
     if (*n >= SX_KW_MAX) return V3X_SCRIPT_EFULL;
+    HMODULE owner = sx_module_of(cb);
+    if (!owner || sx_module_disabled(owner)) return V3X_SCRIPT_EARG;   /* callback outside any module, or a disabled plugin */
     SxKw *k = &tab[(*n)++];
     memset(k, 0, sizeof *k);
     snprintf(k->name, sizeof k->name, "%s", name);
     snprintf(k->desc, sizeof k->desc, "V3X native %s (script_ext): %s = <value>", kind, name);
     k->cb = cb;
     k->user = user;
+    k->owner = owner;
     return 0;
+}
+
+/* Switches off every keyword whose callback is in module h (the core disabled that plugin). Returns the count. */
+static int sx_kw_disable_module(HMODULE h)
+{
+    int n = 0;
+    for (int pass = 0; pass < 2; pass++) {
+        SxKw *tab = pass ? sx_trg : sx_eff;
+        int cnt = pass ? sx_ntrg : sx_neff;
+        for (int i = 0; i < cnt; i++)
+            if (tab[i].owner == h && !InterlockedExchange(&tab[i].off, 1)) n++;
+    }
+    return n;
 }
 
 /* ------------------------------------------------------------------ resolution */
@@ -296,28 +321,61 @@ static void *sx_trg_create(void *entry)
     return o;
 }
 
+/* A keyword's callback faulted: switch it off and log where (once per keyword). Normal thread context. */
+static void sx_kw_fault(SxKw *k, const SxGuard *g, const char *kind)
+{
+    InterlockedIncrement(&k->faults);
+    if (InterlockedExchange(&k->off, 1)) return;
+    if (!sx_run_log) return;
+    char at[160], own[128];
+    sx_where(g->addr, at, sizeof at);
+    sx_module_name(k->owner, own, sizeof own);
+    if (g->code == EXCEPTION_ACCESS_VIOLATION)
+        sx_run_log("FAULT 0xc0000005 (%s 0x%llx) at %s in the callback of %s %s (owner %s): keyword switched off until restart",
+                   g->info[0] == 1 ? "write" : g->info[0] == 8 ? "execute" : "read", (unsigned long long)g->info[1], at, kind, k->name, own[0] ? own : "?");
+    else
+        sx_run_log("FAULT 0x%08lx at %s in the callback of %s %s (owner %s): keyword switched off until restart",
+                   (unsigned long)g->code, at, kind, k->name, own[0] ? own : "?");
+}
+
+/* 1 if k may be called (not off, owner not disabled); switches it off when its owner was disabled */
+static int sx_kw_callable(SxKw *k)
+{
+    if (!k || k->off) return 0;
+    if (sx_module_disabled(k->owner)) { InterlockedExchange(&k->off, 1); return 0; }
+    return 1;
+}
+
 /* CJominiEffect slot 22: void Execute(this, const Context *ctx); ctx[0] = scope reference */
 static void sx_eff_execute(void *self, void **ctx)
 {
     uint32_t tok;
     memcpy(&tok, (uint8_t *)self + 8, 4);
     SxKw *k = sx_kw_find(sx_eff, sx_neff, tok);
-    if (!k) return;
+    if (!sx_kw_callable(k)) return;
     V3X_ScriptScope sc;
     sx_scope_of(ctx, &sc);
-    ((v3x_script_effect_fn)k->cb)(&sc, sx_cstr((const SxStr *)((uint8_t *)self + SX_EFF_MSG)), k->user);
+    SxGuard g;
+    if (sx_guard_effect(&g, (v3x_script_effect_fn)k->cb, &sc, sx_cstr((const SxStr *)((uint8_t *)self + SX_EFF_MSG)), k->user))
+        sx_kw_fault(k, &g, "effect");
 }
 
-/* CJominiTrigger slot 24: bool Evaluate(this, const Context *ctx) */
+/* CJominiTrigger slot 24: bool Evaluate(this, const Context *ctx); a keyword that is off evaluates false */
 static uint8_t sx_trg_evaluate(void *self, void **ctx)
 {
     uint32_t tok;
     memcpy(&tok, (uint8_t *)self + 8, 4);
     SxKw *k = sx_kw_find(sx_trg, sx_ntrg, tok);
-    if (!k) return 0;
+    if (!sx_kw_callable(k)) return 0;
     V3X_ScriptScope sc;
     sx_scope_of(ctx, &sc);
-    return ((v3x_script_trigger_fn)k->cb)(&sc, sx_cstr((const SxStr *)((uint8_t *)self + SX_TRG_MSG)), k->user) != 0;
+    SxGuard g;
+    volatile int res = 0;
+    if (sx_guard_trigger(&g, (v3x_script_trigger_fn)k->cb, &sc, sx_cstr((const SxStr *)((uint8_t *)self + SX_TRG_MSG)), k->user, &res)) {
+        sx_kw_fault(k, &g, "trigger");
+        return 0;
+    }
+    return res != 0;
 }
 
 /* Builds the four vtables from the engine's debug_log ones. 0 = ok. */

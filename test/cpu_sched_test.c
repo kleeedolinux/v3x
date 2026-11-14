@@ -1,6 +1,6 @@
 /* Offline test of cpu_sched's core logic (no game run).
- *   python -m ziglang cc -target x86_64-windows-gnu -O2 -o D:/v3x_tmp/threads/cst.exe test/cpu_sched_test.c
- *   D:/v3x_tmp/threads/cst.exe ["<game>/binaries/victoria3.exe" | -] [path/to/cpu_sched.dll]   -> prints ALL OK
+ *   python -m ziglang cc -target x86_64-windows-gnu -O2 -o $V3X_TMP/cst.exe test/cpu_sched_test.c
+ *   $V3X_TMP/cst.exe ["<game>/binaries/victoria3.exe" | -] [path/to/cpu_sched.dll]   -> prints ALL OK
  * With the dll path it loads the built plugin against a fake V3X_API + fake image (anchor strings and
  * signature bytes) and calls the two detours it hooked: checks the TaskThreadCount rewrite and, on a
  * hybrid machine, the CPU sets each thread ends up with.

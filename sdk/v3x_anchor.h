@@ -32,6 +32,8 @@
 #include "v3x.h"
 #include "v3x_scan.h"
 
+V3X_NN_BEGIN
+
 #define V3X_ANCHOR_ALL_SAME (-1)
 #define V3X_ANCHOR_SHAPE (-2)
 #define V3X_ANCHOR_MAX_XREFS 64
@@ -53,10 +55,12 @@ typedef struct V3xAnchor {
 #define V3X_ANCHOR_FAIL_(a, ...) (snprintf((a)->err, sizeof (a)->err, __VA_ARGS__), (a)->result = NULL, -1)
 
 /* Resolves one anchor in the running game. Returns 0 (a->result set) or -1 (a->err says why). */
-static int v3x_anchor_resolve(const V3X_API *api, V3xAnchor *a)
+static int v3x_anchor_resolve(const V3X_API *V3X_NN api, V3xAnchor *V3X_NN a)
 {
     V3xSection text;
+    if (!a) return -1;
     a->result = NULL; a->err[0] = 0;
+    if (!api || !api->image_base || !api->find_string || !api->function_start) return V3X_ANCHOR_FAIL_(a, "no API");
     if (!v3x_section(api->image_base(), ".text", &text)) return V3X_ANCHOR_FAIL_(a, "no .text section");
     if (!a->string) {
         void *hit = NULL;
@@ -118,9 +122,10 @@ static int v3x_anchor_resolve(const V3X_API *api, V3xAnchor *a)
 /* Resolves every anchor and logs one line each (`tag` = your plugin name): "anchor X at
  * exe+0x... ok" or "anchor X FAILED: why". Returns the number of anchors that failed (0 = all
  * ok). Fail closed on non-zero: install nothing that depends on a failed anchor. */
-static int v3x_anchor_resolve_all(const V3X_API *api, const char *tag, V3xAnchor *a, int n)
+static int v3x_anchor_resolve_all(const V3X_API *V3X_NN api, const char *tag, V3xAnchor *V3X_NN a, int n)
 {
     int failed = 0;
+    if (!api || !api->log || !a || n < 0) return n > 0 ? n : 1;
     for (int i = 0; i < n; i++) {
         if (v3x_anchor_resolve(api, &a[i]) == 0)
             api->log(tag, "anchor %s at exe+0x%llx ok", a[i].name,
@@ -132,5 +137,7 @@ static int v3x_anchor_resolve_all(const V3X_API *api, const char *tag, V3xAnchor
     }
     return failed;
 }
+
+V3X_NN_END
 
 #endif

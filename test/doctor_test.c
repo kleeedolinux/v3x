@@ -800,7 +800,9 @@ int main(void)
         snprintf(id, sizeof id, "] D%03d", i);
         CHECK(strstr(c.buf, id) != NULL);
     }
-    CHECK(strstr(c.buf, "V3X doctor - loader 0.5.0") != NULL);
+    char head[64];   /* the running loader's own version (not hard-coded: it changes every release) */
+    snprintf(head, sizeof head, "V3X doctor - loader %s", api->loader_version());
+    CHECK(strstr(c.buf, head) != NULL);
     CHECK(strstr(c.buf, "[WARN   ] D001 game_build") != NULL);   /* this test exe is not a known game build */
     CHECK(strstr(c.buf, "D005 plugin_status: 1 plugin(s) loaded") != NULL);
     CHECK(strstr(c.buf, "D007.alloc_tracker") == NULL);          /* not loaded: no perf warning */

@@ -1,7 +1,10 @@
 # Build + offline tests + installer on every push / pull request to main.
 # The runner has no Victoria 3: tests that need ../binaries/victoria3.exe are allowed to fail
 # (list in .github/scripts/ci_tests.sh); the installer tests use a synthetic exe header.
-# Supply chain (docs/security-audit.md H3): every action is pinned by full commit SHA (the tag in the
+# Jobs: build-test (plugins with -Werror, every test executable with UBSan in trap mode: SANITIZE=1),
+# static-analysis (clang-tidy + cppcheck report, non-blocking until the baseline is triaged) and
+# fuzz-linux (the windows.h-free parsers as libFuzzer targets with ASan + UBSan, 60 s each).
+# Supply chain (the security review H3): every action is pinned by full commit SHA (the tag in the
 # comment is what the SHA was on 2026-11-13); pip installs only hash-locked packages
 # (installer/requirements-ci.txt); the token is read-only and not kept in the checkout.
 name: CI
@@ -53,10 +56,15 @@ jobs:
       - name: Release signing self-test (RFC 8032 vectors)
         run: python tools/sign_release.py selftest
 
-      - name: Build
+      - name: Build (plugins with -Werror)
+        env:
+          V3X_WERROR: "1"
         run: bash build.sh
 
-      - name: Offline tests (test/run_all.sh)
+      - name: Offline tests (test/run_all.sh, UBSan trap builds, -Werror)
+        env:
+          SANITIZE: "1"
+          V3X_WERROR: "1"
         run: bash .github/scripts/ci_tests.sh
 
       - name: Installer (make_dist.py)
@@ -85,5 +93,107 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: test-logs
-          path: ${{ runner.temp }}/v3x/t/run_all_logs
+          path: |
+            ${{ runner.temp }}/v3x/t/run_all_logs
+            ${{ runner.temp }}/v3x/t/fuzz/crash-*.bin
+          if-no-files-found: ignore
+
+  # test/static_analysis.sh: clang-tidy (bugprone, cert, clang-analyzer) + cppcheck over the core, the SDK
+  # and every plugin. NON-BLOCKING (continue-on-error) until the baseline is triaged; then set
+  # STATIC_STRICT=1 below. Tool versions are pinned (Chocolatey package versions).
+  static-analysis:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    continue-on-error: true
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+          submodules: recursive
+
+      - name: Install LLVM 23.1.3 + cppcheck 2.19.0 (pinned)
+        shell: pwsh
+        run: |
+          choco upgrade llvm --version=23.1.3 -y --no-progress --allow-downgrade
+          choco upgrade cppcheck --version=2.19.0 -y --no-progress --allow-downgrade
+          "C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          "C:\Program Files\Cppcheck" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+
+      - name: Static analysis (test/static_analysis.sh, report only)
+        run: |
+          clang-tidy --version | head -2
+          cppcheck --version
+          bash test/static_analysis.sh
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: static-analysis
+          path: build/static_analysis/*.log
+          if-no-files-found: ignore
+          retention-days: 30
+
+  # The parsers that need no windows.h, as coverage-guided libFuzzer targets with ASan + UBSan (the
+  # Windows job runs the same harnesses with the in-tree mutational driver, UBSan only):
+  #   fuzz_updater (JSON scanner, GitHub release list, compat.json + signature, cache file, SHA256SUMS,
+  #   semver), fuzz_release_sig (release_sig.h parse + Ed25519 verify), fuzz_installer (payload index,
+  #   meta.txt, install manifest, compat scanner), fuzz_core_ini (v3x.ini scanner + SDK ini reader),
+  #   fuzz_safe (V3xSpan, V3xStr, path rules, arithmetic). .github/scripts/libfuzzer_adapter.c replaces
+  #   test/fuzz/fuzz_main.c; every target runs 60 s, seeded with its V3X_FUZZ_SEEDs (+ test/fuzz/corpus).
+  fuzz-linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+          submodules: recursive
+
+      - name: clang with libFuzzer
+        run: |
+          clang --version
+          printf 'int LLVMFuzzerTestOneInput(const char *d, unsigned long n){(void)d;(void)n;return 0;}\n' > "$RUNNER_TEMP/probe.c"
+          if ! clang -fsanitize=fuzzer,address,undefined -o "$RUNNER_TEMP/probe" "$RUNNER_TEMP/probe.c"; then
+            v=$(clang --version | sed -n 's/.*clang version \([0-9]*\).*/\1/p' | head -1)
+            sudo apt-get update -q && sudo apt-get install -y --no-install-recommends "libclang-rt-${v}-dev"
+            clang -fsanitize=fuzzer,address,undefined -o "$RUNNER_TEMP/probe" "$RUNNER_TEMP/probe.c"
+          fi
+
+      - name: Build and run the libFuzzer targets (60 s each)
+        env:
+          FUZZ_SECONDS: "60"
+        run: |
+          out=$RUNNER_TEMP/fuzz; mkdir -p "$out"
+          fail=0
+          for h in updater release_sig installer core_ini safe; do
+            exe=$out/fuzz_$h
+            clang -g -O1 -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer \
+              -Iinclude -Isdk -Isrc -Itest/fuzz -D_stricmp=strcasecmp -D_strnicmp=strncasecmp -include strings.h \
+              -Wno-unused-function -Wno-unused-result \
+              -o "$exe" "test/fuzz/fuzz_$h.c" .github/scripts/libfuzzer_adapter.c || { echo "::error::build of fuzz_$h failed"; fail=1; continue; }
+            for t in $(FUZZ_LIST=1 "$exe"); do
+              corpus=$out/corpus_$t; mkdir -p "$corpus"
+              FUZZ_TARGET=$t FUZZ_DUMP_SEEDS="$corpus" "$exe"
+              extra=(); [[ -d test/fuzz/corpus/$t ]] && extra=("test/fuzz/corpus/$t")
+              echo "== fuzz_$h / $t"
+              if ! FUZZ_TARGET=$t "$exe" -max_total_time="$FUZZ_SECONDS" -timeout=10 -rss_limit_mb=2048 -print_final_stats=1 \
+                  -artifact_prefix="$out/crash-$t-" "$corpus" "${extra[@]}" 2>&1 | tail -25; then
+                echo "::error::fuzz target $t (test/fuzz/fuzz_$h.c) found a crash; input in the fuzz-crashes artifact"
+                fail=1
+              fi
+            done
+          done
+          exit $fail
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: failure()
+        with:
+          name: fuzz-crashes
+          path: ${{ runner.temp }}/fuzz/crash-*
           if-no-files-found: ignore

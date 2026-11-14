@@ -1,14 +1,19 @@
 # On a tag v* (for example v0.5.0): build + the same tests as ci.yml, then a GitHub Release with
-# V3X-Setup.exe, v3x-<version>.zip, install.ps1, compat.json, compat.json.sig and SHA256SUMS.txt.
+# V3X-Setup.exe, v3x-<version>.zip, install.ps1, compat.json, compat.json.sig, plugins.json,
+# plugins.json.sig and SHA256SUMS.txt.
 # "irm https://github.com/kleeedolinux/v3x/releases/latest/download/install.ps1 | iex" and install.ps1's
 # own download use the latest release, so a tag with a '-' (v0.6.0-rc1) is published as a prerelease
 # and does not become "latest".
 #
-# Two jobs (docs/security-audit.md H1/H3):
+# Two jobs (the security review H1/H3):
 #   build    read-only token, no secrets: builds, tests, uploads the files as an artifact.
 #   publish  needs build; runs in the protected environment "release" (required reviewer, tag rule
-#            v*, holds the secret V3X_SIGNING_KEY): signs compat.json (tools/sign_release.py, Ed25519;
-#            refuses a key that is not in installer/release_keys.h), records build provenance
+#            v*, holds the secret V3X_SIGNING_KEY): signs plugins.json (the official plugin list the
+#            loader trusts), puts plugins.json.sig into the setup payload and the zip
+#            (make_dist.py --add-sig: pure Python, no compiler, refuses if plugins.json differs from
+#            the payload's), then signs compat.json, which names the final setup / zip hashes
+#            (tools/sign_release.py, Ed25519; refuses a key that is not in installer/release_keys.h),
+#            records build provenance
 #            (actions/attest-build-provenance) and creates the release. Releases are immutable here:
 #            if the tag already has a release the job fails; nothing is ever replaced (no --clobber).
 # Every action is pinned by full commit SHA (tag in the comment, looked up 2026-11-13); pip installs
@@ -75,10 +80,15 @@ jobs:
       - name: Release signing self-test (RFC 8032 vectors)
         run: python tools/sign_release.py selftest
 
-      - name: Build
+      - name: Build (plugins with -Werror)
+        env:
+          V3X_WERROR: "1"
         run: bash build.sh
 
-      - name: Offline tests (test/run_all.sh)
+      - name: Offline tests (test/run_all.sh, UBSan trap builds, -Werror)
+        env:
+          SANITIZE: "1"
+          V3X_WERROR: "1"
         run: bash .github/scripts/ci_tests.sh
 
       - name: Installer (make_dist.py)
@@ -95,8 +105,9 @@ jobs:
         env:
           VER: ${{ steps.ver.outputs.version }}
         run: |
-          ls -l V3X-Setup.exe "v3x-${VER}.zip" install.ps1 compat.json SHA256SUMS.txt
+          ls -l V3X-Setup.exe "v3x-${VER}.zip" install.ps1 compat.json plugins.json SHA256SUMS.txt
           python -c "import json, os; d = json.load(open('compat.json', encoding='utf-8')); print(d); assert d['schema'] == 1 and d['v3x_version'] == os.environ['VER'] and d['game_builds']"
+          python -c "import json, os; d = json.load(open('plugins.json', encoding='utf-8')); assert d['schema'] == 1 and d['v3x_version'] == os.environ['VER'] and d['plugins']; print(len(d['plugins']), 'official plugins')"
           sha256sum -c SHA256SUMS.txt
           cat SHA256SUMS.txt
 
@@ -108,6 +119,7 @@ jobs:
             build/dist/v3x-${{ steps.ver.outputs.version }}.zip
             build/dist/install.ps1
             build/dist/compat.json
+            build/dist/plugins.json
             build/dist/SHA256SUMS.txt
           if-no-files-found: error
           retention-days: 7
@@ -158,14 +170,20 @@ jobs:
             exit 1
           fi
 
-      - name: Sign compat.json (Ed25519, secret V3X_SIGNING_KEY)
+      # Order matters: plugins.json.sig goes INTO V3X-Setup.exe and the zip, which changes their hashes;
+      # compat.json (which names those hashes) is rewritten by --add-sig and signed last.
+      - name: Sign plugins.json, add the signature to the setup + zip, sign compat.json (Ed25519, secret V3X_SIGNING_KEY)
         env:
           V3X_SIGNING_KEY: ${{ secrets.V3X_SIGNING_KEY }}
         run: |
           [[ -n "$V3X_SIGNING_KEY" ]] || { echo "::error::secret V3X_SIGNING_KEY is not set in the environment 'release'"; exit 1; }
+          python tools/sign_release.py sign dist/plugins.json
+          python tools/sign_release.py verify dist/plugins.json
+          python installer/make_dist.py --add-sig dist
           python tools/sign_release.py sign dist/compat.json
           python tools/sign_release.py verify dist/compat.json
-          cat dist/compat.json.sig
+          (cd dist && sha256sum -c SHA256SUMS.txt)
+          cat dist/plugins.json.sig dist/compat.json.sig
 
       - name: Build provenance
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
@@ -176,17 +194,25 @@ jobs:
             dist/install.ps1
             dist/compat.json
             dist/compat.json.sig
+            dist/plugins.json
+            dist/plugins.json.sig
 
       - name: Publish the GitHub Release (new release only)
         env:
           GH_TOKEN: ${{ github.token }}
         working-directory: dist
         run: |
-          files=(V3X-Setup.exe "v3x-${VER}.zip" install.ps1 compat.json compat.json.sig SHA256SUMS.txt)
+          files=(V3X-Setup.exe "v3x-${VER}.zip" install.ps1 compat.json compat.json.sig plugins.json plugins.json.sig SHA256SUMS.txt)
+          ps1sha=$(python -c "import json; print([a['sha256'] for a in json.load(open('compat.json', encoding='utf-8'))['assets'] if a['name'] == 'install.ps1'][0])")
+          [[ "$ps1sha" == "$(sha256sum install.ps1 | cut -d' ' -f1)" ]] || { echo "::error::install.ps1 hash differs from compat.json"; exit 1; }
           notes="Install (Windows, no admin): close Victoria 3, open PowerShell and run
           \`irm https://v3extender.pages.dev/install.ps1 | iex\`
           or download and run V3X-Setup.exe. Player guide: https://github.com/${GITHUB_REPOSITORY}/blob/${TAG}/docs/install.md
-          compat.json is signed (compat.json.sig, Ed25519; install.ps1 and the in-game updater check it).
+          Verifiable two-step install instead of the one-liner: download install.ps1 of this release, check
+          \`(Get-FileHash .\\install.ps1).Hash\` is ${ps1sha} (the install.ps1 entry of the signed compat.json), then run
+          \`\$env:V3X_VERSION='${TAG}'; powershell -ExecutionPolicy Bypass -File .\\install.ps1\`.
+          compat.json is signed (compat.json.sig, Ed25519; install.ps1 and the in-game updater check it); plugins.json
+          (official plugin list, signed: plugins.json.sig) is inside the setup and the zip.
           Provenance: gh attestation verify V3X-Setup.exe --repo ${GITHUB_REPOSITORY}. Single player only."
           pre=()
           if [[ -n "$PRE" ]]; then pre=("$PRE"); fi

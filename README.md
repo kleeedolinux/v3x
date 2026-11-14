@@ -5,7 +5,7 @@
 <p align="center">
   <img alt="Victoria 3 1.15.1" src="https://img.shields.io/badge/Victoria%203-1.15.1-1f3550">
   <img alt="Windows x64" src="https://img.shields.io/badge/platform-Windows%20x64-1f3550">
-  <img alt="Plugin API v4" src="https://img.shields.io/badge/plugin%20API-v4-2f6f73">
+  <img alt="Plugin API v6" src="https://img.shields.io/badge/plugin%20API-v6-2f6f73">
   <img alt="Plugins in C" src="https://img.shields.io/badge/plugins-C%20%2F%20any%20x64%20DLL-2f6f73">
   <img alt="Single player" src="https://img.shields.io/badge/mode-single%20player-b98b3e">
   <img alt="Status: pre-release" src="https://img.shields.io/badge/status-pre--release-b98b3e">
@@ -18,12 +18,12 @@ game's program*, so they can change Victoria 3 far more deeply than script mods 
 functions safely, read live game data, add console commands, react to loads and saves, and ship
 it all as a plugin that players turn on or off from the main menu.
 
-V3X comes with 31 plugins built this way. They are the proof that it works: 3D models
+V3X comes with 33 plugins built this way. They are the proof that it works: 3D models
 load in 6.7 s instead of 37.5 s, debug-mode autosaves shrink from 156 MB to 26 MB, and the GDP
 history graphs no longer get wiped ([showcase](#what-we-built-with-v3x)).
 
 <p align="center">
-  <img src="docs/assets/platform.svg" alt="The V3X platform: plugins (bundled or built by the community) use the SDK and the V3X API v4 (find code, change it, run code, events); the loader version.dll loads them into the Victoria 3 engine, which stays unchanged on disk." width="100%">
+  <img src="docs/assets/platform.svg" alt="The V3X platform: plugins (bundled or built by the community) use the SDK and the V3X API v6 (find code, change it, run code, events); the loader version.dll loads them into the Victoria 3 engine, which stays unchanged on disk." width="100%">
 </p>
 
 ## What you can build
@@ -71,35 +71,61 @@ You need Windows x64, Python and Git Bash. The compiler is zig from pip, so no V
 cd "<Steam>/steamapps/common/Victoria 3"
 git clone --recursive https://github.com/kleeedolinux/v3x.git && cd v3x
 pip install ziglang && ./build.sh install                                # loader + bundled plugins into ../binaries
-python sdk/build_plugin.py templates/plugin_template --test ../binaries/victoria3.exe   # your first plugin, tested offline
+python sdk/build_plugin.py templates/plugin_template --werror --test ../binaries/victoria3.exe   # your first plugin, tested offline
 ```
 
 Copy [`templates/plugin_template/`](templates/plugin_template/), rename it, then build, test and
-install it with `python sdk/build_plugin.py <dir> --test --install`. Walkthrough (about 10 minutes):
-[docs/getting-started.md](docs/getting-started.md).
+install it with `python sdk/build_plugin.py <dir> --werror --test --install`. Walkthrough (about 10
+minutes): [docs/getting-started.md](docs/getting-started.md). The rules for code that cannot
+overrun, race or read freed memory, with the safe SDK call for each:
+[docs/safe-coding.md](docs/safe-coding.md).
 
 ### A complete plugin
 
-This plugin counts game ticks. The file builds without warnings, and the offline test finds its
-anchor in the 1.15.1 exe.
+This plugin counts game ticks and prints the count on the console command `ticks_seen`. It uses
+only the safe APIs: a fail-closed anchor (every reference to the string must be in one function,
+and its first bytes must match), `hook_safe` instead of a hand-written detour, an atomic counter,
+a bounded string, and every result checked. It builds with `-Werror`, and the offline test finds
+its anchor in the 1.15.1 exe.
 
+<!-- sample: complete -->
 ```c
-#include <windows.h>
-#include "v3x.h"
+#include "v3x_sdk.h"
 
-V3X_PLUGIN_MANIFEST("tick_counter", "0.1.0", "you", "counts game ticks", "release/1.15*");
-static volatile LONG g_ticks;
+V3X_PLUGIN_MANIFEST_CAPS("tick_counter", "0.1.0", "you", "counts game ticks", "release/1.15*",
+                         0u, 0u, "hook");   /* the loader refuses patch/exec for this plugin (API v6) */
 
-static void on_tick(V3X_HookCall *call) { (void)call; InterlockedIncrement(&g_ticks); }
+static const V3X_API *api;
+static volatile LONG64 g_ticks;   /* the tick thread writes, the console thread reads: atomic */
 
-V3X_EXPORT int v3x_plugin_load(const V3X_API *api)
+static V3xAnchor A[] = {          /* 1. anchor: a log string + the prologue of its one function */
+    {.name = "game_tick", .string = "Processing Tick: ",
+     .pattern = "48 89 5C 24 ?? 48 89 74 24 ?? 48 89 7C 24", .xref = V3X_ANCHOR_ALL_SAME},
+};
+
+static void on_tick(V3X_HookCall *call) { (void)call; InterlockedIncrement64(&g_ticks); }
+
+static void cmd_ticks(const char *args, void *user)   /* console thread: reads only our counter */
 {
-    if (!V3X_HAS(api, hook_safe)) return 1;                 /* loader older than API v4 */
-    void *s  = api->find_string("Processing Tick: ");      /* 1. anchor: a log string */
-    void *x  = s ? api->find_xref(s, 0) : NULL;            /* 2. the code that loads it */
-    void *fn = x ? api->function_start(x) : NULL;          /* 3. its function (.pdata) */
-    if (!fn) { api->log("tick_counter", "anchor FAILED: nothing installed"); return 1; }
-    return api->hook_safe(fn, on_tick, NULL, NULL);        /* 4. observe; args forwarded */
+    (void)args; (void)user;
+    char line[64];
+    V3xStr s;
+    v3x_str_init(&s, line, sizeof line);
+    (void)v3x_str_appendf(&s, "%lld ticks", (long long)InterlockedCompareExchange64(&g_ticks, 0, 0));
+    api->print("%s", v3x_str_cstr(&s));
+}
+
+V3X_EXPORT int v3x_plugin_load(const V3X_API *a)
+{
+    api = a;
+    if (!V3X_HAS(api, hook_safe)) return 1;                        /* loader older than API v4 */
+    if (v3x_anchor_resolve_all(api, "tick_counter", A, 1) != 0)    /* 2. logged; install nothing */
+        return 1;
+    int rc = api->hook_safe(A[0].result, on_tick, NULL, NULL);     /* 3. observe; args forwarded */
+    if (rc != V3X_OK) { api->log("tick_counter", "hook_safe FAILED (%d)", rc); return 1; }
+    if (api->register_command("ticks_seen", "tick_counter: ticks so far", cmd_ticks, NULL) != V3X_OK)
+        api->log("tick_counter", "command not registered");     /* optional part */
+    return 0;
 }
 ```
 
@@ -114,8 +140,10 @@ V3X_EXPORT int v3x_plugin_load(const V3X_API *api)
 
 | you want to | use |
 |---|---|
-| find engine code | `find_string`, `find_xref`, `function_start`, `pattern_scan`; anchor tables in [`sdk/v3x_anchor.h`](sdk/v3x_anchor.h) |
-| change it | `hook_safe` (pre/post, all 16 integer argument slots, `xmm0`-`xmm3`, return value), `hook`, `unhook`, `patch` |
+| find engine code | fail-closed anchor tables in [`sdk/v3x_anchor.h`](sdk/v3x_anchor.h) (built on `find_string`, `find_xref`, `function_start`, `pattern_scan`) |
+| change it | `hook_safe` (pre/post, all 16 integer argument slots, `xmm0`-`xmm3`, return value), `unhook`; unsafe escape hatches with their rules: raw `hook`, `patch` ([safe-coding](docs/safe-coding.md#hooks)) |
+| read engine memory | [`sdk/v3x_mem.h`](sdk/v3x_mem.h): reads that fail instead of faulting |
+| strings, files, numbers | [`sdk/v3x_safe.h`](sdk/v3x_safe.h): `V3xStr`, `V3xSpan`, `v3x_mul_ok`, `v3x_path_join_checked`, atomics, `V3X_ASSERT_MAIN` |
 | run code on the main thread | `on_frame` (every frame), `run_on_main` (once) |
 | talk to the player or other tools | `log`, `register_command`, `print`, `exec_command`, `exec_capture` |
 | react to the game | `on_event` / `emit_event`: `load_transition`, `load_transition_begin`, `save_begin`, `save_end`, `process_exit` |
@@ -126,8 +154,8 @@ V3X_EXPORT int v3x_plugin_load(const V3X_API *api)
   <img src="docs/assets/lifecycle.svg" alt="A plugin's life: process start, plugins load before the CRT, anchors resolve, hooks go in, the game runs, events, process_exit; and which thread runs which callback." width="100%">
 </p>
 
-Read next: [API reference](docs/api-reference.md) · [safety rules](docs/safety.md) (each one
-learned from a crash) · [reverse-engineering guide](docs/reverse-engineering.md) ·
+Read next: [API reference](docs/api-reference.md) · [writing safe plugins](docs/safe-coding.md) ·
+[safety rules](docs/safety.md) (each one learned from a crash) · [reverse-engineering guide](docs/reverse-engineering.md) ·
 [engine map](docs/engine-map.md) · [console commands and events](docs/console-commands.md) ·
 [building and testing](docs/testing.md).
 
@@ -142,11 +170,10 @@ against the real exe, then measure again in the game.
 </p>
 
 <p align="center">
-  <img src="docs/assets/results.svg" alt="Measured on the author's PC: 3D-model loading 37.5 s before, 6.7 s with V3X; autosave in debug mode 156 MB before, 26 MB with V3X; New Game crashed before, after the fix the game loads and a 4-hour session was played." width="100%">
+  <img src="docs/assets/results.svg" alt="What the plugins changed: 3D-model loading 37.5 s before, 6.7 s with the lazy_mesh plugin; autosave in debug mode 156 MB before, 26 MB with the enhance plugin; New Game crashed before, loads with the mem_tuner plugin." width="100%">
 </p>
 
-<sub>All numbers were measured on the author's PC (16 GB RAM, integrated GPU, Victoria 3 1.15.1).
-Yours will differ.</sub>
+<sub>Results vary by PC.</sub>
 
 **3D models loaded on demand** (`lazy_mesh`). *Measured:* the loading screen spends 37.5 s in one
 pass over all 2,118 3D-model types, used or not. *Found:* the pass calls one load function per type,
@@ -198,13 +225,16 @@ Also bundled: a crash log with C++ error types and stacks (`crash_logger`), the 
 P-/E-core thread placement on hybrid CPUs (`cpu_sched`), quieter engine logs (`log_filter`), file
 overrides without a mod (`content_packs`), and modder tools: a sampling profiler (`devtools`), a
 disassembler console (`devconsole`), per-task tick timing (`tick_profiler`), allocation tracking
-(`alloc_tracker`) and an MCP bridge (`devbridge`), plus `script_ext`, which lets a plugin ship game
-script, localization and GUI files ([docs/scripting.md](docs/scripting.md)).
+(`alloc_tracker`) and an MCP bridge (`devbridge`: owner-only pipe, per-session token,
+read-only command allow list by default), plus `script_ext`, which lets a plugin ship game
+script, localization and GUI files ([docs/scripting.md](docs/scripting.md)), a health check
+(`doctor`, [docs/doctor.md](docs/doctor.md)) and a signed-release updater (`updater`,
+[docs/updating.md](docs/updating.md)).
 
 | class | plugins |
 |---|---|
-| on in the player installer | crash_logger, content_packs, mod_menu, keep_history, ironman_console, log_filter, frame_pacer, cpu_sched, gfx_driver, mem_tuner, fast_load, script_ext |
-| shipped, off (opt-in) | console_plus, loc_fallback, enhance, asset_stream, lazy_mesh, sim_opt |
+| on in the player installer | crash_logger, content_packs, mod_menu, keep_history, ironman_console, log_filter, frame_pacer, cpu_sched, gfx_driver, mem_tuner, fast_load, script_ext, doctor |
+| shipped, off (opt-in) | console_plus, loc_fallback, enhance, asset_stream, lazy_mesh, sim_opt, updater |
 | measure-only (not shipped) | fast_lookup, mod_loader, map_cache, lazy_gfx, par_load, tick_par, ai_par |
 | developer tools (not shipped) | alloc_tracker, devtools, devconsole, devbridge, tick_profiler, hello |
 | SDK service (shipped on, hooks nothing) | script_ext |
@@ -339,6 +369,14 @@ built to make the safe way the easy way, in the spirit of Rust, within what C al
 
 **Containing bad plugins**
 
+* Only trusted plugin DLLs load (loader 0.6.0): the ones in V3X's signed plugin list, the ones you
+  allowed with the console command `trust <plugin>`, or any when a developer sets `V3X_TRUST=dev`. The
+  decision, and the manifest checks, are made on the file before it is loaded, so a refused DLL never
+  runs. This is authenticity and consent, not a sandbox
+  ([ADR 0002](docs/adr/0002-trust-model.md)).
+* Plugins cannot remove each other's hooks or registrations, patch the loader or another plugin, or
+  use hooks, patches or console commands their manifest does not declare; each has quotas
+  ([ADR 0005](docs/adr/0005-api-v6-containment.md)).
 * A plugin that crashes in its own load, frame, command or event code is caught, logged with
   module and offset, and switched off; the game keeps running. (A crash inside a hooked engine
   function cannot be caught; that is why hooks fail closed.)
@@ -346,7 +384,7 @@ built to make the safe way the easy way, in the spirit of Rust, within what C al
   load fails has its hooks and patches rolled back.
 * On an unknown game build only plugins whose manifest declares that build are loaded.
 * The ABI is frozen by tests: every field offset is checked at compile time and plugins built
-  against the v1 to v4 headers are loaded by the current loader in CI.
+  against the v1 to v5 headers are loaded by the current loader in CI.
 
 **Verified, not just written**
 
@@ -385,13 +423,19 @@ the game's own startup code runs, it loads every enabled plugin ([src/core.c](sr
 ## Documentation
 
 [Docs index](docs/README.md) · [Getting started](docs/getting-started.md) ·
-[API reference](docs/api-reference.md) · [Safety rules](docs/safety.md) ·
+[Writing safe plugins](docs/safe-coding.md) · [API reference](docs/api-reference.md) ·
+[API stability](docs/api-stability.md) · [Safety rules](docs/safety.md) ·
 [Configuration](docs/configuration.md) · [Console commands and events](docs/console-commands.md) ·
 [Plugin catalog](docs/plugins.md) · [Building and testing](docs/testing.md) ·
 [Installing (players)](docs/install.md) · [Script from plugins](docs/scripting.md) ·
-[Maturity](docs/maturity.md) · [Session reports](docs/sessions/) ·
 [Reverse engineering](docs/reverse-engineering.md) · [Engine map](docs/engine-map.md) ·
 [Troubleshooting](docs/troubleshooting.md) · [FAQ](docs/faq.md) · [RE notes](docs/re/)
+
+Design decisions: [ADR 0001 release signing](docs/adr/0001-release-signing.md) ·
+[ADR 0002 trust model](docs/adr/0002-trust-model.md) ·
+[ADR 0003 hook lifetime](docs/adr/0003-hook-lifetime.md) ·
+[ADR 0004 SDK safety](docs/adr/0004-sdk-safety.md) ·
+[ADR 0005 API v6 containment](docs/adr/0005-api-v6-containment.md)
 
 ## Contributing, license, credits
 

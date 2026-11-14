@@ -874,12 +874,12 @@ static void write_cache(const char *v3x, const char *build, const char *sha, lon
     snprintf(buf, sizeof buf,
              "{\"schema\":1,\"checked_at\":%lld,\"attempt_at\":%lld,\"key\":\"stale-key-forces-a-(blocked)-fetch\",\"releases\":["
              "{\"tag\":\"v99.0.0\",\"version\":\"99.0.0\",\"draft\":false,\"prerelease\":false,\"compat\":1,\"compat_err\":\"\","
-             "\"api_version\":5,\"setup_name\":\"V3X-Setup.exe\",\"setup_url\":\"" UP_ASSET_PREFIX "v99.0.0/V3X-Setup.exe\","
+             "\"api_version\":%d,\"setup_name\":\"V3X-Setup.exe\",\"setup_url\":\"" UP_ASSET_PREFIX "v99.0.0/V3X-Setup.exe\","
              "\"setup_sha\":\"%s\",\"setup_size\":%lld,\"game_builds\":[{\"branch\":\"\",\"build_id\":\"%s\"}]},"
              "{\"tag\":\"v0.0.1\",\"version\":\"0.0.1\",\"draft\":false,\"prerelease\":false,\"compat\":1,\"compat_err\":\"\","
              "\"api_version\":5,\"setup_name\":\"V3X-Setup.exe\",\"setup_url\":\"" UP_ASSET_PREFIX "v0.0.1/V3X-Setup.exe\","
              "\"setup_sha\":\"%s\",\"setup_size\":0,\"game_builds\":[{\"branch\":\"\",\"build_id\":\"%s\"}]}]}",
-             now, now, sha, size, build, sha, build);
+             now, now, (int)V3X_API_VERSION, sha, size, build, sha, build);   /* the running loader's API: older is never eligible */
     FILE *f = fopen(p, "wb");
     fputs(buf, f);
     fclose(f);

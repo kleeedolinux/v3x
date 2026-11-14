@@ -1,5 +1,9 @@
 /* sx_pack.h - content-pack file writer of script_ext (pure Win32 file I/O, no engine access).
- * Unit-tested in test/script_ext_test.c. See sdk/v3x_script.h for the contract. */
+ * Unit-tested in test/script_ext_test.c. See sdk/v3x_script.h for the contract.
+ * Ownership (audit N5, sx_guard.h): a pack belongs to the module that first called begin_pack for it;
+ * its manifest records the owner's file name ("#owner <name>"), so in a later session only a module
+ * with that name may claim the pack (and delete its old files). Calls from another module, from a
+ * disabled plugin or from code outside any module fail with SX_E_OWNER. */
 #include <stdio.h>
 #include <string.h>
 #include <stdint.h>
@@ -10,15 +14,24 @@
 #include <windows.h>
 #include "v3x_script.h"
 #include "v3x_safe.h"
+#include "sx_guard.h"
 
 #define SX_MAX_PACKS 16
 #define SX_MAX_FILES 512
 #define SX_MANIFEST "v3x_script_ext.manifest"
+#define SX_OWNER_TAG "#owner "
 
 static char sx_root[MAX_PATH];                 /* ...\binaries\v3x\content_packs\ ("" = unknown) */
 static void (*sx_logf)(const char *fmt, ...);  /* optional logger (set once the plugin has its api) */
 
-typedef struct { char name[64]; int active; int n; char *files[SX_MAX_FILES]; } sx_pack_t;
+typedef struct {
+    char name[64];
+    int active;
+    int n;
+    char *files[SX_MAX_FILES];
+    HMODULE owner;          /* module that claimed the pack this session */
+    char owner_name[128];   /* its file name (lowercase), written into the manifest */
+} sx_pack_t;
 static sx_pack_t sx_packs[SX_MAX_PACKS];
 
 static void sx_log(const char *fmt, const char *a, unsigned long b)
@@ -82,6 +95,23 @@ static sx_pack_t *sx_find(const char *pack)
     return NULL;
 }
 
+/* The module that called a pack function (ret = its return address); NULL = no module (refused). */
+static HMODULE sx_caller(const void *ret)
+{
+    return sx_test_caller ? sx_test_caller : sx_module_of(ret);
+}
+
+/* 0 if `who` may use pack p (claimed by it, not disabled), else SX_E_OWNER (logged). */
+static int sx_owner_ok(const sx_pack_t *p, HMODULE who, const char *op)
+{
+    if (who && !sx_module_disabled(who) && p->owner == who) return 0;
+    char nm[128];
+    sx_module_name(who, nm, sizeof nm);
+    if (sx_logf) sx_logf("%s %s refused: pack belongs to %s, caller is %s%s", op, p->name, p->owner_name[0] ? p->owner_name : "?",
+                         nm[0] ? nm : "code outside any module", who && sx_module_disabled(who) ? " (disabled)" : "");
+    return SX_E_OWNER;
+}
+
 /* Creates every folder of path (absolute, '\\' separators) up to its last separator. */
 static int sx_mkdirs(char *path)
 {
@@ -128,14 +158,49 @@ static int sx_write_raw(const char *path, const void *pre, size_t npre, const vo
     return ok;
 }
 
-static int sx_begin_pack(const char *pack)
+/* Owner file name recorded in the pack's manifest by an earlier session ("" = none / no manifest). */
+static void sx_manifest_owner(const char *pack, char *out, size_t cap)
+{
+    out[0] = 0;
+    char man[MAX_PATH], line[260];
+    FILE *f = sx_path(man, sizeof man, pack, SX_MANIFEST) ? fopen(man, "rb") : NULL;
+    if (!f) return;
+    while (fgets(line, sizeof line, f)) {
+        size_t k = strlen(line);
+        while (k && (line[k - 1] == '\n' || line[k - 1] == '\r')) line[--k] = 0;
+        if (!strncmp(line, SX_OWNER_TAG, strlen(SX_OWNER_TAG))) {
+            snprintf(out, cap, "%s", line + strlen(SX_OWNER_TAG));
+            for (char *c = out; *c; c++) if (*c >= 'A' && *c <= 'Z') *c = (char)(*c - 'A' + 'a');
+            break;
+        }
+    }
+    fclose(f);
+}
+
+static int sx_begin_pack_as(const char *pack, HMODULE who)
 {
     if (!sx_valid_pack(pack) || !sx_root[0]) return V3X_SCRIPT_EARG;
     sx_pack_t *p = sx_find(pack);
-    if (!p) {
+    if (p) {
+        int rc = sx_owner_ok(p, who, "begin_pack");
+        if (rc) return rc;
+    } else {
+        char nm[128], prev[128];
+        sx_module_name(who, nm, sizeof nm);
+        if (!who || !nm[0] || sx_module_disabled(who)) {
+            if (sx_logf) sx_logf("begin_pack %s refused: caller is %s", pack, who ? "a disabled plugin" : "code outside any module");
+            return SX_E_OWNER;
+        }
+        sx_manifest_owner(pack, prev, sizeof prev);
+        if (prev[0] && strcmp(prev, nm)) {
+            if (sx_logf) sx_logf("begin_pack %s refused: the pack belongs to %s (manifest), caller is %s", pack, prev, nm);
+            return SX_E_OWNER;
+        }
         for (int i = 0; i < SX_MAX_PACKS && !p; i++) if (!sx_packs[i].name[0]) p = &sx_packs[i];
         if (!p) return V3X_SCRIPT_EARG;
         snprintf(p->name, sizeof p->name, "%s", pack);
+        p->owner = who;
+        snprintf(p->owner_name, sizeof p->owner_name, "%s", nm);
     }
     for (int i = 0; i < p->n; i++) { free(p->files[i]); p->files[i] = NULL; }
     p->n = 0;
@@ -152,6 +217,7 @@ static int sx_begin_pack(const char *pack)
         while (fgets(line, sizeof line, f)) {
             size_t k = strlen(line);
             while (k && (line[k - 1] == '\n' || line[k - 1] == '\r')) line[--k] = 0;
+            if (line[0] == '#') continue;   /* metadata (#owner) */
             char fp[MAX_PATH];
             /* validated again (never outside the pack, never through or onto a reparse point) */
             if (sx_valid_rel(line) && sx_path(fp, sizeof fp, pack, line)) DeleteFileA(fp);
@@ -164,11 +230,20 @@ static int sx_begin_pack(const char *pack)
     return V3X_SCRIPT_OK;
 }
 
-static int sx_write_file(const char *pack, const char *rel, const void *data, size_t n)
+/* The three table entries find their caller from the return address (noinline: their own frame). */
+static __attribute__((noinline)) int sx_begin_pack(const char *pack)
 {
+    return sx_begin_pack_as(pack, sx_caller(__builtin_return_address(0)));
+}
+
+static __attribute__((noinline)) int sx_write_file(const char *pack, const char *rel, const void *data, size_t n)
+{
+    HMODULE who = sx_caller(__builtin_return_address(0));
     if (!sx_valid_pack(pack) || !sx_valid_rel(rel) || (n && !data)) return V3X_SCRIPT_EARG;
     sx_pack_t *p = sx_find(pack);
     if (!p || !p->active) return V3X_SCRIPT_ESTATE;
+    int orc = sx_owner_ok(p, who, "write_file");
+    if (orc) return orc;
     char path[MAX_PATH];
     if (!sx_path(path, sizeof path, pack, rel)) return V3X_SCRIPT_EARG;
     if (!sx_mkdirs(path)) { sx_log("write %s: mkdir failed (error %lu)", rel, GetLastError()); return V3X_SCRIPT_EIO; }
@@ -181,24 +256,37 @@ static int sx_write_file(const char *pack, const char *rel, const void *data, si
     for (int i = 0; i < p->n; i++) if (!_stricmp(p->files[i], rel)) return V3X_SCRIPT_OK;
     if (p->n < SX_MAX_FILES) {
         size_t k = strlen(rel) + 1;
-        char *c = (char *)malloc(k);
+        char *c = (char *)v3x_alloc_array(k, 1);
         if (c) { memcpy(c, rel, k); p->files[p->n++] = c; }
+        else sx_log("write %s: out of memory, file not listed in the manifest", rel, 0);
+    } else {
+        sx_log("write %s: more than %lu files in one pack, file not listed in the manifest", rel, SX_MAX_FILES);
     }
     return V3X_SCRIPT_OK;
 }
 
-static int sx_end_pack(const char *pack)
+static __attribute__((noinline)) int sx_end_pack(const char *pack)
 {
+    HMODULE who = sx_caller(__builtin_return_address(0));
     if (!sx_valid_pack(pack)) return V3X_SCRIPT_EARG;
     sx_pack_t *p = sx_find(pack);
     if (!p || !p->active) return V3X_SCRIPT_ESTATE;
+    int orc = sx_owner_ok(p, who, "end_pack");
+    if (orc) return orc;
     char buf[SX_MAX_FILES * 4 + 64], man[MAX_PATH];
     size_t k = 0;
     char *big = NULL;
-    size_t need = 1;
+    size_t need = 1 + strlen(SX_OWNER_TAG) + strlen(p->owner_name) + 1;
     for (int i = 0; i < p->n; i++) need += strlen(p->files[i]) + 1;
-    char *out = need <= sizeof buf ? buf : (big = (char *)malloc(need));
+    char *out = need <= sizeof buf ? buf : (big = (char *)v3x_alloc_array(need, 1));
     if (!out) return V3X_SCRIPT_EIO;
+    if (p->owner_name[0]) {   /* first line: the owner (begin_pack of a later session checks it) */
+        size_t l = strlen(SX_OWNER_TAG), o = strlen(p->owner_name);
+        memcpy(out, SX_OWNER_TAG, l);
+        memcpy(out + l, p->owner_name, o);
+        k = l + o;
+        out[k++] = '\n';
+    }
     for (int i = 0; i < p->n; i++) { size_t l = strlen(p->files[i]); memcpy(out + k, p->files[i], l); k += l; out[k++] = '\n'; }
     int ok = sx_path(man, sizeof man, pack, SX_MANIFEST) && sx_write_raw(man, NULL, 0, out, k);
     free(big);

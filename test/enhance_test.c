@@ -9,9 +9,9 @@
  *   per save, with the name), lean_debug redirects (all to the shadow byte, runtime mirror), and
  *   that the withdrawn fast_speed5 key installs nothing.
  * Build (from v3x/, see README for TEMP/ZIG cache variables):
- *   python -m ziglang cc -target x86_64-windows-gnu -O2 -Iinclude -o D:/v3x_tmp/enhance/enhance_test.exe test/enhance_test.c
+ *   python -m ziglang cc -target x86_64-windows-gnu -O2 -Iinclude -Isdk -o $V3X_TMP/enhance/enhance_test.exe test/enhance_test.c
  * Run:
- *   D:/v3x_tmp/enhance/enhance_test.exe D:/v3x_tmp/enhance/ini [../binaries/victoria3.exe]
+ *   $V3X_TMP/enhance/enhance_test.exe $V3X_TMP/enhance/ini [../binaries/victoria3.exe]
  *   (first argument: an existing scratch directory for enhance.ini) */
 #include "../plugins/enhance/enhance.c"
 #include <stdarg.h>
@@ -359,6 +359,28 @@ static void part_b(const char *exe)
     SaveName nm3 = {NULL, 0};
     g_nev = 0; hk_save_state(1, &nm3, 3, 0);
     CHECK(g_nev == 2 && !strcmp(g_ev_save[0], "(null)"), "no name -> V3X_SaveBegin.name == NULL");
+    /* N7: the engine struct and the characters are read fault-proof and validated */
+    uint8_t *page = (uint8_t *)VirtualAlloc(NULL, 8192, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    DWORD oldp;
+    VirtualProtect(page + 4096, 4096, PAGE_NOACCESS, &oldp);
+    memcpy(page + 4096 - 4, "save", 4);
+    SaveName bad1 = {(const char *)(page + 4096 - 4), 12};          /* runs into a no-access page */
+    SaveName bad2 = {(const char *)(uintptr_t)0x10, 4};             /* garbage pointer */
+    SaveName bad3 = {"autosave", -5};
+    SaveName bad4 = {"auto\nsave", 9};                            /* control character inside */
+    SaveName bad5 = {"x", 100000};
+    const SaveName *bads[] = {&bad1, &bad2, &bad3, &bad4, &bad5, (const SaveName *)(page + 4096), (const SaveName *)(uintptr_t)8};
+    int all_null = 1;
+    for (size_t i = 0; i < sizeof bads / sizeof bads[0]; i++) {
+        g_nev = 0;
+        rr = hk_save_state(1, bads[i], 3, 0);
+        if (g_nev != 2 || strcmp(g_ev_save[0], "(null)") || rr != 0x1234) { all_null = 0; printf("  bad name %d -> '%s'\n", (int)i, g_ev_save[0]); }
+    }
+    CHECK(all_null, "unreadable / garbage / overlong / control-char save names (and an unreadable SaveName struct) -> name NULL, no fault, save passes through");
+    SaveName edge = {(const char *)(page + 4096 - 4), 4};
+    g_nev = 0; hk_save_state(1, &edge, 3, 0);
+    CHECK(g_nev == 2 && !strcmp(g_ev_save[0], "save"), "a name that ends exactly at a page boundary is read ('%s')", g_nev ? g_ev_save[0] : "-");
+    VirtualFree(page, 0, MEM_RELEASE);
     /* API v2 loader: no events, save still passes through */
     V3X_API a2 = a; a2.api_version = 2; api = &a2;
     g_nev = 0; rr = hk_save_state(1, &nm, 3, 0); api = &a;

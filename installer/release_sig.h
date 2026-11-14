@@ -152,7 +152,7 @@ static V3X_SIG_UNUSED_ int v3x_sig_parse(const char *t, size_t n, char key_id[17
     if (n != need || memcmp(t, pre, pn) || t[pn + 16] != ' ') return 0;
     for (size_t i = 0; i < 16; i++) {
         char c = t[pn + i];
-        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return 0;
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) { key_id[0] = 0; return 0; }   /* never half-filled */
         key_id[i] = c;
     }
     key_id[16] = 0;

@@ -4,17 +4,21 @@
  *   -DCOMPAT_V=2  test/compat_v2.h   + register_command, print, run_on_main, exec_command
  *   -DCOMPAT_V=3  test/compat_v3.h   + exec_capture, on_event, emit_event
  *   -DCOMPAT_V=4  test/compat_v4.h   + hook_safe, main_thread_id, game_build_id, enum_commands, manifest, V3X_HAS
- *   -DCOMPAT_V=5  include/v3x.h      + log_at, log_level, loader_version, build_matches (V3X_HAS-guarded:
+ *   -DCOMPAT_V=5  test/compat_v5.h   + log_at, log_level, loader_version, build_matches (V3X_HAS-guarded:
  *                                       on a loader without v5 it degrades to api->log instead of failing)
+ *   -DCOMPAT_V=6  include/v3x.h      + off_frame, off_event, unregister_command, wide/UTF-8 dirs, manifest
+ *                                       capabilities (V3X_HAS-guarded: on an older loader the v6 part is skipped)
  * Output name: compat_v<N>.dll. Results are exported data the host reads with GetProcAddress:
  *   compat_result  "ok" or "FAIL <first failed expression>"
  *   compat_frames / compat_cmds / compat_events / compat_main   callback counters
  *   compat_degraded  (v5) 1 = ran on a loader without API v5
- *   compat_probe(api)  (v5) 1 if V3X_HAS sees log_at in this table and the v5 calls work, 0 if absent */
+ *   compat_probe(api)  (v5) 1 if V3X_HAS sees log_at in this table and the v5 calls work, 0 if absent
+ *   compat_v6_ok       (v6) 1 = the v6 calls worked, 0 = ran on a loader without API v6 */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <stdio.h>
 #include <string.h>
+#include <wchar.h>
 
 #if COMPAT_V == 1
 #include "compat_v1.h"
@@ -25,9 +29,11 @@
 #elif COMPAT_V == 4
 #include "compat_v4.h"
 #elif COMPAT_V == 5
+#include "compat_v5.h"
+#elif COMPAT_V == 6
 #include "../include/v3x.h"
 #else
-#error "build with -DCOMPAT_V=1..5"
+#error "build with -DCOMPAT_V=1..6"
 #endif
 
 #define STR2_(x) #x
@@ -37,7 +43,10 @@
 V3X_EXPORT volatile long compat_frames, compat_cmds, compat_events, compat_main, compat_degraded;
 V3X_EXPORT char compat_result[200];
 V3X_EXPORT const char *v3x_plugin_name = NAME;
-#if COMPAT_V >= 4
+#if COMPAT_V >= 6
+V3X_PLUGIN_MANIFEST_CAPS(NAME, "1.0." STR_(COMPAT_V), "v3x", "compat test plugin", "*", 0u, 0u, "hook patch exec");
+V3X_EXPORT volatile long compat_v6_ok;
+#elif COMPAT_V >= 4
 V3X_PLUGIN_MANIFEST(NAME, "1.0." STR_(COMPAT_V), "v3x", "compat test plugin", "*");
 #endif
 
@@ -135,6 +144,20 @@ V3X_EXPORT int v3x_plugin_load(const V3X_API *api)
 #if COMPAT_V >= 5
     compat_degraded = !compat_probe(api);
     if (!compat_degraded) REQ(api->api_version >= 5);
+#endif
+#if COMPAT_V >= 6
+    if (V3X_HAS(api, off_frame) && V3X_HAS(api, v3x_dir_utf8)) {
+        static int dummy;
+        REQ(api->off_frame(on_frame, &dummy) == V3X_ENOTFOUND);
+        REQ(api->on_frame(on_frame, &dummy) == 0 && api->off_frame(on_frame, &dummy) == 0);
+        REQ(api->off_event("compat_ping", on_ev, &dummy) == V3X_ENOTFOUND);
+        REQ(api->register_command("compat_v6_tmp", "x", on_cmd, NULL) == 0 && api->unregister_command("compat_v6_tmp") == 0);
+        REQ(api->unregister_command("help") == V3X_EPERM);
+        REQ(api->v3x_dir_w() && wcsstr(api->v3x_dir_w(), L"v3x") && api->v3x_dir_utf8() && strstr(api->v3x_dir_utf8(), "v3x"));
+        REQ(api->game_dir_w() && api->game_dir_utf8() && api->game_dir_utf8()[0]);
+        REQ(api->unhook(NULL) == V3X_EARG);
+        compat_v6_ok = 1;
+    }
 #endif
     return 0;
 }

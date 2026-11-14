@@ -1,8 +1,8 @@
 /* Offline test of plugins/map_cache (no game needed).
- *   export TEMP=D:/v3x_tmp/mapmode TMP=D:/v3x_tmp/mapmode ZIG_GLOBAL_CACHE_DIR=D:/v3x_tmp/mapmode/zcache ZIG_LOCAL_CACHE_DIR=D:/v3x_tmp/mapmode/zcache
- *   python -m ziglang cc -target x86_64-windows-gnu -O2 -DMC_TEST -Iinclude -o D:/v3x_tmp/mapmode/mct.exe test/map_cache_test.c
- *   D:/v3x_tmp/mapmode/mct.exe                          -> ALL OK (writes only under D:/v3x_tmp/mapmode/t/)
- *   D:/v3x_tmp/mapmode/mct.exe ../binaries/victoria3.exe   also maps the real exe (no code runs) and resolves the
+ *   (normally run by test/run_all.sh; scratch root = $V3X_TMP, else %TEMP%, see test/test_tmp.h)
+ *   python -m ziglang cc -target x86_64-windows-gnu -O2 -DMC_TEST -Iinclude -o $V3X_TMP/mct.exe test/map_cache_test.c
+ *   $V3X_TMP/mct.exe                          -> ALL OK (writes only under $V3X_TMP/mapmode/t/)
+ *   $V3X_TMP/mct.exe ../binaries/victoria3.exe   also maps the real exe (no code runs) and resolves the
  *                                                          3 anchors with the plugin's own resolve_all() + fail-closed check
  * Covers: config parse + example ini, path hash, MSVC string reader, the pin table (add/touch/replace/LRU budget),
  * big-reserve attribution, summary, and the detours end to end against a fake engine that has the same weak
@@ -11,6 +11,7 @@
 #include "../plugins/map_cache/map_cache.c"
 #include <stdio.h>
 #include <stdarg.h>
+#include "test_tmp.h"
 
 static int fails;
 #define CHECK(c) do { if (!(c)) { printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #c); fails++; } } while (0)
@@ -20,7 +21,8 @@ static void x_log(const char *tag, const char *fmt, ...)
 { va_list ap; va_start(ap, fmt); printf("[%s] ", tag); vprintf(fmt, ap); putchar('\n'); va_end(ap); }
 static int x_print(const char *fmt, ...)
 { va_list ap; va_start(ap, fmt); int n = vprintf(fmt, ap); putchar('\n'); va_end(ap); return n; }
-static const char *t_dir(void) { return "D:/v3x_tmp/mapmode/t/"; }
+static char g_tdir[MAX_PATH];   /* <scratch>/mapmode/t/, set in main */
+static const char *t_dir(void) { return g_tdir; }
 static int t_on_frame(v3x_frame_fn fn, void *u) { (void)fn; (void)u; return 0; }
 static int t_run_on_main(v3x_frame_fn fn, void *u) { fn(u); return 0; }
 static uintptr_t t_base(void) { return 0x10000; }
@@ -173,7 +175,6 @@ static void core_tests(void)
 
 static void plugin_logic(void)
 {
-    CreateDirectoryA("D:/v3x_tmp/mapmode/t", NULL);
     /* measure: every re-request after the last user dropped the texture reads the file again */
     setup("mode=measure");
     o_gol = fake_gol;
@@ -223,7 +224,7 @@ static void plugin_logic(void)
     CHECK(g_st.npins == 0 && nc->destroyed);
     CHECK(g_owner_calls > 0);
     cmd_mapcache("status", NULL);
-    FILE *f = fopen("D:/v3x_tmp/mapmode/t/map_cache_report.txt", "rb");
+    FILE *f = fopen(g_report_path, "rb");
     CHECK(f != NULL); if (f) fclose(f);
 
     /* measure never pins even with repeats */
@@ -327,6 +328,7 @@ static int real_exe(const char *path)
 
 int main(int argc, char **argv)
 {
+    test_tmp_dir(g_tdir, sizeof g_tdir, "mapmode/t");
     core_tests();
     plugin_logic();
     if (argc > 1) fails += real_exe(argv[1]);

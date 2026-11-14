@@ -33,7 +33,7 @@ V3X_PLUGIN_MANIFEST("doctor", "0.5.0", "v3x", "health check: doctor | doctor fix
 
 static const V3X_API *api;
 
-/* L10 (docs/security-audit.md): log lines carry mod / file / engine text; control characters,
+/* L10 (the security review): log lines carry mod / file / engine text; control characters,
  * C1 controls and bidi overrides are replaced (v3x_sanitize_line) so a crafted name cannot forge
  * v3x.log lines (parsed by doctor and the installer). */
 static void slog(const char *fmt, ...) V3X_PRINTF(1, 2);

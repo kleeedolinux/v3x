@@ -41,7 +41,7 @@
  *                       its size + sha256. Changes nothing. Exit 0 = verified, 8 = not verified.
  * Language: the GUI is English or Brazilian Portuguese (GetUserDefaultUILanguage; env V3X_LANG=en|pt
  *   overrides). --silent / --status output stays English so scripts and tests can parse it.
- * Trust (docs/security-audit.md H2/L3/L4): every path read from install_manifest.txt or the payload
+ * Trust (the security review H2/L3/L4): every path read from install_manifest.txt or the payload
  *   index must be a plain relative path (sdk/v3x_safe.h v3x_path_rel_ok: no '..', ':', leading
  *   separator, trailing dot/space, device names); a backup line may only name
  *   v3x/backup/version.dll or v3x/backup/version.<1-99>.dll; nothing is written or deleted through a
@@ -72,6 +72,7 @@
 #include "v3x_safe.h"          /* sdk/: V3xStr bounded builder, v3x_path_rel_ok */
 #define V3X_RELEASE_SIG_IMPL   /* this unit compiles Monocypher (Ed25519) */
 #include "release_sig.h"
+#include "setup_parse.h"       /* payload index, meta.txt, install manifest and compat.json parsers (fuzzed) */
 
 enum { RC_OK = 0, RC_ERR = 1, RC_UNSUPPORTED = 2, RC_RUNNING = 3, RC_NOGAME = 4, RC_NOTINST = 5,
        RC_PAYLOAD = 6, RC_USAGE = 7, RC_UNVERIFIED = 8 };
@@ -137,7 +138,7 @@ static void say(const wchar_t *fmt, ...)
     line[n++] = L'\n'; line[n] = 0;
     if (g_out_n + (size_t)n + 1 > g_out_cap) {
         size_t cap = (g_out_cap + (size_t)n + 1) * 2;
-        wchar_t *p = realloc(g_out, cap * sizeof(wchar_t));
+        wchar_t *p = (wchar_t *)v3x_realloc_array(g_out, cap, sizeof(wchar_t));   /* overflow-checked */
         if (!p) return;
         g_out = p; g_out_cap = cap;
     }
@@ -181,13 +182,6 @@ static int sha256(const void *data, size_t n, uint8_t out[32])
     return ok;
 }
 
-static void hex32(const uint8_t h[32], char out[65])
-{
-    static const char d[] = "0123456789abcdef";
-    for (int i = 0; i < 32; i++) { out[2 * i] = d[h[i] >> 4]; out[2 * i + 1] = d[h[i] & 15]; }
-    out[64] = 0;
-}
-
 static int read_all(const wchar_t *path, uint8_t **buf, size_t *len)
 {
     *buf = NULL; *len = 0;
@@ -196,7 +190,7 @@ static int read_all(const wchar_t *path, uint8_t **buf, size_t *len)
     if (f == INVALID_HANDLE_VALUE) return 0;
     LARGE_INTEGER sz;
     if (!GetFileSizeEx(f, &sz) || sz.QuadPart > (1LL << 30)) { CloseHandle(f); return 0; }
-    uint8_t *b = malloc((size_t)sz.QuadPart + 1);
+    uint8_t *b = (uint8_t *)v3x_alloc_array((size_t)sz.QuadPart + 1, 1);
     if (!b) { CloseHandle(f); return 0; }
     size_t got = 0;
     while (got < (size_t)sz.QuadPart) {
@@ -234,6 +228,42 @@ static int hash_file(const wchar_t *path, char hex[65])
     if (!ok) return 0;
     hex32(h, hex);
     return 1;
+}
+
+/* Moves the backup bp to vp only if its SHA-256 is want_hex (audit N14): the file is opened denying
+ * writers (share read + delete), hashed through that handle and renamed while the handle is held.
+ * 1 restored, -2 hash differs / no recorded hash (nothing moved), 0 error. */
+static int restore_backup(const wchar_t *bp, const wchar_t *vp, const char *want_hex)
+{
+    if (!want_hex || strlen(want_hex) != 64) return -2;
+    HANDLE f = CreateFileW(bp, GENERIC_READ | DELETE, FILE_SHARE_READ | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
+                           FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+    if (f == INVALID_HANDLE_VALUE) return 0;
+    BY_HANDLE_FILE_INFORMATION fi;
+    LARGE_INTEGER sz;
+    if (!GetFileInformationByHandle(f, &fi) || (fi.dwFileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY)) ||
+        !GetFileSizeEx(f, &sz) || sz.QuadPart > (1LL << 30)) {
+        CloseHandle(f);
+        return 0;
+    }
+    uint8_t *b = (uint8_t *)v3x_alloc_array((size_t)sz.QuadPart + 1, 1);
+    if (!b) { CloseHandle(f); return 0; }
+    size_t got = 0;
+    while (got < (size_t)sz.QuadPart) {
+        DWORD r = 0;
+        if (!ReadFile(f, b + got, (DWORD)min((size_t)sz.QuadPart - got, (size_t)1 << 24), &r, NULL) || !r) break;
+        got += r;
+    }
+    uint8_t h[32];
+    char hex[65];
+    int ok = got == (size_t)sz.QuadPart && sha256(b, got, h);
+    free(b);
+    if (!ok) { CloseHandle(f); return 0; }
+    hex32(h, hex);
+    if (_stricmp(hex, want_hex)) { CloseHandle(f); return -2; }
+    int moved = MoveFileExW(bp, vp, MOVEFILE_WRITE_THROUGH) != 0;
+    CloseHandle(f);
+    return moved ? 1 : 0;
 }
 
 static void mkdirs_for(const wchar_t *file)
@@ -288,24 +318,6 @@ static int is_reparse(const wchar_t *p)
     return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_REPARSE_POINT);
 }
 
-/* manifest / payload path check (H2): sdk/v3x_safe.h rules, plus '/' as the only separator */
-static int rel_ok(const char *rel)
-{
-    return rel && !strchr(rel, '\\') && v3x_path_rel_ok(rel) == V3X_R_OK;
-}
-
-/* v3x/backup/version.dll or v3x/backup/version.<1..99>.dll, nothing else */
-static int backup_rel_ok(const char *rel)
-{
-    if (!rel || strncmp(rel, "v3x/backup/version.", 19)) return 0;
-    const char *t = rel + 19;
-    if (!strcmp(t, "dll")) return 1;
-    if (t[0] < '1' || t[0] > '9') return 0;
-    size_t k = 1;
-    if (t[1] >= '0' && t[1] <= '9') k = 2;
-    return !strcmp(t + k, ".dll");
-}
-
 /* binaries\<rel> for a checked rel. 0 (out = "") when rel is not a plain relative path, the
  * result does not fit, or any existing component below bin_dir (including the file) is a reparse
  * point, so nothing is ever written or deleted through a junction or symlink. */
@@ -332,26 +344,12 @@ static int rel_to_path(const wchar_t *bin_dir, const char *rel, wchar_t *out)
     return 1;
 }
 
-static void trim(char *s)
-{
-    size_t n = strlen(s);
-    while (n && (s[n - 1] == '\r' || s[n - 1] == '\n' || s[n - 1] == ' ' || s[n - 1] == '\t')) s[--n] = 0;
-    size_t i = 0;
-    while (s[i] == ' ' || s[i] == '\t' || (unsigned char)s[i] == 0xef || (unsigned char)s[i] == 0xbb ||
-           (unsigned char)s[i] == 0xbf) i++;
-    if (i) memmove(s, s + i, n - i + 1);
-}
-
 /* ------------------------------------------------------------------ payload */
-
-typedef struct { char kind[8]; uint64_t off, size; char sha[65]; char rel[260]; const uint8_t *data; } Entry;
 
 static uint8_t *g_self; static size_t g_self_n;
 static Entry *g_ent; static int g_nent;
 static char g_version[64] = "?";
-typedef struct { char id[40]; char branch[64]; } Build;
 static Build g_builds[16]; static int g_nbuilds;
-typedef struct { char name[64]; int enabled; } Prof;
 static Prof g_prof[64]; static int g_nprof;
 
 static int load_payload(void)
@@ -359,62 +357,11 @@ static int load_payload(void)
     wchar_t self[MAX_PATH * 2];
     GetModuleFileNameW(NULL, self, MAX_PATH * 2);
     if (!read_all(self, &g_self, &g_self_n) || g_self_n < 64) return 0;
-    const uint8_t *ft = g_self + g_self_n - 64;
-    if (memcmp(ft, "V3XPAYL1", 8) || memcmp(ft + 56, "V3XEND\0\0", 8)) return 0;
-    uint64_t ioff; uint32_t isz, cnt;
-    memcpy(&ioff, ft + 8, 8); memcpy(&isz, ft + 16, 4); memcpy(&cnt, ft + 20, 4);
-    const uint64_t body = (uint64_t)g_self_n - 64;   /* bytes before the footer */
-    if (ioff > body || isz > body - ioff || cnt > 4096) return 0;   /* no wrap (L3) */
-    uint8_t h[32];
-    if (!sha256(g_self + ioff, isz, h) || memcmp(h, ft + 24, 32)) return 0;
-    char *idx = malloc((size_t)isz + 1);
-    if (!idx) return 0;
-    memcpy(idx, g_self + ioff, isz); idx[isz] = 0;
-    g_ent = calloc(cnt ? cnt : 1, sizeof(Entry));
-    if (!g_ent) { free(idx); return 0; }
-    g_nent = 0;
-    for (char *line = strtok(idx, "\n"); line; line = strtok(NULL, "\n")) {
-        if (g_nent >= (int)cnt) { free(idx); return 0; }
-        Entry *e = &g_ent[g_nent];
-        unsigned long long off, size;
-        if (sscanf(line, "%7s %llu %llu %64s %259s", e->kind, &off, &size, e->sha, e->rel) != 5) {
-            free(idx); return 0;
-        }
-        e->off = off; e->size = size;
-        if (off > ioff || size > ioff - off) { free(idx); return 0; }   /* inside the file area, no wrap */
-        if (strcmp(e->kind, "bin") && strcmp(e->kind, "ini") && strcmp(e->kind, "v3xini") && strcmp(e->kind, "meta")) {
-            free(idx); return 0;
-        }
-        if (!rel_ok(e->rel)) { free(idx); return 0; }   /* the payload names only plain relative paths */
-        e->data = g_self + off;
-        char hx[65];
-        if (!sha256(e->data, (size_t)size, h)) { free(idx); return 0; }
-        hex32(h, hx);
-        if (strcmp(hx, e->sha)) { free(idx); return 0; }
-        g_nent++;
-    }
-    free(idx);
-    if (g_nent != (int)cnt) return 0;
+    if (!sp_payload_parse(g_self, g_self_n, sha256, &g_ent, &g_nent)) return 0;   /* setup_parse.h */
     for (int i = 0; i < g_nent; i++) {
         if (strcmp(g_ent[i].kind, "meta")) continue;
-        char *m = malloc((size_t)g_ent[i].size + 1);
-        if (!m) return 0;
-        memcpy(m, g_ent[i].data, g_ent[i].size); m[g_ent[i].size] = 0;
-        for (char *line = strtok(m, "\n"); line; line = strtok(NULL, "\n")) {
-            char a[64], b[64], c[64];
-            int k = sscanf(line, "%63s %63s %63s", a, b, c);
-            if (k >= 2 && !strcmp(a, "version")) snprintf(g_version, sizeof g_version, "%s", b);
-            else if (k >= 2 && !strcmp(a, "build") && g_nbuilds < 16) {
-                snprintf(g_builds[g_nbuilds].id, 40, "%s", b);
-                snprintf(g_builds[g_nbuilds].branch, 64, "%s", k >= 3 ? c : "");
-                g_nbuilds++;
-            } else if (k >= 3 && !strcmp(a, "plugin") && g_nprof < 64) {
-                snprintf(g_prof[g_nprof].name, 64, "%s", b);
-                g_prof[g_nprof].enabled = atoi(c);
-                g_nprof++;
-            }
-        }
-        free(m);
+        if (!sp_meta_parse(g_ent[i].data, (size_t)g_ent[i].size, g_version, sizeof g_version, g_builds, &g_nbuilds, g_prof, &g_nprof))
+            return 0;
     }
     return 1;
 }
@@ -644,67 +591,13 @@ out:
 
 /* ------------------------------------------------------------------ manifest */
 
-typedef struct { char kind[8]; char sha[65]; char rel[260]; } MFile;
-typedef struct {
-    int valid;
-    char version[64];
-    char backup_rel[260], backup_sha[65];
-    MFile *f; int n, cap;
-    int rejected;   /* lines ignored because their kind, hash or path is not acceptable */
-} Manifest;
-
-static int g_oom;   /* an allocation failed: the operation reports an error instead of half-working */
-
-static int hex64_ok(const char *h)
-{
-    if (!h || strlen(h) != 64) return 0;
-    for (int i = 0; i < 64; i++)
-        if (!((h[i] >= '0' && h[i] <= '9') || (h[i] >= 'a' && h[i] <= 'f'))) return 0;
-    return 1;
-}
-
-static void mf_add(Manifest *m, const char *kind, const char *sha, const char *rel)
-{
-    for (int i = 0; i < m->n; i++)
-        if (!_stricmp(m->f[i].rel, rel)) { snprintf(m->f[i].kind, 8, "%s", kind); snprintf(m->f[i].sha, 65, "%s", sha); return; }
-    if (m->n == m->cap) {
-        int nc = m->cap ? m->cap * 2 : 32;
-        MFile *nf = nc > 0 && nc < (1 << 20) ? realloc(m->f, (size_t)nc * sizeof(MFile)) : NULL;
-        if (!nf) { g_oom = 1; return; }
-        m->f = nf; m->cap = nc;
-    }
-    MFile *e = &m->f[m->n++];
-    snprintf(e->kind, 8, "%s", kind); snprintf(e->sha, 65, "%s", sha); snprintf(e->rel, 260, "%s", rel);
-}
-
-static MFile *mf_find(Manifest *m, const char *rel)
-{
-    for (int i = 0; i < m->n; i++) if (!_stricmp(m->f[i].rel, rel)) return &m->f[i];
-    return NULL;
-}
-
 static void mf_load(const wchar_t *bin, Manifest *m)
 {
     memset(m, 0, sizeof *m);
     wchar_t p[MAX_PATH * 2]; uint8_t *b; size_t n;
     join(p, bin, MANIFEST_REL);
     if (!read_all(p, &b, &n)) return;
-    for (char *line = strtok((char *)b, "\n"); line; line = strtok(NULL, "\n")) {
-        trim(line);
-        char a[16], x[260], y[260], z[260];
-        int k = sscanf(line, "%15s %259s %259s %259s", a, x, y, z);
-        if (k >= 2 && !strcmp(a, "v3x_manifest")) m->valid = 1;
-        else if (k >= 2 && !strcmp(a, "version")) snprintf(m->version, 64, "%s", x);
-        else if (k >= 3 && !strcmp(a, "backup")) {
-            /* H2: only our own backup names; anything else would move an arbitrary file to version.dll */
-            if (hex64_ok(x) && backup_rel_ok(y)) { snprintf(m->backup_sha, 65, "%s", x); snprintf(m->backup_rel, 260, "%s", y); }
-            else m->rejected++;
-        } else if (k >= 4 && !strcmp(a, "file")) {
-            /* H2: kind, hash and path checked; a line that fails is ignored (never followed) */
-            if ((!strcmp(x, "bin") || !strcmp(x, "config")) && hex64_ok(y) && rel_ok(z)) mf_add(m, x, y, z);
-            else m->rejected++;
-        }
-    }
+    mf_parse((char *)b, m);   /* setup_parse.h; read_all NUL-terminates */
     free(b);
 }
 
@@ -1085,8 +978,21 @@ static int do_uninstall(State *s, int purge)
         if (!bok) { say(L"ERROR: backup path binaries\\%hs refused (a link below binaries)", s->mf.backup_rel); errors++; }
         else if (!file_exists(bp)) say(L"note: backup binaries\\%hs is missing, nothing to restore", s->mf.backup_rel);
         else if (file_exists(vp)) say(L"note: binaries\\version.dll exists (not V3X's), the backup stays in binaries\\%hs", s->mf.backup_rel);
-        else if (MoveFileExW(bp, vp, MOVEFILE_WRITE_THROUGH)) say(L"restored  binaries\\version.dll (the file that was there before V3X)");
-        else { say(L"ERROR: could not restore binaries\\version.dll from binaries\\%hs", s->mf.backup_rel); errors++; }
+        else {
+            /* N14: restore only the file that was backed up (backup_sha of the manifest). The backup is
+             * hashed through a handle that denies writers and is held across the move, so it cannot be
+             * swapped between the check and the rename. */
+            int rr = restore_backup(bp, vp, s->mf.backup_sha);
+            if (rr == 1) say(L"restored  binaries\\version.dll (the file that was there before V3X)");
+            else if (rr == -2) {
+                say(L"kept      binaries\\%hs: it changed since install (SHA-256 differs from the manifest), not restored as binaries\\version.dll",
+                    s->mf.backup_rel);
+                kept++;
+            } else {
+                say(L"ERROR: could not restore binaries\\version.dll from binaries\\%hs", s->mf.backup_rel);
+                errors++;
+            }
+        }
     }
     if (errors) { say(L"%d error(s); the manifest is kept so you can retry.", errors); return RC_ERR; }
     join(p, s->bin, MANIFEST_REL); DeleteFileW(p);
@@ -1639,58 +1545,7 @@ static int gui(const wchar_t *game_arg)
 }
 
 /* ------------------------------------------------------------------ --verify-release (H1)
- * compat.json is written by installer/make_dist.py and signed by tools/sign_release.py, so its
- * layout is fixed: {"schema":1,"v3x_version":"..",...,"assets":[{"name":"..","size":N,"sha256":".."},..]}.
- * The scanner below reads only that shape (strings without escapes, objects without nesting) and
- * fails closed on anything else; it never reads past the buffer. */
-
-/* value of "key": "<string>" in p..e (first occurrence); 1 ok */
-static int cj_str(const char *p, const char *e, const char *key, char *out, size_t cap)
-{
-    size_t kn = strlen(key);
-    for (const char *q = p; q + kn + 2 < e; q++) {
-        if (*q != '"' || memcmp(q + 1, key, kn) || q[kn + 1] != '"') continue;
-        const char *v = q + kn + 2;
-        while (v < e && (*v == ' ' || *v == '\t' || *v == '\r' || *v == '\n')) v++;
-        if (v >= e || *v != ':') return 0;
-        v++;
-        while (v < e && (*v == ' ' || *v == '\t' || *v == '\r' || *v == '\n')) v++;
-        if (v >= e || *v != '"') return 0;
-        v++;
-        size_t k = 0;
-        while (v < e && *v != '"') {
-            if (*v == '\\' || (unsigned char)*v < 0x20 || k + 1 >= cap) return 0;
-            out[k++] = *v++;
-        }
-        if (v >= e) return 0;
-        out[k] = 0;
-        return 1;
-    }
-    return 0;
-}
-
-static int cj_int(const char *p, const char *e, const char *key, unsigned long long *out)
-{
-    size_t kn = strlen(key);
-    for (const char *q = p; q + kn + 2 < e; q++) {
-        if (*q != '"' || memcmp(q + 1, key, kn) || q[kn + 1] != '"') continue;
-        const char *v = q + kn + 2;
-        while (v < e && (*v == ' ' || *v == '\t' || *v == '\r' || *v == '\n')) v++;
-        if (v >= e || *v != ':') return 0;
-        v++;
-        while (v < e && (*v == ' ' || *v == '\t' || *v == '\r' || *v == '\n')) v++;
-        unsigned long long x = 0;
-        int digits = 0;
-        while (v < e && *v >= '0' && *v <= '9') {
-            if (++digits > 15) return 0;
-            x = x * 10 + (unsigned)(*v++ - '0');
-        }
-        if (!digits) return 0;
-        *out = x;
-        return 1;
-    }
-    return 0;
-}
+ * compat.json scanner: cj_str / cj_int / cj_assets / cj_next_asset in setup_parse.h. */
 
 static int verify_release(const wchar_t *dir)
 {
@@ -1715,17 +1570,13 @@ static int verify_release(const wchar_t *dir)
         say(L"verify-release: FAILED compat.json is for V3X %hs, this setup is %hs", cj_str(p, e, "v3x_version", ver, sizeof ver) ? ver : "?", g_version);
         goto out;
     }
-    const char *as = NULL;
-    for (const char *q = p; q + 8 < e; q++)
-        if (!memcmp(q, "\"assets\"", 8)) { as = q + 8; break; }
-    while (as && as < e && *as != '[') { if (*as != ' ' && *as != ':' && *as != '\r' && *as != '\n' && *as != '\t') as = NULL; else as++; }
-    if (!as || as >= e) { say(L"verify-release: FAILED compat.json has no assets list"); goto out; }
+    const char *as = cj_assets(p, e);
+    if (!as) { say(L"verify-release: FAILED compat.json has no assets list"); goto out; }
     int checked = 0, self_ok = 0, bad = 0;
-    for (const char *q = as + 1; q < e && *q != ']';) {
-        if (*q != '{') { q++; continue; }
-        const char *oe = q + 1;
-        while (oe < e && *oe != '}' && *oe != '{' && *oe != '[') oe++;
-        if (oe >= e || *oe != '}') { say(L"verify-release: FAILED malformed assets list"); goto out; }
+    for (const char *it = as + 1, *q, *oe;;) {
+        int nx = cj_next_asset(&it, e, &q, &oe);
+        if (nx == 0) break;
+        if (nx < 0) { say(L"verify-release: FAILED malformed assets list"); goto out; }
         char name[96], hex[80];
         unsigned long long size = 0;
         if (!cj_str(q, oe, "name", name, sizeof name) || !cj_str(q, oe, "sha256", hex, sizeof hex) || !hex64_ok(hex) ||
@@ -1751,7 +1602,6 @@ static int verify_release(const wchar_t *dir)
         } else if (is_setup) {
             say(L"verify-release: FAILED %hs is missing in %s", name, dir); bad++;
         }
-        q = oe + 1;
     }
     if (!self_ok && !bad) { say(L"verify-release: FAILED compat.json does not list V3X-Setup.exe"); bad++; }
     if (bad) goto out;

@@ -34,20 +34,36 @@ Anything that produces an x64 DLL exporting `v3x_plugin_load` with the C ABI and
 `V3X_API` struct from `include/v3x.h`. Rust with `#[no_mangle] extern "C"` and a `#[repr(C)]`
 copy of the struct works in principle; nothing but C is tested here.
 
+**How do I write a plugin that does not crash the game?**
+Start from `templates/plugin_template/` (it uses only the safe APIs and builds with `-Werror`) and
+follow [safe-coding.md](safe-coding.md): `V3xStr` for strings, `sdk/v3x_mem.h` for engine memory,
+`V3xSpan` for file bytes, checked arithmetic, atomics for shared state, `hook_safe` on fail-closed
+anchors, `v3x_path_join_checked` for paths from data, every result checked. The engine-specific
+rules (script scope, DllMain, patching) are in [safety.md](safety.md).
+
 **Why `hook_safe` instead of `hook`?**
 A raw detour must match the function's real prototype. The engine has no headers, and a detour
 with too few arguments corrupts the call (it crashed the game once). `hook_safe` forwards every
-argument and the return value whatever the prototype, and gives your callback all of them.
-Use raw `hook` when you replace a function and know its exact prototype.
+argument and the return value whatever the prototype, gives your callback all of them, restores
+every register the caller may rely on, and can be shared with other plugins. A raw `hook` is an
+unsafe escape hatch for replacing a function whose exact prototype you have proven
+([safe-coding.md](safe-coding.md#hooks) says what can go wrong and how to contain it).
 
 **Can two plugins hook the same function?**
-Not with inline hooks (MinHook allows one per target; the second gets `MH_ERROR_ALREADY_CREATED`).
-Coordinate through an event (`on_event`/`emit_event`), or a call-site redirect like tick_par.
+Yes, with `hook_safe`: subscribers share one thunk and run nested in load order (pre A, pre B,
+original, post B, post A), up to 8 per function. A raw `hook` is exclusive: on a function that
+already has a raw hook or `hook_safe` subscribers it returns `V3X_EHOOKBUSY` (100) and v3x.log
+names the holder. Check the result and fail closed; if you need a function another plugin holds
+with a raw hook, ask its owner to move to `hook_safe` or to emit an event.
 
 **On which thread does my code run?**
-`v3x_plugin_load`, `on_frame`, `run_on_main`: main thread. Console commands: the console input
-thread. Hook callbacks: whichever engine thread called the function. Event subscribers: the
-emitting thread. See the table in [api-reference.md](api-reference.md#thread-rules-at-a-glance).
+`v3x_plugin_load`, `on_frame`, `run_on_main`: main thread. Console commands: the thread that ran
+the command (the console input thread, or the devbridge pipe thread). Hook callbacks: whichever
+engine thread called the function. Event subscribers: the emitting thread. Share data between them
+only through atomics (`v3x_atomic_*`), and assert the main thread in code that touches game state
+(`V3X_ASSERT_MAIN(api)`). See the table in
+[api-reference.md](api-reference.md#thread-rules-at-a-glance) and
+[safe-coding.md](safe-coding.md#threads).
 
 **Can I run game script / effects from my plugin?**
 Only from inside a tick task, and only after `v3x_script_random_allowed()` returns 1 (the
@@ -55,9 +71,17 @@ script RNG needs a scope owned by the current thread). Not from `on_frame`, cons
 `save_begin` or your own threads. See [safety.md](safety.md#script-and-rng-scope).
 
 **How do I call an engine function?**
-Find it by anchor, cast to a function pointer with the right prototype, and call it on a thread
-and at a time where the engine itself calls it. Most engine functions assume locks and state
-(`GameStateAccess`, scopes) that only exist in specific contexts.
+Prefer not to: observe it with `hook_safe`, or use what the bundled plugins expose (events,
+`sdk/v3x_script.h`). Most engine functions assume locks and state (`GameStateAccess`, scopes)
+that only exist in specific contexts.
+
+> **Unsafe — when you really need it:** calling an engine function through a function pointer.
+> * What can go wrong: a wrong prototype corrupts the stack; the right prototype on the wrong
+>   thread or at the wrong time breaks engine invariants, often only minutes later or in the save.
+> * How to contain it: resolve the address with a fail-closed anchor plus a `check` callback,
+>   prove the prototype (`tools/re_simopt_argcheck.py`, the callers' argument setup), and call it
+>   only from a hook on a function the engine calls in the same context (same thread, same
+>   locks), never from a console command or your own thread.
 
 **How do I find a function?**
 [reverse-engineering.md](reverse-engineering.md): strings -> xrefs -> function -> profile ->

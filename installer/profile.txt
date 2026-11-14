@@ -30,7 +30,7 @@ asset_stream     0  forces the texture streamer on; opt-in (its own default is o
 lazy_mesh        0  faster 3D model loading needs mode=lazy in lazy_mesh.ini; opt-in
 sim_opt          0  simulation changes (throttle) are opt-in; single player only; back up saves first
 map_cache        0  default mode=measure (reports only); keep-alive needs mode=on in map_cache.ini
-mod_loader       0  default mode=measure (reports only); mode=on ran 1h44m in game 2026-11-13: 0 mismatches, 98,786 verified skips (docs/sessions/2026-11-13-evening.md:175)
+mod_loader       0  default mode=measure (reports only); mode=on ran 1h44m in game 2026-11-13: 0 mismatches, 98,786 verified skips
 par_load         0  default mode=measure (reports only)
 lazy_gfx         0  default mode=measure (reports only); not run in game
 fast_lookup      0  default mode=measure; caused crash5 (fixed); measure ran 1h44m in game 2026-11-13: 1.72 M calls, 0 mismatches (sessions/2026-11-13-evening.md:170)

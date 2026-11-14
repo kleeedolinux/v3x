@@ -23,6 +23,9 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#include "v3x_safe.h"   /* V3X_NN, V3X_MUST_USE_STRICT */
+
+V3X_NN_BEGIN
 
 /* 1 if protection p (low byte of MEMORY_BASIC_INFORMATION.Protect) allows reading */
 static int v3x_mem__prot_readable(DWORD prot)
@@ -62,7 +65,7 @@ static int v3x_mem_is_code(uintptr_t addr)
 
 /* Copies exactly n bytes from addr into out. Returns 1 on success, 0 if any byte is unreadable
  * (out is then unspecified). Never faults. */
-static int v3x_mem_read(uintptr_t addr, void *out, size_t n)
+static V3X_MUST_USE_STRICT int v3x_mem_read(uintptr_t addr, void *V3X_NN out, size_t n)
 {
     SIZE_T got = 0;
     if (!n) return 1;
@@ -70,17 +73,18 @@ static int v3x_mem_read(uintptr_t addr, void *out, size_t n)
     return ReadProcessMemory(GetCurrentProcess(), (const void *)addr, out, n, &got) && got == n;
 }
 
-static int v3x_mem_read_u64(uintptr_t addr, uint64_t *out) { return v3x_mem_read(addr, out, 8); }
-static int v3x_mem_read_u32(uintptr_t addr, uint32_t *out) { return v3x_mem_read(addr, out, 4); }
-static int v3x_mem_read_u8(uintptr_t addr, uint8_t *out) { return v3x_mem_read(addr, out, 1); }
-static int v3x_mem_read_ptr(uintptr_t addr, uintptr_t *out) { return v3x_mem_read(addr, out, sizeof *out); }
+static V3X_MUST_USE_STRICT int v3x_mem_read_u64(uintptr_t addr, uint64_t *V3X_NN out) { return v3x_mem_read(addr, out, 8); }
+static V3X_MUST_USE_STRICT int v3x_mem_read_u32(uintptr_t addr, uint32_t *V3X_NN out) { return v3x_mem_read(addr, out, 4); }
+static V3X_MUST_USE_STRICT int v3x_mem_read_u8(uintptr_t addr, uint8_t *V3X_NN out) { return v3x_mem_read(addr, out, 1); }
+static V3X_MUST_USE_STRICT int v3x_mem_read_ptr(uintptr_t addr, uintptr_t *V3X_NN out) { return v3x_mem_read(addr, out, sizeof *out); }
 
 /* Follows a pointer chain: p = base; for each offset: p = *(p + off). Returns the final value in
  * *out (1) or 0 if any step is unreadable or NULL. Example: [[gs+0x120]+0x1c00] =
  * v3x_mem_chain(gs, (const uint32_t[]){0x120, 0x1c00}, 2, &mgr). */
-static int v3x_mem_chain(uintptr_t base, const uint32_t *offsets, int n, uintptr_t *out)
+static V3X_MUST_USE_STRICT int v3x_mem_chain(uintptr_t base, const uint32_t *offsets, int n, uintptr_t *V3X_NN out)
 {
     uintptr_t p = base;
+    if (!out || n < 0 || (n && !offsets)) return 0;
     for (int i = 0; i < n; i++) {
         if (!p || !v3x_mem_read_ptr(p + offsets[i], &p)) return 0;
     }
@@ -92,7 +96,7 @@ static int v3x_mem_chain(uintptr_t base, const uint32_t *offsets, int n, uintptr
 /* Copies a NUL-terminated string of at most cap-1 chars into out (always terminated; cap >= 1).
  * Returns the length copied, or -1 if the first byte is unreadable. Stops at the end of the
  * readable range, so a string running into an unmapped page is cut, not a crash. */
-static int v3x_mem_read_cstr(uintptr_t addr, char *out, size_t cap)
+static int v3x_mem_read_cstr(uintptr_t addr, char *V3X_NN out, size_t cap)
 {
     if (!out || !cap) return -1;
     out[0] = 0;
@@ -112,5 +116,7 @@ static int v3x_mem_in_module(uintptr_t module_base, size_t module_size, uintptr_
 {
     return addr >= module_base && n <= module_size && addr - module_base <= module_size - n;
 }
+
+V3X_NN_END
 
 #endif

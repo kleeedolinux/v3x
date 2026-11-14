@@ -78,7 +78,7 @@ static CpCfg g_cfg;
 static DWORD g_main_tid;
 #define TAG "console_plus"
 
-/* L10 (docs/security-audit.md): log lines carry mod / file / engine text; control characters,
+/* L10 (the security review): log lines carry mod / file / engine text; control characters,
  * C1 controls and bidi overrides are replaced (v3x_sanitize_line) so a crafted name cannot forge
  * v3x.log lines (parsed by doctor and the installer). */
 static void slog(const char *fmt, ...) V3X_PRINTF(1, 2);

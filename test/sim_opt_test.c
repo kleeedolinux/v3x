@@ -5,7 +5,7 @@
  * the console report + CSV, diag_trades (anchors + fail-closed cases, per-run iteration stats, report,
  * CSV), diag_journal (anchors, per-type timing, type-name reads incl. invalid pointers, report, CSV),
  * and 6-argument pass-through through every detour (5th/6th args on the stack).
- * Build+run (from the repo root; T = scratch dir, e.g. D:/v3x_tmp/sim):
+ * Build+run (from the repo root; T = scratch dir, e.g. $V3X_TMP/sim):
  *   python -m ziglang cc -target x86_64-windows-gnu -O2 -Iinclude -o $T/sim_opt_test.exe test/sim_opt_test.c && $T/sim_opt_test.exe
  * Exit code 0 = ALL OK. */
 #include "../plugins/sim_opt/sim_opt.c"

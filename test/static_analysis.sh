@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Static analysis report (docs/security-audit.md action 14). NON-BLOCKING: always exits 0 unless
+# Static analysis report (the security review action 14). NON-BLOCKING: always exits 0 unless
 # STATIC_STRICT=1 (then exit 1 when a tool reports findings). Uses whatever is installed:
 #   clang-tidy   checks bugprone-*, cert-*, clang-analyzer-* (minus noisy style checks)
 #   cppcheck     --enable=warning,portability,performance

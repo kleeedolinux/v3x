@@ -12,6 +12,8 @@
  *       initialization, like a vanilla keyword.
  * (A) and (C) resolve every engine address from anchors and fail closed (feature off + a log line).
  * Console: `scriptext` lists the packs, the feature status and the registered keywords.
+ * Containment (sx_guard.h): packs and keywords have an owner module; keyword callbacks run under a fault
+ * guard; a plugin the core disables (V3X_EVENT_PLUGIN_DISABLED) loses its keywords and its packs.
  * Engine RE: docs/re/script.md. NOT verified in a running game (docs/scripting.md). */
 #include <stdarg.h>
 #include "v3x.h"
@@ -21,10 +23,6 @@
 
 V3X_EXPORT const char *v3x_plugin_name = "script_ext";
 V3X_PLUGIN_MANIFEST("script_ext", "0.2.0", "V3X", "ship script/loc/gui files, run script text, add native script keywords", "*");
-
-#define TAG "script_ext"
-static const V3X_API *api;
-static HMODULE g_self;
 
 #define TAG "script_ext"
 static const V3X_API *api;
@@ -43,6 +41,27 @@ static V3X_PRINTF(1, 2) void log_fwd(const char *fmt, ...)
     char b[512];
     va_list ap; va_start(ap, fmt); vsnprintf(b, sizeof b, fmt, ap); va_end(ap);
     api->log(TAG, "%s", b);
+}
+
+/* ------------------------------------------------------------------ containment: disabled plugins */
+
+/* V3X_EVENT_PLUGIN_DISABLED (core, the disabling thread): never call that module's keywords again, refuse
+ * its pack calls. Anyone can emit an event, so the module must be a loaded module other than ours. */
+static void on_plugin_disabled(const char *name, void *data, void *user)
+{
+    (void)name; (void)user;
+    const V3X_PluginDisabled *d = (const V3X_PluginDisabled *)data;
+    if (!d || d->struct_size < offsetof(V3X_PluginDisabled, module) + sizeof d->module) return;
+    HMODULE h = (HMODULE)d->module;
+    if (!h || h == g_self || sx_module_of((const void *)h) != h) return;
+    int added = sx_module_disable(h);
+    int kw = sx_kw_disable_module(h);
+    if (added || kw) {
+        char nm[128];
+        sx_module_name(h, nm, sizeof nm);
+        api->log(TAG, "plugin %s disabled by the core (%s): %d native keyword(s) switched off, its packs are read-only",
+                 nm[0] ? nm : "?", d->reason ? d->reason : "no reason given", kw);
+    }
 }
 
 /* ------------------------------------------------------------------ layer C: registration */
@@ -222,7 +241,8 @@ static void cmd_scriptext(const char *args, void *user)
     for (int i = 0; i < SX_MAX_PACKS; i++) {
         if (!sx_packs[i].name[0]) continue;
         any = 1;
-        api->print("  %s: %d file(s)%s", sx_packs[i].name, sx_packs[i].n, sx_packs[i].active ? " (end_pack not called)" : "");
+        api->print("  %s: %d file(s), owner %s%s", sx_packs[i].name, sx_packs[i].n, sx_packs[i].owner_name[0] ? sx_packs[i].owner_name : "?",
+                   sx_packs[i].active ? " (end_pack not called)" : "");
     }
     if (!any) api->print("  no pack written this session");
     ensure_engine();
@@ -233,10 +253,16 @@ static void cmd_scriptext(const char *args, void *user)
                    g_registered_n, sx_neff, sx_ntrg);
     else
         api->print("  native keywords: %s", sx_reg_off ? sx_reg_off_why : "no plugin registered any");
-    for (int i = 0; i < sx_neff; i++)
-        api->print("    effect  %-32s token %u%s", sx_eff[i].name, (unsigned)sx_eff[i].token, sx_eff[i].registered ? "" : " (not registered yet)");
-    for (int i = 0; i < sx_ntrg; i++)
-        api->print("    trigger %-32s token %u%s", sx_trg[i].name, (unsigned)sx_trg[i].token, sx_trg[i].registered ? "" : " (not registered yet)");
+    for (int pass = 0; pass < 2; pass++) {
+        const SxKw *tab = pass ? sx_trg : sx_eff;
+        int n = pass ? sx_ntrg : sx_neff;
+        for (int i = 0; i < n; i++) {
+            char own[128];
+            sx_module_name(tab[i].owner, own, sizeof own);
+            api->print("    %-7s %-32s token %u owner %s%s%s", pass ? "trigger" : "effect", tab[i].name, (unsigned)tab[i].token, own[0] ? own : "?",
+                       tab[i].registered ? "" : " (not registered yet)", tab[i].off ? (tab[i].faults ? " OFF (faulted)" : " OFF (plugin disabled)") : "");
+        }
+    }
 }
 
 BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, LPVOID r)
@@ -261,6 +287,12 @@ V3X_EXPORT int v3x_plugin_load(const V3X_API *a)
         api->register_command("sxrun", "sxrun <effect text>: run script effects once (root = player country), e.g. sxrun add_treasury = 1000", cmd_sxrun, NULL);
         api->register_command("sxtrigger", "sxtrigger <trigger text>: evaluate a script trigger once (root = player country)", cmd_sxtrigger, NULL);
     }
+    sx_guard_install();
+    if (!sx_guard_veh) api->log(TAG, "WARNING: AddVectoredExceptionHandler failed (error %lu): a faulting keyword callback is not contained",
+                                (unsigned long)GetLastError());
+    int erc = api->on_event(V3X_EVENT_PLUGIN_DISABLED, on_plugin_disabled, NULL);
+    if (erc != 0 && erc != V3X_EEXIST)
+        api->log(TAG, "WARNING: on_event(%s) failed (%d): keywords of a plugin the core disables are not switched off", V3X_EVENT_PLUGIN_DISABLED, erc);
     g_loaded = 1;   /* layer A resolves its anchors on first use (ensure_engine): ~0.5 s of scanning not paid by plugins that never run script */
     if (sx_neff + sx_ntrg > 0 && api->image_base()) arm_registration();
     api->log(TAG, "ready, content packs in %s", sx_root);

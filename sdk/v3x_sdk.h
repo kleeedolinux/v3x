@@ -19,7 +19,9 @@
 #ifndef V3X_SDK_H
 #define V3X_SDK_H
 
-#define V3X_SDK_VERSION 3   /* 2: v3x_util.h, testkit fills API v5; 3: v3x_safe.h, v3x_config_lock, V3X_PRINTF */
+#define V3X_SDK_VERSION 4   /* 2: v3x_util.h, testkit fills API v5; 3: v3x_safe.h, v3x_config_lock, V3X_PRINTF;
+                               4: bounded *_in scan decoders, W / CP_ACP paths, race-free open + atomic writes,
+                                  V3X_NN / V3X_MUST_USE, ini range getters, checked V3X_ARG */
 
 #include "v3x.h"
 #include "v3x_rtti.h"

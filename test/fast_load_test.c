@@ -1,8 +1,8 @@
 /* Offline test of plugins/fast_load (no game needed).
  *   M=third_party/minhook; python -m ziglang cc -target x86_64-windows-gnu -O2 -Iinclude -I$M/include \
- *     -o D:/v3x_tmp/load/flt.exe test/fast_load_test.c $M/src/buffer.c $M/src/hook.c $M/src/trampoline.c $M/src/hde/hde64.c
- *   D:/v3x_tmp/load/flt.exe            -> prints ALL OK  (run from v3x/: parses plugins/fast_load/fast_load.ini.example)
- *   D:/v3x_tmp/load/flt.exe <victoria3.exe>   also maps the real exe (no code runs) and resolves every
+ *     -o $V3X_TMP/flt.exe test/fast_load_test.c $M/src/buffer.c $M/src/hook.c $M/src/trampoline.c $M/src/hde/hde64.c
+ *   $V3X_TMP/flt.exe            -> prints ALL OK  (run from v3x/: parses plugins/fast_load/fast_load.ini.example)
+ *   $V3X_TMP/flt.exe <victoria3.exe>   also maps the real exe (no code runs) and resolves every
  *                                             ANCHORS[] entry + the mesh thunk with the plugin's own C code
  * Covers fl_core (config, pattern match, timeline, thread stats, string readers) and the
  * mesh_item entry-only stub: a byte-identical copy of the engine thunk (mov rax,[rcx]; jmp [rax+0x30])
@@ -12,6 +12,7 @@
 #include "MinHook.h"
 #include <stdio.h>
 #include <stdarg.h>
+#include "test_tmp.h"
 
 static int fails;
 #define CHECK(c) do { if (!(c)) { printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #c); fails++; } } while (0)
@@ -83,7 +84,8 @@ static void *x_pattern_scan(const char *pat)      /* first match in .text, ?? = 
 }
 
 static const char *t_ver(void) { return "test"; }
-static const char *t_dir(void) { return "D:/v3x_tmp/load/"; }
+static char g_tdir[MAX_PATH];   /* <scratch>/load/, set in main */
+static const char *t_dir(void) { return g_tdir; }
 static int t_emits, t_begins; static char t_from[32], t_to[32], t_bfrom[32]; static double t_secs;
 static int t_emit(const char *name, void *data)
 {
@@ -140,6 +142,7 @@ static int real_exe(const char *path)
 
 int main(int argc, char **argv)
 {
+    test_tmp_dir(g_tdir, sizeof g_tdir, "load");   /* scratch: $V3X_TMP or %TEMP% (test/test_tmp.h) */
     /* config */
     fl_config c; char err[160];
     fl_config_defaults(&c);
@@ -229,13 +232,12 @@ int main(int argc, char **argv)
 
     /* transition detour end-to-end: fake task {+0x150 -> state(+0x128 float secs), +0x168 std::string} */
     {
-        static V3X_API f3; static char dir[] = "D:/v3x_tmp/load/";
+        static V3X_API f3;
         f3.api_version = 3; f3.struct_size = sizeof f3;
         f3.log = x_log; f3.game_version = t_ver; f3.v3x_dir = t_dir; f3.emit_event = t_emit;
-        (void)dir;
         api = &f3;
         g_tl.cap = 64; g_tl.n = 0; g_tl.ev = calloc(64, sizeof(fl_event));
-        snprintf(g_out_path, sizeof g_out_path, "D:/v3x_tmp/load/load_timeline_test.txt");
+        snprintf(g_out_path, sizeof g_out_path, "%sload_timeline_test.txt", t_dir());
         static uint8_t task[0x200], state[0x200];
         float secs = 171.5f; memcpy(state + 0x128, &secs, 4);
         uint64_t sp = (uint64_t)(uintptr_t)state; memcpy(task + 0x150, &sp, 8);

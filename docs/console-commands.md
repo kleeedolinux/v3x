@@ -53,5 +53,43 @@ Named events between plugins (API v3, `on_event` / `emit_event`; list in `includ
 | `save_begin` | enhance, the saving thread (main), right before `SaveGameState` | `const V3X_SaveBegin *` {`name`, may be NULL} | sim_opt |
 | `save_end` | enhance, same thread, right after that save returned | the same `const V3X_SaveBegin *` | - |
 | `process_exit` | core (API v4), the thread calling `ExitProcess`, once, while all threads are still alive | - | devtools and plugins that write final reports |
+| `plugin_disabled` | core (API v6), the thread that disabled a plugin (fault guard, rollback), synchronously | `const V3X_PluginDisabled *` {`struct_size`, `name`, `module`, `reason`} | script_ext and anything that calls plugin code itself |
 
-Details: [api-reference.md](api-reference.md).
+Event data belongs to the emitter and is valid only during the callback; it may be NULL; payloads
+from API v6 on start with `struct_size`. A subscriber that checks the pointer and the size, and copies what it
+keeps:
+
+<!-- sample: file | static const V3X_API *api; -->
+```c
+static char g_last_state[32];   /* ours, sized: the event's strings die after the callback */
+
+static void on_transition(const char *name, void *data, void *user)   /* main thread */
+{
+    (void)name; (void)user;
+    const V3X_LoadTransition *t = (const V3X_LoadTransition *)data;
+    if (!t || !t->to) return;                     /* data may be NULL */
+    V3xStr s;
+    v3x_str_init(&s, g_last_state, sizeof g_last_state);
+    (void)v3x_str_append(&s, t->to);              /* copied, cut to fit */
+}
+
+static void on_disabled(const char *name, void *data, void *user)     /* v6 */
+{
+    (void)name; (void)user;
+    const V3X_PluginDisabled *d = (const V3X_PluginDisabled *)data;
+    if (!d || d->struct_size < sizeof *d) return; /* read only what the emitter's struct has */
+    char clean[64];
+    v3x_sanitize_line(clean, sizeof clean, d->name ? d->name : "?");
+    V3X_LOGI(api, "my_plugin", "plugin %s was disabled: stop calling into it", clean);
+}
+
+static void subscribe(void)
+{
+    if (api->on_event(V3X_EVENT_LOAD_TRANSITION, on_transition, NULL) != V3X_OK)
+        V3X_LOGW(api, "my_plugin", "load_transition not subscribed");
+    if (V3X_HAS(api, off_event) /* v6 loader */ && api->on_event(V3X_EVENT_PLUGIN_DISABLED, on_disabled, NULL) != V3X_OK)
+        V3X_LOGW(api, "my_plugin", "plugin_disabled not subscribed");
+}
+```
+
+Details: [api-reference.md](api-reference.md), [safe-coding.md](safe-coding.md#ownership-and-lifetimes).

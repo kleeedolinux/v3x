@@ -77,6 +77,7 @@
 #include <string.h>
 #include <windows.h>
 #include "v3x.h"
+#include "v3x_mem.h"
 
 V3X_EXPORT const char *v3x_plugin_name = "enhance";
 V3X_PLUGIN_MANIFEST("enhance", "0.5.0", "v3x", "engine-level single-player enhancements", "release/1.15.1");
@@ -321,7 +322,8 @@ static float *find_speed_table(const EnhImg *im, int *why)
     float *tab = (float *)rip_target(hit + 8, hit + 4);
     const float *t5 = (const float *)rip_target(hit + 21, hit + 17);
     float v[4], f5;
-    memcpy(v, tab, 16); memcpy(&f5, t5, 4);
+    /* both targets come from rip-relative operands: read them fault-proof before trusting them */
+    if (!v3x_mem_read((uintptr_t)tab, v, sizeof v) || !v3x_mem_read((uintptr_t)t5, &f5, sizeof f5)) { *why = -4; return NULL; }
     if (memcmp(v, SPEED_VANILLA, 16) || f5 != 0.0001f) { *why = -2; return NULL; }
     if (count_riprel(im, (const uint8_t *)tab) != 1) { *why = -3; return NULL; }
     *why = 0;
@@ -384,12 +386,27 @@ static int has_events(void)
            api->emit_event;
 }
 
+/* Copies the engine's save name into nm (cap bytes, NUL-terminated) without trusting the engine struct
+ * (audit N7): the {ptr, len} pair and the characters are read with v3x_mem_read (never faults), and the
+ * layout is validated: ptr readable, 0 < len < cap, no NUL or control character inside len bytes.
+ * Returns the length, 0 if anything does not look like a save name (nm = ""). */
+static int read_save_name(const SaveName *name, char *nm, size_t cap)
+{
+    SaveName sn;
+    nm[0] = 0;
+    if (!name || !v3x_mem_read((uintptr_t)name, &sn, sizeof sn)) return 0;
+    if (!sn.ptr || sn.len <= 0 || (size_t)sn.len >= cap) return 0;
+    if (!v3x_mem_read((uintptr_t)sn.ptr, nm, (size_t)sn.len)) { nm[0] = 0; return 0; }
+    for (int i = 0; i < sn.len; i++)
+        if ((unsigned char)nm[i] < 0x20 || nm[i] == 0x7F) { nm[0] = 0; return 0; }
+    nm[sn.len] = 0;
+    return sn.len;
+}
+
 static uintptr_t hk_save_state(uintptr_t self, const SaveName *name, uintptr_t format, uintptr_t flag)
 {
     char nm[260];
-    int len = name && name->ptr && name->len > 0 && name->len < (int)sizeof nm ? name->len : 0;
-    if (len) memcpy(nm, name->ptr, (size_t)len);
-    nm[len] = 0;
+    int len = read_save_name(name, nm, sizeof nm);
     V3X_SaveBegin ev = {len ? nm : NULL};
     int ev_ok = has_events();
     if (ev_ok) { api->emit_event("save_begin", &ev); InterlockedIncrement(&st.events_sent); }

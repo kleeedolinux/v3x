@@ -1,6 +1,6 @@
 /* Offline test of asset_stream (no game run).
- *   python -m ziglang cc -target x86_64-windows-gnu -O2 -Iinclude -o D:/v3x_tmp/stream/ast.exe test/asset_stream_test.c
- *   D:/v3x_tmp/stream/ast.exe plugins/asset_stream/asset_stream.ini.example [path/to/victoria3.exe] [scratch dir]
+ *   python -m ziglang cc -target x86_64-windows-gnu -O2 -Iinclude -o $V3X_TMP/ast.exe test/asset_stream_test.c
+ *   $V3X_TMP/ast.exe plugins/asset_stream/asset_stream.ini.example [path/to/victoria3.exe] [scratch dir]
  * Part 1: config parser, clamp, descriptor logic, built-in ini == the .example file.
  * Part 2 (with the exe): the plugin's real anchor resolution (as_resolve) against victoria3.exe
  * mapped as an image (read-only, nothing executes) through a fake V3X_API like src/core.c.

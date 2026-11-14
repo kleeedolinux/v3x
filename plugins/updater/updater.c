@@ -4,7 +4,7 @@
  * One background thread (never the main thread, never blocks the game): at most one automatic check
  * per 6 h (sooner when the game build / V3X version changed), result cached in v3x/update_cache.json.
  * Selection and parsing are pure (up_logic.c, test/updater_test.c).
- * Trust (docs/security-audit.md H1/M4): a release counts as SIGNED only when its compat.json.sig is an
+ * Trust (the security review H1/M4): a release counts as SIGNED only when its compat.json.sig is an
  * Ed25519 signature by a key of installer/release_keys.h (up_sig.c); the setup's hash and size then come
  * from that signed compat.json. Only signed releases are downloaded and installed automatically
  * ([update] auto = 1); an unsigned one is only announced, and installed only after `update now`.
@@ -37,6 +37,7 @@
 #include "v3x.h"
 #include "v3x_ini.h"
 #include "v3x_util.h"
+#include "v3x_safe.h"
 #include "up_logic.h"
 #include "updater.h"
 
@@ -154,14 +155,14 @@ static int win_get(void *ctx, const char *url, size_t max, char **body, size_t *
     st = (int)code;
     if (st != 200) goto out;
     size_t cap = 65536, n = 0;
-    char *b = (char *)malloc(cap + 1);
+    char *b = (char *)v3x_alloc_array(cap + 1, 1);
     ULONGLONG deadline = GetTickCount64() + 300000;   /* whole body: 5 min max */
     for (;;) {
         if (!b) { st = -14; break; }
         if (n == cap) {
             if (cap >= max) { st = -15; break; }
             size_t nc = cap * 2 > max ? max : cap * 2;
-            char *nb = (char *)realloc(b, nc + 1);
+            char *nb = (char *)v3x_realloc_array(b, nc + 1, 1);
             if (!nb) { st = -14; break; }
             b = nb; cap = nc;
         }
@@ -187,7 +188,7 @@ static int read_file(const char *path, char **out, size_t *n, size_t max)
     *n = 0;
     FILE *f = fopen(path, "rb");
     if (!f) return -1;
-    char *b = (char *)malloc(max + 1);
+    char *b = max < (size_t)-1 ? (char *)v3x_alloc_array(max + 1, 1) : NULL;
     if (!b) { fclose(f); return -1; }
     size_t k = fread(b, 1, max, f);
     fclose(f);
@@ -662,7 +663,11 @@ V3X_EXPORT int v3x_plugin_load(const V3X_API *a)
     floor_raise(g_ver);   /* the running version is part of the floor from now on */
     g_local.floor = g_floor;
     if (a->api_version >= 2) a->register_command("update", "V3X updates: update [status|check|now|cancel]", cmd_update, NULL);
-    if (a->api_version >= 3) a->on_event(V3X_EVENT_PROCESS_EXIT, on_exit, NULL);
+    if (a->api_version >= 3) {
+        int erc = a->on_event(V3X_EVENT_PROCESS_EXIT, on_exit, NULL);
+        if (erc != 0 && erc != V3X_EEXIST)
+            V3X_LOGW(a, TAG, "on_event(%s) failed (%d): a download in progress is not stopped at game exit", V3X_EVENT_PROCESS_EXIT, erc);
+    }
     g_wake = CreateEventA(NULL, FALSE, FALSE, NULL);
     HANDLE t = g_wake ? CreateThread(NULL, 256 * 1024, updater_thread, NULL, 0, NULL) : NULL;
     if (!t) { V3X_LOGW(a, TAG, "could not start the update thread"); return 0; }

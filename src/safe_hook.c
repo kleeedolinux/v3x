@@ -487,12 +487,18 @@ out:
 }
 
 /* Raw MinHook detour for `owner`: exclusive. 0, -1 bad args, V3X_EHOOKBUSY (*busy_owner = holder,
- * NULL = hooked outside the registry) or an MH_STATUS. */
+ * NULL = hooked outside the registry) or an MH_STATUS.
+ * Two phases (audit N8: never write through a caller's pointer while g_sh_lock is held): phase 1 (locked)
+ * reserves the record for `owner` (raw_owner set, still disabled, so every other owner gets
+ * V3X_EHOOKBUSY) and creates the MinHook entry; then *original = trampoline is written WITHOUT the lock
+ * (a bad pointer faults in the caller, no lock left held); phase 2 (locked) points the stub at the
+ * detour and enables it. The trampoline is published before the detour can run. */
 int v3x_hook_add_raw(void *owner, void *target, void *detour, void **original, void **busy_owner)
 {
     if (busy_owner) *busy_owner = NULL;
     if (!owner) return -1;
     int s;
+    void *tramp = NULL;
     AcquireSRWLockExclusive(&g_sh_lock);
     ShRec *r = target ? sh_find(target, 0) : NULL;
     if (r && r->raw_owner) { if (busy_owner) *busy_owner = r->raw_owner; s = V3X_EHOOKBUSY; goto out; }
@@ -507,41 +513,51 @@ int v3x_hook_add_raw(void *owner, void *target, void *detour, void **original, v
     }
     if (r->enabled) MH_DisableHook(target);   /* unreachable (subscribers / raw owner refused above); defensive */
     r->enabled = 0;
-    /* the hook is disabled here: point the stub at the detour, then (re)enable the same entry */
-    r->ctx->pre = r->ctx->post = NULL; r->ctx->user = NULL; r->ctx->target = target;
-    __atomic_store_n(&r->ctx->jmp, detour, __ATOMIC_RELEASE);
     if (!r->created) {
         s = MH_CreateHook(target, r->ctx->stub, &r->ctx->original);
         if (s == MH_ERROR_ALREADY_CREATED) { s = V3X_EHOOKBUSY; goto out; }   /* hooked outside the registry */
         if (s != MH_OK) goto out;
         r->created = 1;
     }
-    if (original) *original = r->ctx->original;   /* before enabling: the detour may run at once */
-    s = MH_EnableHook(target);
-    if (s != MH_OK) {
-        if (original) *original = NULL;
-        goto out;
-    }
-    r->enabled = 1;
-    r->raw_owner = owner;
+    r->raw_owner = owner;                      /* reserved: disabled, but nobody else can take it */
+    tramp = r->ctx->original;
+    s = MH_OK;
 out:
     ReleaseSRWLockExclusive(&g_sh_lock);
+    if (s != MH_OK) return s;
+    if (original) *original = tramp;           /* caller's memory, outside the lock */
+    AcquireSRWLockExclusive(&g_sh_lock);
+    if (r->raw_owner != owner || r->enabled) {   /* the owner unhooked its reservation meanwhile */
+        ReleaseSRWLockExclusive(&g_sh_lock);
+        return MH_ERROR_NOT_CREATED;
+    }
+    /* the hook is disabled here: point the stub at the detour, then (re)enable the same entry */
+    r->ctx->pre = r->ctx->post = NULL; r->ctx->user = NULL; r->ctx->target = target;
+    __atomic_store_n(&r->ctx->jmp, detour, __ATOMIC_RELEASE);
+    s = MH_EnableHook(target);
+    if (s == MH_OK) r->enabled = 1;
+    else r->raw_owner = NULL;
+    ReleaseSRWLockExclusive(&g_sh_lock);
+    if (s != MH_OK && original) *original = NULL;
     return s;
 }
 
 /* unhook for `owner`: removes its raw hook, or all of its hook_safe subscriptions on `target` (the
  * thunk is disabled when the last subscriber leaves). V3X_EHOOKBUSY (*busy_owner set) if only other
- * owners hold the target; MH_ERROR_NOT_CREATED if nothing is subscribed. A target unknown to the
- * registry is only disabled (MH_DisableHook). Nothing is ever MH_RemoveHook'ed here: a removed
- * hook frees the trampoline a thread may still be about to call (audit M2). */
+ * owners hold the target; MH_ERROR_NOT_CREATED if nothing is subscribed. -1 for a NULL owner or
+ * target. A target unknown to the registry is NOT touched (MH_ERROR_NOT_CREATED): MinHook's
+ * MH_DisableHook(NULL) is MH_ALL_HOOKS, and a hook made outside the registry is not ours to remove
+ * (audit N1). Nothing is ever MH_RemoveHook'ed here: a removed hook frees the trampoline a thread may
+ * still be about to call (audit M2). */
 int v3x_hook_remove(void *owner, void *target, void **busy_owner)
 {
     if (busy_owner) *busy_owner = NULL;
+    if (!owner || !target) return -1;
     int s = MH_OK;
     AcquireSRWLockExclusive(&g_sh_lock);
-    ShRec *r = target ? sh_find(target, 0) : NULL;
+    ShRec *r = sh_find(target, 0);
     if (!r) {
-        s = MH_DisableHook(target);
+        s = MH_ERROR_NOT_CREATED;
     } else if (r->raw_owner) {
         if (r->raw_owner != owner) { if (busy_owner) *busy_owner = r->raw_owner; s = V3X_EHOOKBUSY; }
         else {
@@ -575,6 +591,7 @@ out:
 /* Number of hook_safe subscribers on `target` (0 = none), -1 if it has a raw hook. For logs/tests. */
 int v3x_hook_subscribers(void *target)
 {
+    if (!target) return 0;
     AcquireSRWLockShared(&g_sh_lock);
     ShRec *r = sh_find(target, 0);
     int n = !r ? 0 : r->raw_owner ? -1 : r->list ? r->list->n : 0;
@@ -602,4 +619,38 @@ int v3x_hook_remove_owner(void *owner)
     for (int i = 0; i < n; i++)
         if (v3x_hook_remove(owner, targets[i], NULL) == MH_OK) released++;
     return released;
+}
+
+/* ------------------------------------------------------------------ for api->patch (core.c)
+ * api->patch suspends threads like MinHook does, so it must never run at the same time as a MinHook
+ * call (two suspenders can suspend each other and deadlock): it holds g_sh_lock, the lock every
+ * MinHook call of the registry runs under. The *_locked queries below need it held. */
+void v3x_hook_lock(void) { AcquireSRWLockExclusive(&g_sh_lock); }
+void v3x_hook_unlock(void) { ReleaseSRWLockExclusive(&g_sh_lock); }
+
+static int sh_overlap(uintptr_t a, size_t n, uintptr_t b, size_t m) { return a < b + m && b < a + n; }
+
+/* 1 if [p, p+n) touches the stub pool (data or code pages). */
+int v3x_hook_pool_overlaps_locked(const void *p, size_t n)
+{
+    for (int i = 0; i < SH_MAX_PAGES; i++) {
+        if (g_sh_pages[i] && sh_overlap((uintptr_t)p, n, (uintptr_t)g_sh_pages[i], SH_PAGE)) return 1;
+        if (g_sh_code[i] && sh_overlap((uintptr_t)p, n, (uintptr_t)g_sh_code[i], SH_PER * SH_STUB)) return 1;
+    }
+    return 0;
+}
+
+/* The owner of an enabled hook whose first 16 bytes (the jump MinHook wrote) [p, p+n) touches and
+ * that is not `me`, else NULL. For hook_safe targets the first subscriber's owner is returned. */
+void *v3x_hook_conflict_locked(const void *p, size_t n, void *me)
+{
+    for (int i = 0; i < g_sh_nrecs; i++) {
+        ShRec *r = &g_sh_recs[i];
+        if (!r->enabled || !sh_overlap((uintptr_t)p, n, (uintptr_t)r->target, 16)) continue;
+        if (r->raw_owner) { if (r->raw_owner != me) return r->raw_owner; continue; }
+        ShList *l = r->list;
+        for (int k = 0; l && k < l->n; k++)
+            if (l->sub[k].owner != me) return l->sub[k].owner;
+    }
+    return NULL;
 }

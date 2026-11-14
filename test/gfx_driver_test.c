@@ -1,6 +1,6 @@
 /* Offline test of gfx_driver (no game, no GPU).
- *   python -m ziglang cc -target x86_64-windows-gnu -O2 -Iinclude -o D:/v3x_tmp/gfx/gdt.exe test/gfx_driver_test.c
- *   D:/v3x_tmp/gfx/gdt.exe plugins/gfx_driver/gfx_driver.ini.example [path/to/victoria3.exe]
+ *   python -m ziglang cc -target x86_64-windows-gnu -O2 -Iinclude -o $V3X_TMP/gdt.exe test/gfx_driver_test.c
+ *   $V3X_TMP/gdt.exe plugins/gfx_driver/gfx_driver.ini.example [path/to/victoria3.exe]
  * Checks: the ini example parses (inline comments), flag policy, the retry-without-flag path, and
  * (with the exe) that the D3D11CreateDevice IAT slot is found in the real victoria3.exe. */
 #include "../plugins/gfx_driver/gd_iat.c"

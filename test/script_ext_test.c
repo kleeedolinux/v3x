@@ -13,6 +13,9 @@
  * H: layer C name rules, queueing, thread rule, registration flow against fake engine objects (entry and
  *    object vtables, Create swap, Execute / Evaluate wrappers).  I (with the exe): layer C anchors resolve
  *    uniquely, vtable slot counts (2 / 3 / 26 / 26) and that every slot we copy is code.
+ * J: containment (audit N5): pack ownership (another module, a later session, a disabled plugin, code
+ *    outside any module), keyword owners, the fault guard around keyword callbacks (main and worker
+ *    thread: the fault is contained, the keyword switched off) and V3X_EVENT_PLUGIN_DISABLED.
  * Exit 0 = ALL OK. Nothing here runs engine code. */
 #include "v3x_testkit.h"
 #include "v3x_rtti.h"
@@ -28,6 +31,12 @@ static int file_eq(const char *path, const void *data, size_t n)
     return k == n && !memcmp(buf, data, n);
 }
 static int exists(const char *p) { return GetFileAttributesA(p) != INVALID_FILE_ATTRIBUTES; }
+static const char *self_name_of_test(void)
+{
+    static char nm[128];
+    if (!nm[0]) sx_module_name(GetModuleHandleA(NULL), nm, sizeof nm);
+    return nm;
+}
 
 static void part_a(void)
 {
@@ -80,8 +89,10 @@ static void part_c(const char *tmp)
     V3X_TEST_CHECK(sx_write_file("bad/pack", "a.txt", "x", 1) == V3X_SCRIPT_EARG, "C bad pack refused");
     V3X_TEST_CHECK(sx_end_pack("p1") == 2, "C end_pack returns 2 files (overwrite counted once)");
     snprintf(p, sizeof p, "%sp1\\v3x_script_ext.manifest", sx_root);
-    const char *man = "common/scripted_effects/v3x_test.txt\nlocalization/english/v3x_l_english.yml\n";
-    V3X_TEST_CHECK(file_eq(p, man, strlen(man)), "C manifest lists both files");
+    char self_name[128], man[400];
+    sx_module_name(GetModuleHandleA(NULL), self_name, sizeof self_name);
+    snprintf(man, sizeof man, "#owner %s\ncommon/scripted_effects/v3x_test.txt\nlocalization/english/v3x_l_english.yml\n", self_name);
+    V3X_TEST_CHECK(self_name[0] && file_eq(p, man, strlen(man)), "C manifest names the owner (%s) and lists both files", self_name);
     V3X_TEST_CHECK(sx_write_file("p1", "x.txt", "x", 1) == V3X_SCRIPT_ESTATE, "C write after end_pack -> ESTATE");
 
     /* a foreign file in the pack, then a new session that writes only one file */
@@ -637,6 +648,122 @@ static DWORD WINAPI thread_reg(LPVOID p)
     return 0;
 }
 
+/* ------------------------------------------------------------------ J: containment of keyword callbacks */
+
+static char g_last_log[1024];
+static int g_nlogs;
+static void cap_log(const char *tag, const char *fmt, ...) V3X_PRINTF(2, 3);
+static void cap_log(const char *tag, const char *fmt, ...)
+{
+    (void)tag;
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(g_last_log, sizeof g_last_log, fmt, ap);
+    va_end(ap);
+    g_nlogs++;
+}
+
+static int *volatile g_null_ptr;
+static volatile int g_zero;
+static void cb_fault_eff(const V3X_ScriptScope *s, const char *v, void *u) { (void)s; (void)v; (void)u; g_cb_n++; *g_null_ptr = 1; }
+static int cb_fault_trg(const V3X_ScriptScope *s, const char *v, void *u) { (void)s; (void)v; (void)u; g_cb_n++; return 10 / g_zero; }
+
+typedef struct { void (*exec)(void *, void **); void *obj; void **ctx; int faulted_ok; } ThreadExec;
+static DWORD WINAPI thread_exec(LPVOID p)
+{
+    ThreadExec *t = (ThreadExec *)p;
+    t->exec(t->obj, t->ctx);
+    t->faulted_ok = 1;          /* reached: the fault on this worker thread was contained */
+    return 0;
+}
+
+static SxKw *kw_named(SxKw *tab, int n, const char *name)
+{
+    for (int i = 0; i < n; i++) if (!strcmp(tab[i].name, name)) return &tab[i];
+    return NULL;
+}
+
+static void part_j_keywords(const SxRegEng *r)
+{
+    reg_state_reset();
+    g_fake_reg_n = 0;
+    void (*old_log)(const char *, const char *, ...) = g_a.log;
+    g_a.log = cap_log;
+    const V3X_ScriptExt *t = v3x_script_ext();
+    HMODULE self = GetModuleHandleA(NULL);
+    /* a callback that is in no module (e.g. generated code) cannot own a keyword */
+    void *anon = VirtualAlloc(NULL, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    V3X_TEST_CHECK(anon && t->register_effect("v3x_anon", (v3x_script_effect_fn)anon, NULL) == V3X_SCRIPT_EARG && sx_neff == 0,
+                   "J a callback outside any module -> EARG");
+    VirtualFree(anon, 0, MEM_RELEASE);
+    V3X_TEST_CHECK(t->register_effect("v3x_crash", cb_fault_eff, NULL) == 0 && t->register_trigger("v3x_crash_t", cb_fault_trg, NULL) == 0 &&
+                   t->register_effect("v3x_good", cb_effect, (void *)21) == 0 && t->register_trigger("v3x_good_t", cb_trigger, (void *)22) == 0,
+                   "J four keywords queued");
+    SxKw *kc = kw_named(sx_eff, sx_neff, "v3x_crash"), *kg = kw_named(sx_eff, sx_neff, "v3x_good");
+    SxKw *tc = kw_named(sx_trg, sx_ntrg, "v3x_crash_t"), *tg = kw_named(sx_trg, sx_ntrg, "v3x_good_t");
+    V3X_TEST_CHECK(kc && kg && tc && tg && kc->owner == self && tg->owner == self, "J keyword owner = module of the callback (the test exe)");
+    if (!kc || !kg || !tc || !tg) return;
+    V3X_TEST_CHECK(sx_register_all(r, NULL) == 4 && g_fake_reg_n == 4, "J registered");
+    /* entries in registration order: effects (crash, good), then triggers (crash_t, good_t) */
+    void *(*ecr)(void *) = (void *(*)(void *))((void *const *)g_fake_entries[0]->vt)[1];
+    void *(*tcr)(void *) = (void *(*)(void *))((void *const *)g_fake_entries[2]->vt)[1];
+    uint8_t *ocrash = (uint8_t *)ecr(g_fake_entries[0]), *ogood = (uint8_t *)ecr(g_fake_entries[1]);
+    uint8_t *tcrash = (uint8_t *)tcr(g_fake_entries[2]), *tgood = (uint8_t *)tcr(g_fake_entries[3]);
+    void (*exec)(void *, void **) = (void (*)(void *, void **))((void *const *)*(void **)ocrash)[SX_EFF_EXEC_SLOT];
+    uint8_t (*ev)(void *, void **) = (uint8_t (*)(void *, void **))((void *const *)*(void **)tcrash)[SX_TRG_EVAL_SLOT];
+    strcpy(((SxStr *)(tgood + SX_TRG_MSG))->u.buf, "yes");
+    SxRef ref = {5, {0}, 42};
+    void *ctx[3] = {&ref, NULL, NULL};
+
+    int n0 = g_cb_n, l0 = g_nlogs;
+    exec(ocrash, ctx);
+    V3X_TEST_CHECK(g_cb_n == n0 + 1 && kc->off && kc->faults == 1 && g_nlogs > l0,
+                   "J an access violation in an effect callback is contained: keyword switched off, fault logged");
+    printf("  last log: %s\n", g_last_log);
+    /* SANITIZE=1 builds turn the NULL write into a UBSan trap (ud2 = 0xc000001d) */
+    V3X_TEST_CHECK(((strstr(g_last_log, "FAULT 0xc0000005") && strstr(g_last_log, "write")) || strstr(g_last_log, "FAULT 0xc000001d")) &&
+                   strstr(g_last_log, self_name_of_test()) && strstr(g_last_log, "+0x") && strstr(g_last_log, "v3x_crash"),
+                   "J the log names the code (access violation: write + address), module+offset and the keyword");
+    exec(ocrash, ctx);
+    V3X_TEST_CHECK(g_cb_n == n0 + 1 && kc->faults == 1, "J a keyword that faulted is never called again");
+    exec(ogood, ctx);
+    V3X_TEST_CHECK(g_cb_n == n0 + 2 && g_cb_user == (void *)21 && !kg->off, "J other keywords keep working");
+    uint8_t tv = ev(tcrash, ctx);
+    V3X_TEST_CHECK(tv == 0 && tc->off && tc->faults == 1 && (strstr(g_last_log, "FAULT 0xc0000094") || strstr(g_last_log, "FAULT 0xc000001d")),
+                   "J a divide by zero in a trigger callback is contained, evaluates false, keyword off");
+    V3X_TEST_CHECK(ev(tgood, ctx) == 1 && g_cb_user == (void *)22, "J the other trigger still evaluates");
+    /* worker thread: the guard is per thread */
+    kc->off = 0; kc->faults = 0;
+    ThreadExec te = {exec, ocrash, ctx, 0};
+    HANDLE th = CreateThread(NULL, 0, thread_exec, &te, 0, NULL);
+    DWORD w = WaitForSingleObject(th, 10000);
+    CloseHandle(th);
+    V3X_TEST_CHECK(w == WAIT_OBJECT_0 && te.faulted_ok && kc->off && kc->faults == 1, "J a fault on an engine worker thread is contained the same way");
+    /* nested guards: a keyword callback that runs another keyword (the engine may nest effects) */
+    V3X_TEST_CHECK(sx_guard_cur == NULL, "J no guard left armed on this thread");
+
+    /* plugin_disabled from the core: bad payloads ignored, then the owner's keywords go off */
+    V3X_PluginDisabled d;
+    memset(&d, 0, sizeof d);
+    d.struct_size = 8; d.module = self; d.name = "sxt"; d.reason = "test";
+    on_plugin_disabled(V3X_EVENT_PLUGIN_DISABLED, &d, NULL);
+    on_plugin_disabled(V3X_EVENT_PLUGIN_DISABLED, NULL, NULL);
+    d.struct_size = sizeof d; d.module = (void *)((uintptr_t)self + 0x1000);
+    on_plugin_disabled(V3X_EVENT_PLUGIN_DISABLED, &d, NULL);
+    V3X_TEST_CHECK(!kg->off && !tg->off && sx_ndisabled == 0, "J plugin_disabled with a short struct, NULL data or a non-module address is ignored");
+    d.module = self;
+    int before = g_cb_n;
+    on_plugin_disabled(V3X_EVENT_PLUGIN_DISABLED, &d, NULL);
+    exec(ogood, ctx);
+    V3X_TEST_CHECK(kg->off && tg->off && ev(tgood, ctx) == 0 && g_cb_n == before && sx_module_disabled(self),
+                   "J after plugin_disabled the module's keywords are never called again (trigger evaluates false)");
+    V3X_TEST_CHECK(t->register_effect("v3x_after", cb_effect, NULL) == V3X_SCRIPT_EARG, "J a disabled plugin cannot register keywords");
+    sx_ndisabled = 0;
+    sx_disabled_mod[0] = NULL;
+    free(ocrash); free(ogood); free(tcrash); free(tgood);
+    g_a.log = old_log;
+}
+
 static void part_h_fake(void)
 {
     /* ---- names */
@@ -784,6 +911,7 @@ static void part_h_fake(void)
     uint8_t nn = ev(tobj, ctx);
     V3X_TEST_CHECK(y == 1 && nn == 0 && g_cb_user == (void *)13 && g_orig_eval_n == 0, "H Evaluate returns the plugin callback's truth value (debug_log's Evaluate not run)");
     V3X_TEST_CHECK(g_cb_scope.type == 5 && g_cb_scope.id == 0x1000007u, "H trigger callback got the scope");
+    part_j_keywords(&r);
     reg_state_reset();
     g_loaded = was_loaded;
 }
@@ -853,12 +981,58 @@ static void part_i(const char *exe)
     sx_fix = NULL;
 }
 
+static void part_j_packs(const char *tmp)
+{
+    snprintf(sx_root, sizeof sx_root, "%s\\j_packs\\", tmp);
+    CreateDirectoryA(sx_root, NULL);
+    HMODULE self = GetModuleHandleA(NULL), other = GetModuleHandleA("kernel32.dll");
+    char p[MAX_PATH], q[MAX_PATH];
+    V3X_TEST_CHECK(sx_begin_pack("own") == 0 && sx_write_file("own", "a.txt", "mine", 4) == 0, "J pack 'own' claimed by the test exe");
+    snprintf(p, sizeof p, "%sown\\a.txt", sx_root);
+    sx_test_caller = other;
+    V3X_TEST_CHECK(sx_begin_pack("own") == SX_E_OWNER && exists(p), "J begin_pack of another module's pack refused, its files kept");
+    V3X_TEST_CHECK(sx_write_file("own", "a.txt", "evil", 4) == SX_E_OWNER && file_eq(p, "mine", 4), "J write_file into another module's pack refused");
+    V3X_TEST_CHECK(sx_write_file("own", "b.txt", "evil", 4) == SX_E_OWNER, "J ... also for a new file");
+    V3X_TEST_CHECK(sx_end_pack("own") == SX_E_OWNER, "J end_pack of another module's pack refused");
+    V3X_TEST_CHECK(sx_begin_pack("theirs") == 0 && sx_end_pack("theirs") == 0, "J the other module can claim its own pack");
+    sx_test_caller = NULL;
+    V3X_TEST_CHECK(sx_begin_pack("theirs") == SX_E_OWNER, "J ... which the test exe then cannot take");
+    V3X_TEST_CHECK(sx_begin_pack_as("nobody", NULL) == SX_E_OWNER, "J a caller outside any module owns nothing");
+    V3X_TEST_CHECK(sx_end_pack("own") == 1, "J the owner finishes its pack");
+    /* a later session: the in-memory table is gone, the manifest names the owner */
+    sx_pack_t *e = sx_find("own");
+    for (int i = 0; e && i < e->n; i++) free(e->files[i]);
+    if (e) memset(e, 0, sizeof *e);
+    sx_test_caller = other;
+    V3X_TEST_CHECK(sx_begin_pack("own") == SX_E_OWNER && exists(p), "J next session: a module with another file name cannot claim the pack (manifest owner)");
+    sx_test_caller = NULL;
+    V3X_TEST_CHECK(sx_begin_pack("own") == 0 && !exists(p), "J next session: the owner claims it again (and its old files are removed)");
+    sx_end_pack("own");
+    /* an old manifest without #owner: the first claimer wins */
+    snprintf(q, sizeof q, "%slegacy", sx_root);
+    CreateDirectoryA(q, NULL);
+    snprintf(q, sizeof q, "%slegacy\\v3x_script_ext.manifest", sx_root);
+    FILE *f = fopen(q, "wb"); if (f) { fputs("x.txt\n", f); fclose(f); }
+    sx_test_caller = other;
+    V3X_TEST_CHECK(sx_begin_pack("legacy") == 0 && sx_end_pack("legacy") == 0, "J a manifest without an owner line (older script_ext) can be claimed");
+    sx_test_caller = NULL;
+    /* the core disabled the owner: its pack calls fail */
+    V3X_TEST_CHECK(sx_begin_pack("own") == 0, "J owner begins again");
+    sx_module_disable(self);
+    V3X_TEST_CHECK(sx_write_file("own", "c.txt", "x", 1) == SX_E_OWNER && sx_end_pack("own") == SX_E_OWNER && sx_begin_pack("fresh") == SX_E_OWNER,
+                   "J after plugin_disabled the module's pack calls fail (and it cannot claim new packs)");
+    sx_ndisabled = 0;
+    sx_disabled_mod[0] = NULL;
+    V3X_TEST_CHECK(sx_end_pack("own") == 0, "J (re-enabled for the test) end_pack");
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 2) { printf("usage: %s <empty temp dir> [victoria3.exe]\n", argv[0]); return 2; }
     part_a();
     part_b();
     part_c(argv[1]);
+    part_j_packs(argv[1]);
     part_d(argv[1]);
     part_g();
     part_h_fake();

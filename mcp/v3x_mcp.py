@@ -9,7 +9,7 @@ Pipe: \\\\.\\pipe\\v3x_devbridge, or the name in env V3X_DEVBRIDGE_PIPE (same va
 Timeout per call: env V3X_MCP_TIMEOUT seconds (default 60).
 Register in Claude Code: see .mcp.json.example in the repo root.
 
-Security (docs/security-audit.md M5):
+Security (the security review M5):
   - the pipe server must be victoria3.exe (GetNamedPipeServerProcessId + its image name; env
     V3X_MCP_SERVER_EXE = comma-separated image names overrides, tests only), so a process squatting
     the pipe name gets nothing;

@@ -6,11 +6,14 @@
  * sim_opt crash: 0xe02c90 reads a 5th stack argument). This thunk forwards everything a Win64
  * function can receive in registers or in the first 12 stack slots, whatever the prototype.
  *
- * Per hook, one SafeCtx in an RWX pool holds a 24-byte stub:
+ * Per hook, one SafeCtx (data, a read-write page that is never executable) and one 16-byte stub
+ * (code, a page that is read-execute only: W^X, docs/adr/0003-hook-lifetime.md):
  *     mov r10, <ctx>           ; r10 is volatile and never carries an argument in the Win64 ABI
- *     jmp [rip+0] ; dq v3x_safe_thunk
- * MinHook redirects the target to the stub; the stub does not touch rsp, so stack walks treat it
- * as a leaf. v3x_safe_thunk (below, in .text with SEH unwind info: one `sub rsp, 0x328`):
+ *     jmp [r10+0x28]           ; ctx->jmp = v3x_safe_thunk (hook_safe) or the plugin's detour (raw hook)
+ * All stubs of a pool page are generated while the page is still private and read-write, then the
+ * page is made PAGE_EXECUTE_READ before any of them is handed out; nothing ever writes code there
+ * again. MinHook redirects the target to the stub; the stub does not touch rsp, so stack walks treat
+ * it as a leaf. v3x_safe_thunk (below, in .text with SEH unwind info: one `sub rsp, 0x328`):
  *   1. saves rcx, rdx, r8, r9, the 12 caller stack slots [rsp+0x28..] and xmm0-3 into a
  *      V3X_HookCall on its own frame, plus user/target/original/return address; saves the rest of
  *      the entry state (rax, r11, full ymm0-5 with AVX, else xmm0-5) in the register save area;
@@ -51,17 +54,19 @@
 #include "../include/v3x.h"
 
 typedef struct SafeCtx {
-    void *original;        /* +0x00 MinHook trampoline */
+    void *original;        /* +0x00 MinHook trampoline (never freed, docs/adr/0003-hook-lifetime.md) */
     v3x_hook_fn pre;       /* +0x08 */
     v3x_hook_fn post;      /* +0x10 */
     void *user;            /* +0x18 */
     void *target;          /* +0x20 */
-    uint8_t stub[24];      /* +0x28 */
+    void *jmp;             /* +0x28 where the stub jumps: v3x_safe_thunk or a raw detour (atomic store) */
+    uint8_t *stub;         /* +0x30 this ctx's 16-byte stub in the read-execute code page */
+    uint64_t pad;          /* +0x38 */
     /* 64 bytes per ctx */
 } SafeCtx;
 
 _Static_assert(sizeof(SafeCtx) == 64, "SafeCtx layout");
-_Static_assert(offsetof(SafeCtx, stub) == 0x28, "SafeCtx layout");
+_Static_assert(offsetof(SafeCtx, jmp) == 0x28, "SafeCtx layout (the stub's jmp [r10+0x28])");
 _Static_assert(sizeof(V3X_HookCall) == 0x110, "V3X_HookCall layout (thunk offsets)");
 _Static_assert(offsetof(V3X_HookCall, xmm) == 0x80, "V3X_HookCall layout");
 _Static_assert(offsetof(V3X_HookCall, ret) == 0xc0, "V3X_HookCall layout");
@@ -241,33 +246,58 @@ static void sh_init(void)
 
 /* ------------------------------------------------------------------ ctx pool */
 
-#define SH_PAGE 65536                          /* one VirtualAlloc granule = 1024 hooks */
+#define SH_PAGE 65536                          /* one VirtualAlloc granule = 1024 ctx records */
 #define SH_MAX_PAGES 4
-static SafeCtx *g_sh_pages[SH_MAX_PAGES];
+#define SH_STUB 16                             /* bytes per stub */
+#define SH_PER (SH_PAGE / sizeof(SafeCtx))
+static SafeCtx *g_sh_pages[SH_MAX_PAGES];      /* data: PAGE_READWRITE, never executable */
+static uint8_t *g_sh_code[SH_MAX_PAGES];       /* stubs: PAGE_EXECUTE_READ once generated, never written again */
 static unsigned g_sh_used;                     /* ctx slots handed out across all pages */
 static SRWLOCK g_sh_lock = SRWLOCK_INIT;
 
+/* Allocates data page `page` and its code page: every stub i is generated up front
+ * ("mov r10, &ctx[i]; jmp [r10+0x28]"), then the code page becomes read-execute. 0 / -1. */
+static int sh_new_page(unsigned page)
+{
+    SafeCtx *d = (SafeCtx *)VirtualAlloc(NULL, SH_PAGE, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    uint8_t *code = (uint8_t *)VirtualAlloc(NULL, SH_PER * SH_STUB, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    DWORD old;
+    if (!d || !code) goto fail;
+    for (unsigned i = 0; i < SH_PER; i++) {
+        uint8_t *p = code + (size_t)i * SH_STUB;
+        uint64_t ctx = (uint64_t)(uintptr_t)&d[i];
+        p[0] = 0x49; p[1] = 0xBA; memcpy(p + 2, &ctx, 8);                         /* mov r10, imm64 */
+        p[10] = 0x41; p[11] = 0xFF; p[12] = 0x62; p[13] = (uint8_t)offsetof(SafeCtx, jmp);   /* jmp [r10+0x28] */
+        p[14] = p[15] = 0xCC;                                                    /* int3 padding */
+        d[i].stub = p;
+    }
+    if (!VirtualProtect(code, SH_PER * SH_STUB, PAGE_EXECUTE_READ, &old)) goto fail;
+    FlushInstructionCache(GetCurrentProcess(), code, SH_PER * SH_STUB);
+    g_sh_pages[page] = d;
+    g_sh_code[page] = code;
+    return 0;
+fail:
+    if (d) VirtualFree(d, 0, MEM_RELEASE);
+    if (code) VirtualFree(code, 0, MEM_RELEASE);   /* never published: nobody can execute it */
+    return -1;
+}
+
 static SafeCtx *sh_alloc(void)
 {
-    const unsigned per = SH_PAGE / sizeof(SafeCtx);
-    unsigned page = g_sh_used / per, slot = g_sh_used % per;
+    unsigned page = g_sh_used / (unsigned)SH_PER, slot = g_sh_used % (unsigned)SH_PER;
     if (page >= SH_MAX_PAGES) return NULL;
-    if (!g_sh_pages[page]) {
-        g_sh_pages[page] = (SafeCtx *)VirtualAlloc(NULL, SH_PAGE, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
-        if (!g_sh_pages[page]) return NULL;
-    }
+    if (!g_sh_pages[page] && sh_new_page(page)) return NULL;
     g_sh_used++;
     return &g_sh_pages[page][slot];
 }
 
-static void sh_write_stub(SafeCtx *c)
+/* Resets a ctx (keeps its stub) and points the stub at `jmp`. */
+static void sh_ctx_init(SafeCtx *c, void *jmp)
 {
-    uint8_t *p = c->stub;
-    uint64_t ctx = (uint64_t)(uintptr_t)c, th = (uint64_t)(uintptr_t)v3x_safe_thunk;
-    p[0] = 0x49; p[1] = 0xBA; memcpy(p + 2, &ctx, 8);                  /* mov r10, imm64 */
-    p[10] = 0xFF; p[11] = 0x25; memset(p + 12, 0, 4);                  /* jmp [rip+0] */
-    memcpy(p + 16, &th, 8);
-    FlushInstructionCache(GetCurrentProcess(), p, sizeof c->stub);
+    uint8_t *stub = c->stub;
+    memset(c, 0, sizeof *c);
+    c->stub = stub;
+    __atomic_store_n(&c->jmp, jmp, __ATOMIC_RELEASE);
 }
 
 /* Installs the hook. Returns 0 or an MH_STATUS (MH_ERROR_MEMORY_ALLOC when the pool is full or
@@ -279,15 +309,14 @@ int v3x_safe_hook_install(void *target, v3x_hook_fn pre, v3x_hook_fn post, void 
     sh_init();
     SafeCtx *c = sh_alloc();
     if (!c) { ReleaseSRWLockExclusive(&g_sh_lock); return MH_ERROR_MEMORY_ALLOC; }
-    memset(c, 0, sizeof *c);
+    sh_ctx_init(c, (void *)v3x_safe_thunk);
     c->pre = pre; c->post = post; c->user = user; c->target = target;
-    sh_write_stub(c);
     MH_STATUS s = MH_CreateHook(target, c->stub, &c->original);
     if (s == MH_OK) {
         s = MH_EnableHook(target);
-        if (s != MH_OK) MH_RemoveHook(target);
+        if (s != MH_OK) MH_RemoveHook(target);   /* never enabled: no thread can be in it */
     }
-    if (s != MH_OK) { memset(c, 0, sizeof *c); g_sh_used--; }   /* last slot handed out: give it back */
+    if (s != MH_OK) { sh_ctx_init(c, NULL); g_sh_used--; }   /* last slot handed out: give it back */
     ReleaseSRWLockExclusive(&g_sh_lock);
     return (int)s;
 }
@@ -313,9 +342,13 @@ void *v3x_safe_thunk_address(void) { return (void *)v3x_safe_thunk; }
  * Concurrency: registration takes g_sh_lock. The subscriber list is an immutable ShList snapshot
  * published with one release store; the dispatcher loads it once per call (acquire) and keeps it in
  * the frame, so pre and post of one call always see the same subscribers. Snapshots and records are
- * never freed (a thread may still be inside the thunk). When the last subscriber leaves, the hook is
- * only DISABLED (original bytes restored, MinHook trampoline kept alive for threads in flight); a
- * later hook_safe re-enables it, a later raw hook removes it first. */
+ * never freed (a thread may still be inside the thunk).
+ * Lifetime (docs/adr/0003-hook-lifetime.md, audit M2): a hook that was ever enabled is NEVER removed
+ * from MinHook at runtime (MH_RemoveHook frees the trampoline another thread may be about to call).
+ * Raw hooks go through the record's stub too (ctx->jmp = the detour, *original = the record's
+ * trampoline), so unhook only DISABLES (original bytes restored, trampoline and stub stay valid for
+ * threads in flight) and a later hook_safe or raw hook on the same target re-points ctx->jmp and
+ * re-enables the same MinHook entry. MH_RemoveHook is used only on a hook that was never enabled. */
 
 typedef struct ShSub { v3x_hook_fn pre, post; void *user; void *owner; } ShSub;
 struct ShRec;
@@ -327,10 +360,10 @@ typedef struct ShList {
 } ShList;
 typedef struct ShRec {
     void *target;
-    SafeCtx *ctx;              /* the thunk stub for this target; allocated once, reused */
+    SafeCtx *ctx;              /* this target's stub + trampoline; allocated once, reused, never freed */
     ShList *list;              /* current subscribers (immutable snapshot) or NULL; atomic */
     void *raw_owner;           /* owner of a raw hook, NULL = none */
-    int created;               /* our thunk hook exists in MinHook */
+    int created;               /* our stub hook exists in MinHook (stays until process exit) */
     int enabled;               /* ... and is enabled */
 } ShRec;
 /* Per-call dispatcher state, in the thunk frame right after the V3X_HookCall (+0x190). */
@@ -426,10 +459,12 @@ int v3x_hook_add_safe(void *owner, void *target, v3x_hook_fn pre, v3x_hook_fn po
     if (!r->ctx) {
         SafeCtx *c = sh_alloc();
         if (!c) { s = MH_ERROR_MEMORY_ALLOC; goto out; }
-        memset(c, 0, sizeof *c);
-        c->pre = sh_disp_pre; c->post = sh_disp_post; c->user = r; c->target = target;
-        sh_write_stub(c);
+        sh_ctx_init(c, NULL);
         r->ctx = c;
+    }
+    if (!r->enabled) {                 /* disabled: no new call enters the stub; safe to (re)point it */
+        r->ctx->pre = sh_disp_pre; r->ctx->post = sh_disp_post; r->ctx->user = r; r->ctx->target = target;
+        __atomic_store_n(&r->ctx->jmp, (void *)v3x_safe_thunk, __ATOMIC_RELEASE);
     }
     if (!(nl = sh_list_copy(r, old))) { s = MH_ERROR_MEMORY_ALLOC; goto out; }
     nl->sub[n].pre = pre; nl->sub[n].post = post; nl->sub[n].user = user; nl->sub[n].owner = owner;
@@ -462,18 +497,33 @@ int v3x_hook_add_raw(void *owner, void *target, void *detour, void **original, v
     ShRec *r = target ? sh_find(target, 0) : NULL;
     if (r && r->raw_owner) { if (busy_owner) *busy_owner = r->raw_owner; s = V3X_EHOOKBUSY; goto out; }
     if (r && r->list && r->list->n) { if (busy_owner) *busy_owner = r->list->sub[0].owner; s = V3X_EHOOKBUSY; goto out; }
-    if (r && r->created) {                                 /* our disabled thunk from an old hook_safe */
-        if (r->enabled) MH_DisableHook(target);
-        MH_RemoveHook(target);
-        r->created = r->enabled = 0;
+    if (!target || !detour) { s = -1; goto out; }
+    if (!r && !(r = sh_find(target, 1))) { s = MH_ERROR_MEMORY_ALLOC; goto out; }
+    if (!r->ctx) {
+        SafeCtx *c = sh_alloc();
+        if (!c) { s = MH_ERROR_MEMORY_ALLOC; goto out; }
+        sh_ctx_init(c, NULL);
+        r->ctx = c;
     }
-    s = MH_CreateHook(target, detour, original);
-    if (s == MH_ERROR_ALREADY_CREATED) { s = V3X_EHOOKBUSY; goto out; }
-    if (s == MH_OK) {
-        s = MH_EnableHook(target);
-        if (s != MH_OK) MH_RemoveHook(target);
+    if (r->enabled) MH_DisableHook(target);   /* unreachable (subscribers / raw owner refused above); defensive */
+    r->enabled = 0;
+    /* the hook is disabled here: point the stub at the detour, then (re)enable the same entry */
+    r->ctx->pre = r->ctx->post = NULL; r->ctx->user = NULL; r->ctx->target = target;
+    __atomic_store_n(&r->ctx->jmp, detour, __ATOMIC_RELEASE);
+    if (!r->created) {
+        s = MH_CreateHook(target, r->ctx->stub, &r->ctx->original);
+        if (s == MH_ERROR_ALREADY_CREATED) { s = V3X_EHOOKBUSY; goto out; }   /* hooked outside the registry */
+        if (s != MH_OK) goto out;
+        r->created = 1;
     }
-    if (s == MH_OK && (r || (r = sh_find(target, 1)))) r->raw_owner = owner;   /* table full: untracked */
+    if (original) *original = r->ctx->original;   /* before enabling: the detour may run at once */
+    s = MH_EnableHook(target);
+    if (s != MH_OK) {
+        if (original) *original = NULL;
+        goto out;
+    }
+    r->enabled = 1;
+    r->raw_owner = owner;
 out:
     ReleaseSRWLockExclusive(&g_sh_lock);
     return s;
@@ -482,7 +532,8 @@ out:
 /* unhook for `owner`: removes its raw hook, or all of its hook_safe subscriptions on `target` (the
  * thunk is disabled when the last subscriber leaves). V3X_EHOOKBUSY (*busy_owner set) if only other
  * owners hold the target; MH_ERROR_NOT_CREATED if nothing is subscribed. A target unknown to the
- * registry is unhooked the old way (MH_DisableHook + MH_RemoveHook). */
+ * registry is only disabled (MH_DisableHook). Nothing is ever MH_RemoveHook'ed here: a removed
+ * hook frees the trampoline a thread may still be about to call (audit M2). */
 int v3x_hook_remove(void *owner, void *target, void **busy_owner)
 {
     if (busy_owner) *busy_owner = NULL;
@@ -490,11 +541,13 @@ int v3x_hook_remove(void *owner, void *target, void **busy_owner)
     AcquireSRWLockExclusive(&g_sh_lock);
     ShRec *r = target ? sh_find(target, 0) : NULL;
     if (!r) {
-        MH_DisableHook(target);
-        s = MH_RemoveHook(target);
+        s = MH_DisableHook(target);
     } else if (r->raw_owner) {
         if (r->raw_owner != owner) { if (busy_owner) *busy_owner = r->raw_owner; s = V3X_EHOOKBUSY; }
-        else { MH_DisableHook(target); s = MH_RemoveHook(target); r->raw_owner = NULL; }
+        else {
+            s = r->enabled ? MH_DisableHook(target) : MH_OK;   /* restores the original bytes; trampoline kept */
+            if (s == MH_OK) { r->enabled = 0; r->raw_owner = NULL; }
+        }
     } else if (!r->list || !r->list->n) {
         s = MH_ERROR_NOT_CREATED;
     } else {

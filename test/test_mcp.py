@@ -2,7 +2,8 @@
 """Tests mcp/v3x_mcp.py against a live devbridge, without the game.
 
 Starts devbridge_test.exe --serve N (set up as described in test/devbridge_test.c) on a private pipe,
-runs v3x_mcp.py as a subprocess and checks initialize / tools/list / tools/call, plus the
+runs v3x_mcp.py as a subprocess and checks initialize / tools/list / tools/call, the session token,
+the default allow list, the untrusted-data wrapper, the pipe-server image check and the
 "game not running" error. Exit code 0 = ALL OK.
 
 Usage: python test/test_mcp.py <dir>/devbridge_test.exe
@@ -41,9 +42,17 @@ class Client:
             return None
         return json.loads(self.p.stdout.readline())
 
-    def call(self, name, args):
+    def call(self, name, args, raw=False):
         r = self.send("tools/call", {"name": name, "arguments": args})["result"]
-        return r.get("isError"), r["content"][0]["text"]
+        text = r["content"][0]["text"]
+        if raw:
+            return r.get("isError"), text
+        head, tail = "untrusted data", "[end of V3X game output]\n"
+        if text.startswith("[V3X game output follows") and head in text.split("\n", 1)[0] and tail in text:
+            body = text.split("\n", 1)[1]
+            body, rest = body.split(tail, 1)
+            return r.get("isError"), body + rest
+        return r.get("isError"), text
 
     def close(self):
         self.p.stdin.close()
@@ -57,7 +66,8 @@ def main():
         return 2
     exe = os.path.abspath(sys.argv[1])
     pipe = "v3x_devbridge_mcptest_%d" % os.getpid()
-    env = dict(os.environ, V3X_NO_CONSOLE="1", V3X_DEVBRIDGE_PIPE=pipe, V3X_MCP_TIMEOUT="20")
+    env = dict(os.environ, V3X_NO_CONSOLE="1", V3X_DEVBRIDGE_PIPE=pipe, V3X_MCP_TIMEOUT="20",
+               V3X_MCP_SERVER_EXE=os.path.basename(exe))
     game = subprocess.Popen([exe, "--serve", "60"], stdout=subprocess.PIPE, env=env)
     try:
         ready = game.stdout.readline().decode(errors="replace")
@@ -77,7 +87,12 @@ def main():
               "tools/list: 7 tools with input schemas")
 
         err, text = c.call("v3x_exec", {"command": "help"})
-        check(not err and "  dis " in text and "  help" in text, "tools/call v3x_exec help")
+        check(not err and "  dis " in text and "  help" in text, "tools/call v3x_exec help (server image checked, token sent)")
+        err, raw = c.call("v3x_exec", {"command": "version"}, raw=True)
+        check(not err and raw.startswith("[V3X game output follows") and "untrusted data" in raw.split("\n", 1)[0]
+              and raw.rstrip().endswith("[end of V3X game output]"), "game output wrapped as untrusted data")
+        err, text = c.call("v3x_exec", {"command": "reload devbridge"})
+        check(err and "allow list" in text and "rc -4" in text, "v3x_exec reload -> refused by the default allow list")
         err, text = c.call("v3x_dis", {"addr": "+1000", "count": 3})
         exe_name = os.path.basename(exe)
         check(not err and text.count("\n") == 3 and (exe_name + "+0x1000") in text, "tools/call v3x_dis +1000 3 -> 3 lines")
@@ -98,6 +113,12 @@ def main():
         r = c.send("ping")
         check(r.get("result") == {}, "ping -> {}")
         check(c.close() == 0, "server exits cleanly on stdin EOF")
+
+        c = Client(dict(env, V3X_MCP_SERVER_EXE="victoria3.exe"))
+        c.send("initialize", {})
+        err, text = c.call("v3x_exec", {"command": "help"})
+        check(err and "not victoria3.exe" in text and "refusing" in text, "pipe served by another exe -> refused (squatter check)")
+        c.close()
 
         c = Client(dict(env, V3X_DEVBRIDGE_PIPE=pipe + "_nobody"))
         c.send("initialize", {})

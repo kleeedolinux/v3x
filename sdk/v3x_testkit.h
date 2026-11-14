@@ -61,8 +61,10 @@ static unsigned long long v3x_testkit_rva(const void *p) { return p ? (unsigned 
 /* An absolute pointer read from the unrelocated image -> address inside the mapping. */
 static void *v3x_testkit_ptr(uint64_t abs) { return abs ? v3x_tk.base + (abs - v3x_tk.pref_base) : NULL; }
 
+static void v3x_tk_log(const char *tag, const char *fmt, ...) V3X_PRINTF(2, 3);
 static void v3x_tk_log(const char *tag, const char *fmt, ...)
 { va_list ap; va_start(ap, fmt); printf("[%s] ", tag ? tag : "?"); vprintf(fmt, ap); printf("\n"); va_end(ap); }
+static int v3x_tk_print(const char *fmt, ...) V3X_PRINTF(1, 2);
 static int v3x_tk_print(const char *fmt, ...)
 { va_list ap; va_start(ap, fmt); int n = vprintf(fmt, ap); va_end(ap); if (!*fmt || fmt[strlen(fmt) - 1] != '\n') printf("\n"); return n; }
 static uintptr_t v3x_tk_base(void) { return (uintptr_t)v3x_tk.base; }
@@ -78,7 +80,7 @@ static void *v3x_tk_pattern_scan(const char *pat)
     for (const char *s = pat; *s && n < 256;) {
         if (*s == ' ') { s++; continue; }
         if (*s == '?') { b[n] = 0; m[n++] = 0; s++; if (*s == '?') s++; continue; }
-        char h[3] = {s[0], s[1] ? s[1] : 0, 0}; b[n] = (uint8_t)strtoul(h, NULL, 16); m[n++] = 1; s += s[1] ? 2 : 1;
+        char h[3] = {s[0], (char)(s[1] ? s[1] : 0), 0}; b[n] = (uint8_t)strtoul(h, NULL, 16); m[n++] = 1; s += s[1] ? 2 : 1;
     }
     for (size_t i = 0; n && i + n <= v3x_tk.text_size; i++) {
         if (m[0] && v3x_tk.text[i] != b[0]) continue;
@@ -142,6 +144,7 @@ static int v3x_tk_hook_safe(void *t, v3x_hook_fn pre, v3x_hook_fn post, void *u)
 static int v3x_tk_enum(void (*fn)(const char *, const char *, void *), void *u) { (void)fn; (void)u; return 0; }
 /* API v5: log_at prints like log (level prefix, threshold v3x_tk.log_level, default info) */
 static int v3x_tk_log_level(const char *tag) { (void)tag; return v3x_tk.log_level ? v3x_tk.log_level : V3X_LOG_INFO; }
+static void v3x_tk_log_at(int level, const char *tag, const char *fmt, ...) V3X_PRINTF(3, 4);
 static void v3x_tk_log_at(int level, const char *tag, const char *fmt, ...)
 {
     static const char *const pre[] = {"", "ERROR: ", "WARNING: ", "", "debug: ", "trace: "};

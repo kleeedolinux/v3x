@@ -21,9 +21,12 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <stdio.h>
+#include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
 #include "v3x.h"
+#include "v3x_safe.h"
+#include "v3x_util.h"   /* v3x_file_write_atomic: the one temp + MoveFileEx writer */
 #include "mm_logic.h"
 #include "mm_resolve.h"
 
@@ -33,6 +36,22 @@ V3X_PLUGIN_MANIFEST("mod_menu", "0.5.0", "v3x", "enable or disable V3X plugins f
 #define TAG "mod_menu"
 
 static const V3X_API *api;
+
+/* L10 (docs/security-audit.md): log lines carry mod / file / engine text; control characters,
+ * C1 controls and bidi overrides are replaced (v3x_sanitize_line) so a crafted name cannot forge
+ * v3x.log lines (parsed by doctor and the installer). */
+static void slog(const char *fmt, ...) V3X_PRINTF(1, 2);
+static void slog(const char *fmt, ...)
+{
+    if (!api) return;
+    char raw[1536], clean[1536];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(raw, sizeof raw, fmt, ap);
+    va_end(ap);
+    v3x_sanitize_line(clean, sizeof clean, raw);
+    api->log(TAG, "%s", clean);
+}
 static mm_plugin g_list[MM_NMAX];
 static int g_n;
 static mm_anchors g_a;
@@ -85,16 +104,13 @@ static char *read_file(const char *path, size_t *len)
 
 static int write_file_atomic(const char *path, const char *data, size_t n)
 {
-    char tmp[MAX_PATH + 8];
-    snprintf(tmp, sizeof tmp, "%s.tmp", path);
-    FILE *f = fopen(tmp, "wb");
-    if (!f) return 0;
-    int ok = fwrite(data, 1, n, f) == n;
-    ok = (fclose(f) == 0) && ok;
-    if (ok) ok = MoveFileExA(tmp, path, MOVEFILE_REPLACE_EXISTING) != 0;
-    if (!ok) DeleteFileA(tmp);
-    return ok;
+    return v3x_file_write_atomic(path, data, n) == 0;
 }
+
+/* L11: every writer of the v3x inis (mod_menu, doctor fix, V3X-Setup) holds V3X_CONFIG_MUTEX
+ * (sdk/v3x_util.h v3x_config_lock) around its read-modify-write. On a 5 s timeout the caller goes
+ * on (and logs it): losing the user's change would be worse than a rare race. */
+
 
 static void make_dirs(const char *dir)
 {
@@ -124,8 +140,8 @@ static int register_all(void)
         uint64_t out[16]; memset(out, 0, sizeof out);   /* description object, 0x38 bytes used */
         mk(out, &in);
         uint8_t r = reg(&name, NULL, k_exec[i], NULL, NULL, 0, out);  /* consumes `out` */
-        if (in.args.ptr) api->log(TAG, "note: description array of %s was allocated (not freed)", name.buf);
-        if (!r) { api->log(TAG, "engine refused GUI function %s", name.buf); return -1; }
+        if (in.args.ptr) slog("note: description array of %s was allocated (not freed)", name.buf);
+        if (!r) { slog("engine refused GUI function %s", name.buf); return -1; }
         ok++;
     }
     return ok;
@@ -135,18 +151,18 @@ static void write_gui(void)
 {
     size_t vn = 0;
     char *v = read_file(g_gui_in, &vn);
-    if (!v) { api->log(TAG, "cannot read %s - no menu", g_gui_in); return; }
+    if (!v) { slog("cannot read %s - no menu", g_gui_in); return; }
     size_t cap = vn + 256 * 1024;
     char *o = (char *)malloc(cap);
     const char *err = NULL;
     long n = o ? mm_gen_gui(v, g_list, g_n, o, cap, &err) : -1;
-    if (n < 0) api->log(TAG, "frontend_main.gui not patched: %s - vanilla main menu", err ? err : "out of memory");
+    if (n < 0) slog("frontend_main.gui not patched: %s - vanilla main menu", err ? err : "out of memory");
     else {
         char dir[MAX_PATH];
         snprintf(dir, sizeof dir, "%s\\gui\\frontend", g_pack);
         make_dirs(dir);
         g_gui_written = write_file_atomic(g_gui_out, o, (size_t)n);
-        api->log(TAG, "%s %s (%ld bytes, %d plugins)", g_gui_written ? "wrote" : "FAILED to write", g_gui_out, n, g_n);
+        slog("%s %s (%ld bytes, %d plugins)", g_gui_written ? "wrote" : "FAILED to write", g_gui_out, n, g_n);
     }
     free(o);
     free(v);
@@ -158,7 +174,7 @@ static uintptr_t hk_registrar(void *a, void *b, void *c, void *d, void *e, void 
     if (g_registered == -1) {
         g_registered = register_all();
         if (g_registered >= 0) {
-            api->log(TAG, "registered %d GUI functions (" MM_FN_FMT "..)", g_registered, 0);
+            slog("registered %d GUI functions (" MM_FN_FMT "..)", g_registered, 0);
             write_gui();
         }
     }
@@ -169,12 +185,15 @@ static uintptr_t hk_registrar(void *a, void *b, void *c, void *d, void *e, void 
 
 static void save_ini(void)
 {
+    HANDLE lk = v3x_config_lock(5000);
+    if (!lk) slog("v3x.ini lock (Local\\v3x_ini) busy for 5 s: saving anyway");
     char *old = read_file(g_ini, NULL);
     size_t cap = (old ? strlen(old) : 0) + 4096 + (size_t)g_n * 64;
     char *o = (char *)malloc(cap);
     size_t n = o ? mm_ini_rewrite(old, g_list, g_n, o, cap) : 0;
     int ok = n && write_file_atomic(g_ini, o, n);
-    api->log(TAG, "%s %s", ok ? "saved" : "FAILED to save", g_ini);
+    v3x_config_unlock(lk);
+    slog("%s %s", ok ? "saved" : "FAILED to save", g_ini);
     free(o);
     free(old);
 }
@@ -187,7 +206,7 @@ static void on_frame(void *user)
         LONG c = InterlockedExchange(&g_clicks[i], 0);
         if (!(c & 1) || g_list[i].locked) continue;
         g_list[i].enabled = !g_list[i].enabled;
-        api->log(TAG, "%s -> %s at the next start", g_list[i].stem, g_list[i].enabled ? "enabled" : "disabled");
+        slog("%s -> %s at the next start", g_list[i].stem, g_list[i].enabled ? "enabled" : "disabled");
         changed = 1;
     }
     if (changed) save_ini();
@@ -255,7 +274,7 @@ static void list_plugins(void)
     do {
         int before = g_n;
         g_n = mm_list_add(g_list, g_n, fd.cFileName);
-        if (g_n == before && g_n == MM_NMAX) api->log(TAG, "more than %d plugins: %s not shown", MM_NMAX, fd.cFileName);
+        if (g_n == before && g_n == MM_NMAX) slog("more than %d plugins: %s not shown", MM_NMAX, fd.cFileName);
     } while (FindNextFileA(h, &fd));
     FindClose(h);
     mm_list_sort(g_list, g_n);
@@ -280,7 +299,7 @@ static void check_mods(void)
         snprintf(path, sizeof path, "%s\\Documents\\Paradox Interactive\\Victoria 3\\content_load.json", env);
         json = read_file(path, NULL);
     }
-    if (!json) { api->log(TAG, "content_load.json not found - mod override check skipped"); return; }
+    if (!json) { slog("content_load.json not found - mod override check skipped"); return; }
     static char mods[256][MAX_PATH];
     int n = mm_json_mod_paths(json, mods[0], sizeof mods[0], 256);
     free(json);
@@ -288,10 +307,10 @@ static void check_mods(void)
         snprintf(path, sizeof path, "%s\\gui\\frontend\\frontend_main.gui", mods[i]);
         if (GetFileAttributesA(path) == INVALID_FILE_ATTRIBUTES) continue;
         snprintf(g_mod_override, sizeof g_mod_override, "%s", mods[i]);
-        api->log(TAG, "WARNING: enabled mod %s has its own frontend_main.gui; mods are mounted above content packs, "
+        slog("WARNING: enabled mod %s has its own frontend_main.gui; mods are mounted above content packs, "
                       "so the V3X main-menu button will not show (use the console: modmenu toggle <plugin>)", mods[i]);
     }
-    api->log(TAG, "%d enabled mods checked, %s", n, g_mod_override[0] ? "main menu overridden by a mod" : "none overrides the main menu");
+    slog("%d enabled mods checked, %s", n, g_mod_override[0] ? "main menu overridden by a mod" : "none overrides the main menu");
 }
 
 V3X_EXPORT int v3x_plugin_load(const V3X_API *a)
@@ -308,16 +327,16 @@ V3X_EXPORT int v3x_plugin_load(const V3X_API *a)
     check_mods();
     int have_packs = 0;
     for (int i = 0; i < g_n; i++) if (!_stricmp(g_list[i].stem, "content_packs") && g_list[i].enabled) have_packs = 1;
-    api->log(TAG, "%d plugins listed, ini %s", g_n, g_ini);
-    if (!have_packs) { api->log(TAG, "content_packs missing or disabled - the menu cannot be shown, nothing hooked"); return 0; }
+    slog("%d plugins listed, ini %s", g_n, g_ini);
+    if (!have_packs) { slog("content_packs missing or disabled - the menu cannot be shown, nothing hooked"); return 0; }
 
-    if (!resolve()) { api->log(TAG, "GUI function registration not found (%s) - vanilla main menu", g_a.err); return 0; }
+    if (!resolve()) { slog("GUI function registration not found (%s) - vanilla main menu", g_a.err); return 0; }
     uintptr_t base = api->image_base();
-    api->log(TAG, "registrar rva %llx, register %llx, desc %llx, array ctor %llx",
+    slog("registrar rva %llx, register %llx, desc %llx, array ctor %llx",
              (unsigned long long)((uintptr_t)g_a.registrar - base), (unsigned long long)((uintptr_t)g_a.reg - base),
              (unsigned long long)((uintptr_t)g_a.desc_make - base), (unsigned long long)((uintptr_t)g_a.array_ctor - base));
     int st = api->hook(g_a.registrar, (void *)hk_registrar, (void **)&g_registrar_orig);
-    if (st) { api->log(TAG, "hook failed (%d) - vanilla main menu", st); return 0; }
+    if (st) { slog("hook failed (%d) - vanilla main menu", st); return 0; }
     api->on_frame(on_frame, NULL);
     if (api->api_version >= 2 && api->struct_size >= offsetof(V3X_API, register_command) + sizeof(void *))
         api->register_command("modmenu", "mod_menu: list plugins; 'modmenu toggle <plugin>' flips it for the next start",

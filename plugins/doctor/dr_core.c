@@ -10,6 +10,7 @@
 #endif
 #include <windows.h>
 #include "v3x_util.h"
+#include "v3x_safe.h"
 
 #define GB (1024.0 * 1024.0 * 1024.0)
 
@@ -101,7 +102,7 @@ static const char *ini_text(const dr_inputs *in, const char *name)
     return NULL;
 }
 
-static dr_result *add(dr_results *o, const char *id, const char *name, int sev, const char *fmt, ...)
+static V3X_PRINTF(5, 6) dr_result *add(dr_results *o, const char *id, const char *name, int sev, const char *fmt, ...)
 {
     static dr_result spare;   /* table full: write into a scratch row */
     dr_result *r = o->n < DR_MAX_RESULTS ? &o->r[o->n++] : &spare;
@@ -111,16 +112,20 @@ static dr_result *add(dr_results *o, const char *id, const char *name, int sev, 
     r->sev = sev;
     va_list ap;
     va_start(ap, fmt);
-    vsnprintf(r->msg, sizeof r->msg, fmt, ap);
+    char raw[sizeof r->msg];
+    vsnprintf(raw, sizeof raw, fmt, ap);
     va_end(ap);
+    v3x_sanitize_line(r->msg, sizeof r->msg, raw);   /* L10: details quote mod / log / file text */
     return r;
 }
-static void todo(dr_result *r, const char *fmt, ...)
+static V3X_PRINTF(2, 3) void todo(dr_result *r, const char *fmt, ...)
 {
     va_list ap;
     va_start(ap, fmt);
-    vsnprintf(r->todo, sizeof r->todo, fmt, ap);
+    char raw[sizeof r->todo];
+    vsnprintf(raw, sizeof raw, fmt, ap);
     va_end(ap);
+    v3x_sanitize_line(r->todo, sizeof r->todo, raw);
 }
 static void set_fix(dr_result *r, const char *file, const char *section, const char *key, const char *value, int any)
 {
@@ -304,13 +309,13 @@ int dr_ini_set(const char *text, const char *section, const char *key, const cha
             sb_put(&b, L->s, (size_t)(L->next - L->s));
         }
         if (!matches && i == target_last) {
-            if (L->next == L->e) sb_str(&b, nl);   /* last line had no newline */
+            if (L->next[-1] != '\n') sb_str(&b, nl);   /* last line had no newline (also a bare CR end; found by fuzz_doctor) */
             sb_str(&b, kv); sb_str(&b, nl);
         }
     }
     if (!matches && into_named && !have_section) {
         if (b.n && b.p[b.n - 1] != '\n') sb_str(&b, nl);
-        if (b.n > (body - text)) sb_str(&b, nl);
+        if (b.n > (size_t)(body - text)) sb_str(&b, nl);
         sb_str(&b, "["); sb_str(&b, section); sb_str(&b, "]"); sb_str(&b, nl);
         sb_str(&b, kv); sb_str(&b, nl);
     }
@@ -339,7 +344,19 @@ static char *read_all(const char *path, size_t max, int *exists)
     return buf;
 }
 
+/* L11: every writer of the v3x inis (mod_menu, doctor fix, V3X-Setup) holds V3X_CONFIG_MUTEX
+ * (sdk/v3x_util.h v3x_config_lock) around its read-modify-write. On a 5 s timeout the caller goes
+ * on (and logs it): losing the user's change would be worse than a rare race. */
+
+static int dr_apply_fix_locked(const char *v3x_dir, const dr_fix *f, char *msg, size_t n);
 int dr_apply_fix(const char *v3x_dir, const dr_fix *f, char *msg, size_t n)
+{
+    HANDLE lk = v3x_config_lock(5000);          /* NULL after a 5 s timeout: apply anyway */
+    int rc = dr_apply_fix_locked(v3x_dir, f, msg, n);
+    v3x_config_unlock(lk);
+    return rc;
+}
+static int dr_apply_fix_locked(const char *v3x_dir, const dr_fix *f, char *msg, size_t n)
 {
     char path[MAX_PATH], bak[MAX_PATH + 16], old[128], where[64];
     int exists = 0;

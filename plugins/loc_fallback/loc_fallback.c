@@ -18,8 +18,10 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <stdio.h>
+#include <stdarg.h>
 #include <string.h>
 #include "v3x.h"
+#include "v3x_safe.h"
 #include "v3x_ini.h"
 #include "lf_core.h"
 
@@ -30,6 +32,22 @@ V3X_PLUGIN_MANIFEST("loc_fallback", "1.0.0", "V3X", "English fallback for locali
                     "*");
 
 static const V3X_API *api;
+
+/* L10 (docs/security-audit.md): log lines carry mod / file / engine text; control characters,
+ * C1 controls and bidi overrides are replaced (v3x_sanitize_line) so a crafted name cannot forge
+ * v3x.log lines (parsed by doctor and the installer). */
+static void slog(const char *fmt, ...) V3X_PRINTF(1, 2);
+static void slog(const char *fmt, ...)
+{
+    if (!api) return;
+    char raw[1536], clean[1536];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(raw, sizeof raw, fmt, ap);
+    va_end(ap);
+    v3x_sanitize_line(clean, sizeof clean, raw);
+    api->log(TAG, "%s", clean);
+}
 static lf_paths g_paths;
 static lf_cfg g_cfg;
 static lf_result g_res;
@@ -79,20 +97,20 @@ static void report(int to_console)
     snprintf(line, sizeof line, "language %s: %s in %.0f ms - %d key(s) filled (%d enabled mods, %d roots, %d files%s)",
              r->lang, lf_status_name(r->status), r->ms, r->total_filled, r->nmods, r->nroots, r->nfiles,
              r->status == LF_WRITTEN || r->status == LF_NOTHING ? ", parsed" : "");
-    if (out) out("%s", line); else api->log(TAG, "%s", line);
+    if (out) out("%s", line); else slog("%s", line);
     if (r->status == LF_WRITTEN || r->status == LF_NOTHING) {
         snprintf(line, sizeof line, "  %d %s keys present, %d English candidate keys (%d duplicate definitions)",
                  r->present_keys, r->lang, r->english_keys, r->dup_english);
-        if (out) out("%s", line); else api->log(TAG, "%s", line);
+        if (out) out("%s", line); else slog("%s", line);
     }
-    if (r->err[0]) { if (out) out("  ERROR: %s", r->err); else api->log(TAG, "ERROR: %s", r->err); }
+    if (r->err[0]) { if (out) out("  ERROR: %s", r->err); else slog("ERROR: %s", r->err); }
     for (int i = 0; i < r->nmods; i++) {
         if (!r->mods[i].filled) continue;
         snprintf(line, sizeof line, "  %5d  %s (%s)", r->mods[i].filled, r->mods[i].name, r->mods[i].id);
-        if (out) out("%s", line); else api->log(TAG, "%s", line);
+        if (out) out("%s", line); else slog("%s", line);
     }
-    if (r->vanilla_filled) { if (out) out("  %5d  vanilla", r->vanilla_filled); else api->log(TAG, "  %5d  vanilla", r->vanilla_filled); }
-    if (r->total_filled) { if (out) out("  -> %s", r->out_path); else api->log(TAG, "-> %s", r->out_path); }
+    if (r->vanilla_filled) { if (out) out("  %5d  vanilla", r->vanilla_filled); else slog("  %5d  vanilla", r->vanilla_filled); }
+    if (r->total_filled) { if (out) out("  -> %s", r->out_path); else slog("-> %s", r->out_path); }
 }
 
 static void run(int force)
@@ -140,7 +158,7 @@ V3X_EXPORT int v3x_plugin_load(const V3X_API *a)
     char cp[LF_PATH];
     snprintf(cp, sizeof cp, "%splugins/content_packs.dll", api->v3x_dir());
     if (g_res.total_filled && GetFileAttributesA(cp) == INVALID_FILE_ATTRIBUTES)
-        api->log(TAG, "WARNING: plugins/content_packs.dll not found - the fallback file will not be mounted");
+        slog("WARNING: plugins/content_packs.dll not found - the fallback file will not be mounted");
     if (V3X_HAS(api, register_command))
         api->register_command("locfallback", "loc_fallback: English keys filled into your language; 'locfallback rebuild'", cmd, NULL);
     return 0;

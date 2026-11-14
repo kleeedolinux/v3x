@@ -10,7 +10,8 @@
  * removing one owner keeps the other, removing all restores the original bytes, re-subscribing,
  * raw hook on a busy target (and hook_safe on a raw-hooked one, unhook by a non-owner) ->
  * V3X_EHOOKBUSY with the owner, and 8 threads calling while subscribers come and go (also the
- * last one, so the thunk is disabled/enabled under load). Owners are fake module handles here.
+ * last one, so the thunk is disabled/enabled under load), hook lifetime (unhook only disables, the
+ * trampoline stays valid and is reused) and the W^X stub pool. Owners are fake module handles here.
  * Exit code 0 = ALL OK. */
 #include "../src/safe_hook.c"
 #include <stdio.h>
@@ -306,6 +307,33 @@ int main(void)
     CHECK(rb.pre == 1 && v3x_hook_remove_owner(OWN(30)) == 0, "f4 still calls owner 31; a second remove_owner finds nothing");
     CHECK(v3x_hook_remove_owner(OWN(31)) == 1 && memcmp(o4, (void *)f4, 16) == 0 && v3x_hook_remove_owner(NULL) == 0,
           "remove_owner(31) restores f4; NULL owner is a no-op");
+
+    /* hook lifetime (audit M2, docs/adr/0003-hook-lifetime.md): unhook only disables, the trampoline
+     * stays callable (a thread may be about to call it), and the same MinHook entry is reused */
+    ll (*keep)(ll, ll, ll, ll) = NULL;
+    CHECK(v3x_hook_add_raw(OWN(40), (void *)f4, (void *)fdet4, (void **)&raw_orig, &busy) == 0, "M2: raw hook");
+    keep = raw_orig;
+    CHECK(v3x_hook_remove(OWN(40), (void *)f4, &busy) == 0 && memcmp(o4, (void *)f4, 16) == 0, "M2: raw unhook restores the bytes");
+    CHECK(keep && keep(1, 2, 3, 4) == 4321, "M2: the old trampoline is still valid after unhook (never freed)");
+    CHECK(MH_CreateHook((void *)f4, (void *)f2, NULL) == MH_ERROR_ALREADY_CREATED, "M2: the MinHook entry was kept (disabled, not removed)");
+    CHECK(v3x_hook_add_raw(OWN(41), (void *)f4, (void *)fdet4, (void **)&raw_orig, &busy) == 0 && raw_orig == keep &&
+              p4(1, 2, 3, 4) == 4322, "M2: a new raw hook reuses the same trampoline");
+    CHECK(v3x_hook_remove_owner(OWN(41)) == 1 && keep(1, 0, 0, 0) == 1 && memcmp(o4, (void *)f4, 16) == 0,
+          "M2: rollback (remove_owner) only disables too");
+    /* W^X stub pool (audit L2) */
+    ShRec *rec = sh_find((void *)f4, 0);
+    MEMORY_BASIC_INFORMATION mc, md;
+    CHECK(rec && rec->ctx && VirtualQuery(rec->ctx->stub, &mc, sizeof mc) && mc.Protect == PAGE_EXECUTE_READ,
+          "L2: stub page is PAGE_EXECUTE_READ (0x%lx)", rec && rec->ctx ? (unsigned long)mc.Protect : 0ul);
+    CHECK(rec && rec->ctx && VirtualQuery(rec->ctx, &md, sizeof md) && md.Protect == PAGE_READWRITE,
+          "L2: ctx data page is PAGE_READWRITE, not executable (0x%lx)", rec && rec->ctx ? (unsigned long)md.Protect : 0ul);
+    int rwx = 0;
+    for (unsigned pg = 0; pg < SH_MAX_PAGES; pg++) {
+        MEMORY_BASIC_INFORMATION m;
+        if (g_sh_code[pg] && VirtualQuery(g_sh_code[pg], &m, sizeof m) && (m.Protect & (PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY))) rwx++;
+        if (g_sh_pages[pg] && VirtualQuery(g_sh_pages[pg], &m, sizeof m) && (m.Protect & 0xF0)) rwx++;
+    }
+    CHECK(rwx == 0, "L2: no writable+executable page in the hook pool");
 
     printf("%d checks, %d failed\n%s\n", checks, fails, fails ? "FAILED" : "ALL OK");
     return fails ? 1 : 0;

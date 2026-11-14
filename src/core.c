@@ -31,6 +31,7 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
+#include <wchar.h>
 #include <share.h>
 
 #include "MinHook.h"
@@ -54,6 +55,13 @@ static HMODULE g_self;
 static uint8_t *g_base;
 static size_t g_size;
 static uint8_t *g_text; static size_t g_text_size;
+/* Paths. The core itself only uses the wide (UTF-16) forms for its own files and for loading plugins, so a
+ * game folder with characters outside the ANSI code page works (audit L13). api->game_dir / v3x_dir
+ * stay ANSI (the frozen API returns const char *): plugins pass them to fopen/CreateFileA; if the folder
+ * cannot be represented in the ANSI code page boot() logs a WARNING. */
+#define V3X_WPATH 1024
+static wchar_t g_game_dirW[V3X_WPATH];   /* ...\binaries\ */
+static wchar_t g_v3x_dirW[V3X_WPATH];    /* ...\binaries\v3x\ */
 static char g_game_dir[MAX_PATH];
 static char g_v3x_dir[MAX_PATH];
 static char g_version[128] = "unknown";
@@ -80,7 +88,8 @@ static Range g_data_ranges[8]; static int g_data_count;
  * skipped). NULL = not a module (e.g. heap code) or the core. */
 #define MAX_FRAME_CBS 64
 static struct { v3x_frame_fn fn; void *user; HMODULE mod; } g_frame_cbs[MAX_FRAME_CBS];
-static volatile LONG g_frame_count;
+static volatile LONG g_frame_count;     /* published after the entry is written; readers are lock-free */
+static SRWLOCK g_frame_lock = SRWLOCK_INIT;   /* writers (api_on_frame) only */
 
 /* loaded-plugin records for the `plugins` command */
 #define MAX_PLUGINS 64
@@ -155,6 +164,7 @@ static void capture_deliver(const char *text)
 }
 
 /* One log line: "[hh:mm:ss.mmm][tag] " + prefix (API v5 level prefix, may be "") + message. */
+static void v3x_vlog(const char *tag, const char *prefix, const char *fmt, va_list ap) __attribute__((format(printf, 3, 0)));
 static void v3x_vlog(const char *tag, const char *prefix, const char *fmt, va_list ap)
 {
     if (process_exiting() || !fmt) return;   /* the lock/FILE/console may belong to a dead thread */
@@ -174,6 +184,7 @@ static void v3x_vlog(const char *tag, const char *prefix, const char *fmt, va_li
     capture_deliver(line);
 }
 
+static void v3x_log(const char *tag, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 static void v3x_log(const char *tag, const char *fmt, ...)
 {
     va_list ap; va_start(ap, fmt); v3x_vlog(tag, "", fmt, ap); va_end(ap);
@@ -232,6 +243,7 @@ static int set_log_level(const char *tag, size_t tn, int level)
     return rc;
 }
 
+static void api_log_at(int level, const char *tag, const char *fmt, ...) __attribute__((format(printf, 3, 4)));
 static void api_log_at(int level, const char *tag, const char *fmt, ...)
 {
     static const char *prefix[] = {"", "ERROR: ", "WARNING: ", "", "debug: ", "trace: "};
@@ -242,6 +254,7 @@ static void api_log_at(int level, const char *tag, const char *fmt, ...)
 }
 
 /* API v2 print: plain text to console + v3x.log, newline appended if missing. */
+static int api_print(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 static int api_print(const char *fmt, ...)
 {
     char buf[8192];
@@ -272,11 +285,39 @@ static int api_print(const char *fmt, ...)
     return (int)len;
 }
 
+/* out = dir + name (ASCII/UTF-8 name). 0, or -1 (out = L"") if it does not fit. Bounded, always terminated. */
+static int wpath(wchar_t *out, size_t cap, const wchar_t *dir, const char *name)
+{
+    size_t n = wcslen(dir);
+    if (!cap) return -1;
+    out[0] = 0;
+    if (n >= cap) return -1;
+    wmemcpy(out, dir, n);
+    int k = MultiByteToWideChar(CP_UTF8, 0, name, -1, out + n, (int)(cap - n));
+    if (k <= 0) { out[0] = 0; return -1; }
+    return 0;
+}
+
+/* fopen of <v3x_dir><name> through the wide path (L13). NULL if missing or the path does not fit. */
+static FILE *v3x_fopen(const char *name, const wchar_t *mode)
+{
+    wchar_t p[V3X_WPATH];
+    if (wpath(p, V3X_WPATH, g_v3x_dirW, name)) return NULL;
+    return _wfopen(p, mode);
+}
+
+/* UTF-8 form of a wide string for log lines ("?" on failure). */
+static const char *utf8_of(const wchar_t *w, char *buf, size_t n)
+{
+    if (!n) return "";
+    if (!w || WideCharToMultiByte(CP_UTF8, 0, w, -1, buf, (int)n, NULL, NULL) <= 0) snprintf(buf, n, "?");
+    return buf;
+}
+
 static int console_wanted(void)
 {
     if (GetEnvironmentVariableA("V3X_NO_CONSOLE", NULL, 0)) return 0;
-    char ini[MAX_PATH]; snprintf(ini, sizeof ini, "%sv3x.ini", g_v3x_dir);
-    FILE *f = fopen(ini, "r");
+    FILE *f = v3x_fopen("v3x.ini", L"r");
     if (!f) return 1;
     char buf[256]; int want = 1;
     while (fgets(buf, sizeof buf, f))
@@ -391,11 +432,11 @@ static HMODULE module_of(const void *addr)
 
 static const char *module_base_name(HMODULE m, char *buf, size_t n)
 {
-    char path[MAX_PATH];
-    if (!m || !GetModuleFileNameA(m, path, sizeof path)) { snprintf(buf, n, "?"); return buf; }
-    const char *b = strrchr(path, '\\');
-    snprintf(buf, n, "%s", b ? b + 1 : path);
-    return buf;
+    wchar_t path[V3X_WPATH];
+    DWORD k = m ? GetModuleFileNameW(m, path, V3X_WPATH) : 0;
+    if (!k || k >= V3X_WPATH) { snprintf(buf, n, "?"); return buf; }
+    const wchar_t *b = wcsrchr(path, L'\\');
+    return utf8_of(b ? b + 1 : path, buf, n);
 }
 
 /* Modules whose callbacks are skipped (faulted, or v3x_plugin_load failed). Append-only; the module
@@ -472,8 +513,37 @@ static int api_register_command(const char *name, const char *help, v3x_command_
     return rc;
 }
 
+/* Command threading rule (security hardening, include/v3x.h thread rules): command handlers never run
+ * concurrently. exec_command (console input thread, devbridge, plugins on any thread) holds the
+ * command-run lock while the handler runs. It is recursive per thread, so a handler may exec other
+ * commands (exec_capture("help") inside a command). Another thread waits up to CMD_RUN_WAIT_MS for it;
+ * after that the command is NOT run and exec_command returns -1 ("busy"), so a handler that waits for
+ * the main thread while the main thread execs a command cannot deadlock the game. The lock is a plain
+ * owner word (no OS object), so a thread killed at process exit cannot leave a kernel lock behind
+ * (exec_command returns at once then anyway). */
+#define CMD_RUN_WAIT_MS 5000
+static volatile LONG g_cmdrun_owner;   /* thread id holding the lock, 0 = free (thread ids are never 0) */
+static LONG g_cmdrun_depth;            /* owner only */
+
+static int cmdrun_enter(void)
+{
+    LONG me = (LONG)GetCurrentThreadId();
+    if (g_cmdrun_owner == me) { g_cmdrun_depth++; return 1; }
+    DWORD t0 = GetTickCount();
+    for (int spin = 0;; spin++) {
+        if (InterlockedCompareExchange(&g_cmdrun_owner, me, 0) == 0) { g_cmdrun_depth = 1; return 1; }
+        if (process_exiting() || GetTickCount() - t0 >= CMD_RUN_WAIT_MS) return 0;
+        if (spin < 64) YieldProcessor(); else Sleep(1);
+    }
+}
+
+static void cmdrun_leave(void)
+{
+    if (--g_cmdrun_depth == 0) InterlockedExchange(&g_cmdrun_owner, 0);
+}
+
 /* Runs one console line on the calling thread. The command runs outside g_cmd_lock so it may
- * itself register or exec commands. */
+ * itself register or exec commands; it runs inside the command-run lock (rule above). */
 static int api_exec_command(const char *line)
 {
     if (!line || process_exiting()) return -1;
@@ -499,8 +569,14 @@ static int api_exec_command(const char *line)
     LeaveCriticalSection(&g_cmd_lock);
     if (!fn) { api_print("unknown command '%s' (type 'help')", name); return -1; }
     if (module_disabled(mod)) { api_print("command '%s' is disabled: its plugin faulted (see v3x.log)", name); return -1; }
+    if (!cmdrun_enter()) {
+        api_print("command '%s' not run: another command is still running (waited %d ms)", name, CMD_RUN_WAIT_MS);
+        return -1;
+    }
     Fault f;
-    if (guard_command_fn(fn, argbuf, user, &f)) { on_fault(mod, "console command", name, &f); return 0; }
+    int faulted = guard_command_fn(fn, argbuf, user, &f);
+    cmdrun_leave();
+    if (faulted) on_fault(mod, "console command", name, &f);
     return 0;
 }
 
@@ -890,12 +966,9 @@ static void *caller_module(void *ret_addr)
 
 static const char *module_label(void *m, char *buf, size_t n)
 {
-    char path[MAX_PATH];
     if (!m) return "unknown (hooked outside the V3X API)";
     if (m == (void *)g_self) return "v3x core";
-    if (!GetModuleFileNameA((HMODULE)m, path, sizeof path)) { snprintf(buf, n, "module %p", m); return buf; }
-    const char *b = strrchr(path, '\\');
-    snprintf(buf, n, "%s", b ? b + 1 : path);
+    if (!strcmp(module_base_name((HMODULE)m, buf, n), "?")) snprintf(buf, n, "module %p", m);
     return buf;
 }
 
@@ -985,8 +1058,9 @@ static int api_patch(void *addr, const void *bytes, size_t n)
     return rc;
 }
 
-/* Undoes what module m installed: its hooks (raw + hook_safe, src/safe_hook.c) and its patches (newest
- * first). Only called on the main thread at load time, right after m's v3x_plugin_load failed. */
+/* Undoes what module m installed: its hooks (raw + hook_safe, src/safe_hook.c: DISABLED only, the
+ * trampolines are never freed, docs/adr/0003-hook-lifetime.md) and its patches (newest first). Only
+ * called on the main thread at load time, right after m's v3x_plugin_load failed. */
 static void rollback_module(HMODULE m, const char *name)
 {
     int hooks = 0, patches = 0;
@@ -1002,13 +1076,23 @@ static void rollback_module(HMODULE m, const char *name)
     LOG("plugin '%s' rolled back: %d hook target(s) released, %d patch(es) restored, callbacks disabled", name, hooks, patches);
 }
 
+/* Any thread (audit M3): slots are reserved under g_frame_lock, the entry is written, then the count is
+ * published with a full barrier, so hk_PeekMessageW (lock-free) only ever sees complete entries and two
+ * registering threads never get the same slot. */
 static int api_on_frame(v3x_frame_fn fn, void *user)
 {
+    if (!fn || process_exiting()) return -1;
+    HMODULE mod = module_of((const void *)fn);   /* outside the lock (takes the loader lock) */
+    int rc = -1;
+    AcquireSRWLockExclusive(&g_frame_lock);
     LONG i = g_frame_count;
-    if (!fn || i >= MAX_FRAME_CBS) return -1;
-    g_frame_cbs[i].fn = fn; g_frame_cbs[i].user = user; g_frame_cbs[i].mod = module_of((const void *)fn);
-    InterlockedIncrement(&g_frame_count);
-    return 0;
+    if (i < MAX_FRAME_CBS) {
+        g_frame_cbs[i].fn = fn; g_frame_cbs[i].user = user; g_frame_cbs[i].mod = mod;
+        InterlockedExchange(&g_frame_count, i + 1);
+        rc = 0;
+    }
+    ReleaseSRWLockExclusive(&g_frame_lock);
+    return rc;
 }
 
 typedef BOOL(WINAPI *PeekMessageW_t)(LPMSG, HWND, UINT, UINT, UINT);
@@ -1072,6 +1156,7 @@ static const V3X_API g_api = {
 /* For tests/tools that are not plugins: GetProcAddress(GetModuleHandleA("version.dll"), "v3x_api"). */
 __declspec(dllexport) const V3X_API *v3x_api(void) { return &g_api; }
 
+static int plugin_record(const char *name, const char *file, const char *fmt, ...) __attribute__((format(printf, 3, 4)));
 static int plugin_record(const char *name, const char *file, const char *fmt, ...)
 {
     if (g_plugin_count >= MAX_PLUGINS) return -1;
@@ -1154,79 +1239,13 @@ static int read_manifest(HMODULE m, const char **name, char *version, char *auth
 
 /* ------------------------------------------------------------------ plugin loading */
 
-/* [plugins] section of v3x/v3x.ini: "<dll file name without .dll> = 0" skips that plugin (written by
- * mod_menu, or by hand). Same rules as plugins/mod_menu/mm_logic.c mm_ini_enabled: section and key
- * names are case-insensitive and trimmed, '#'/';' lines are comments, the last matching line wins,
- * 0/off/no/false = disabled, anything else or no line = enabled. */
-static int ini_ieq(const char *a, size_t an, const char *b)
-{
-    size_t bn = strlen(b);
-    if (an != bn) return 0;
-    for (size_t i = 0; i < an; i++) {
-        char x = a[i], y = b[i];
-        if (x >= 'A' && x <= 'Z') x = (char)(x - 'A' + 'a');
-        if (y >= 'A' && y <= 'Z') y = (char)(y - 'A' + 'a');
-        if (x != y) return 0;
-    }
-    return 1;
-}
-
-/* Calls fn(key, key_len, value, value_len, ctx) for every "key = value" line inside [section] of an
- * ini text, in file order (so "last wins" is up to fn). Rules as in ini_plugin_enabled. */
-typedef void (*ini_kv_fn)(const char *k, size_t kn, const char *v, size_t vn, void *ctx);
-static void ini_each(const char *ini, const char *section, ini_kv_fn fn, void *ctx)
-{
-    int in = !*section;   /* section "" = the keys before the first [section] */
-    for (const char *p = ini; p && *p;) {
-        const char *e = p;
-        while (*e && *e != '\n') e++;
-        const char *a = p, *b = e;
-        if (b > a && b[-1] == '\r') b--;
-        while (a < b && (*a == ' ' || *a == '\t')) a++;
-        while (b > a && (b[-1] == ' ' || b[-1] == '\t')) b--;
-        if (a < b && *a == '[') {
-            const char *c = memchr(a, ']', (size_t)(b - a));
-            if (c) {
-                const char *s0 = a + 1, *t = c;
-                while (s0 < t && (*s0 == ' ' || *s0 == '\t')) s0++;
-                while (t > s0 && (t[-1] == ' ' || t[-1] == '\t')) t--;
-                in = ini_ieq(s0, (size_t)(t - s0), section);
-            }
-        } else if (in && a < b && *a != '#' && *a != ';') {
-            const char *eq = memchr(a, '=', (size_t)(b - a));
-            if (eq) {
-                const char *ke = eq, *vs = eq + 1;
-                while (ke > a && (ke[-1] == ' ' || ke[-1] == '\t')) ke--;
-                while (vs < b && (*vs == ' ' || *vs == '\t')) vs++;
-                fn(a, (size_t)(ke - a), vs, (size_t)(b - vs), ctx);
-            }
-        }
-        p = *e ? e + 1 : e;
-    }
-}
-
-struct plugin_en { const char *stem; int en; };
-static void plugin_en_kv(const char *k, size_t kn, const char *v, size_t vn, void *ctx)
-{
-    struct plugin_en *pe = (struct plugin_en *)ctx;
-    if (ini_ieq(k, kn, pe->stem))
-        pe->en = !(ini_ieq(v, vn, "0") || ini_ieq(v, vn, "off") || ini_ieq(v, vn, "no") || ini_ieq(v, vn, "false"));
-}
-
-static int ini_plugin_enabled(const char *ini, const char *stem)
-{
-    struct plugin_en pe = {stem, 1};
-    ini_each(ini, "plugins", plugin_en_kv, &pe);
-    return pe.en;
-}
+#include "core_ini.h"   /* ini_ieq, ini_each (rules there) */
 
 /* v3x/v3x.ini as text (empty if missing; at most 64 KB). */
 static void read_v3x_ini(char *buf, size_t cap)
 {
-    char path[MAX_PATH];
     buf[0] = 0;
-    snprintf(path, sizeof path, "%sv3x.ini", g_v3x_dir);
-    FILE *f = fopen(path, "rb");
+    FILE *f = v3x_fopen("v3x.ini", L"rb");
     if (!f) return;
     size_t n = fread(buf, 1, cap - 1, f);
     fclose(f);
@@ -1262,13 +1281,13 @@ static void log_config_load(void)
  * (its DllMain may crash too), deleted when v3x_plugin_load returned. If the game dies inside a
  * plugin's load, the marker survives; on the next start that plugin is skipped ONCE (and the marker
  * removed, so the start after that tries it again). */
-static void marker_path(char *out, size_t n) { snprintf(out, n, "%sloading.marker", g_v3x_dir); }
+static int marker_path(wchar_t *out, size_t n) { return wpath(out, n, g_v3x_dirW, "loading.marker"); }
 
 static void marker_set(const char *stem)
 {
-    char p[MAX_PATH];
-    marker_path(p, sizeof p);
-    HANDLE h = CreateFileA(p, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    wchar_t p[V3X_WPATH];
+    if (marker_path(p, V3X_WPATH)) return;
+    HANDLE h = CreateFileW(p, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (h == INVALID_HANDLE_VALUE) return;
     DWORD w;
     WriteFile(h, stem, (DWORD)strlen(stem), &w, NULL);
@@ -1277,24 +1296,23 @@ static void marker_set(const char *stem)
 
 static void marker_clear(void)
 {
-    char p[MAX_PATH];
-    marker_path(p, sizeof p);
-    DeleteFileA(p);
+    wchar_t p[V3X_WPATH];
+    if (!marker_path(p, V3X_WPATH)) DeleteFileW(p);
 }
 
 /* The stem left by a load that never returned last start ("" = none); removes the marker. */
 static void marker_take(char *out, size_t n)
 {
-    char p[MAX_PATH];
-    marker_path(p, sizeof p);
+    wchar_t p[V3X_WPATH];
     out[0] = 0;
-    FILE *f = fopen(p, "rb");
+    if (marker_path(p, V3X_WPATH)) return;
+    FILE *f = _wfopen(p, L"rb");
     if (!f) return;
     size_t k = fread(out, 1, n - 1, f);
     fclose(f);
     out[k] = 0;
     while (k && (out[k - 1] == '\r' || out[k - 1] == '\n' || out[k - 1] == ' ')) out[--k] = 0;
-    DeleteFileA(p);
+    DeleteFileW(p);
 }
 
 /* Read-only: the last "UNHANDLED EXCEPTION" line crash_logger wrote last session (crash.log is still
@@ -1303,9 +1321,7 @@ static void marker_take(char *out, size_t n)
 static char g_last_crash[200];
 static void read_last_crash(void)
 {
-    char p[MAX_PATH];
-    snprintf(p, sizeof p, "%scrash.log", g_v3x_dir);
-    FILE *f = fopen(p, "rb");
+    FILE *f = v3x_fopen("crash.log", L"rb");
     if (!f) return;
     static char buf[262144];
     if (fseek(f, 0, SEEK_END) == 0) {
@@ -1343,12 +1359,15 @@ static void gate_kv(const char *k, size_t kn, const char *v, size_t vn, void *ct
 /* 1 = the gate applies to this start (unknown build, safe mode). */
 static int build_gate_active(const char *ini)
 {
-    char exe[MAX_PATH], env[16];
-    GetModuleFileNameA(NULL, exe, sizeof exe);
-    const char *b = strrchr(exe, '\\');
+    wchar_t exe[V3X_WPATH];
+    char env[16];
+    DWORD en = GetModuleFileNameW(NULL, exe, V3X_WPATH);
+    if (en >= V3X_WPATH) en = 0;
+    exe[en] = 0;
+    const wchar_t *b = wcsrchr(exe, L'\\');
     b = b ? b + 1 : exe;
     int forced = GetEnvironmentVariableA("V3X_BUILD_GATE", env, sizeof env) && env[0] == '1';
-    if (!forced && _stricmp(b, "victoria3.exe")) return 0;
+    if (!forced && _wcsicmp(b, L"victoria3.exe")) return 0;
     if (build_matches_ex(V3X_KNOWN_BUILDS, 1)) return 0;
     struct gate_cfg g = {0};
     ini_each(ini, "", gate_kv, &g);
@@ -1369,8 +1388,10 @@ static int build_gate_active(const char *ini)
 
 static void load_plugins(void)
 {
-    char pattern[MAX_PATH];
-    snprintf(pattern, sizeof pattern, "%splugins\\*.dll", g_v3x_dir);
+    wchar_t pattern[V3X_WPATH];
+    char pattern8[MAX_PATH * 3];
+    if (wpath(pattern, V3X_WPATH, g_v3x_dirW, "plugins\\*.dll")) { LOG("ERROR: plugin folder path too long"); return; }
+    utf8_of(pattern, pattern8, sizeof pattern8);
     char crashed[MAX_PATH];
     marker_take(crashed, sizeof crashed);
     if (crashed[0]) {
@@ -1379,16 +1400,18 @@ static void load_plugins(void)
         if (g_con) api_print("V3X: plugin %s crashed the game while loading last time; it is skipped this start.", crashed);
     }
     read_last_crash();
-    WIN32_FIND_DATAA fd;
-    HANDLE h = FindFirstFileA(pattern, &fd);
-    if (h == INVALID_HANDLE_VALUE) { LOG("no plugins found (%s)", pattern); return; }
+    WIN32_FIND_DATAW fdw;
+    HANDLE h = FindFirstFileW(pattern, &fdw);
+    if (h == INVALID_HANDLE_VALUE) { LOG("no plugins found (%s)", pattern8); return; }
     int ok = 0, total = 0, disabled = 0, failed = 0, skipped = 0;
     static char ini[65536];
     read_v3x_ini(ini, sizeof ini);
     int gate = build_gate_active(ini);
     do {
+        struct { char cFileName[MAX_PATH * 3]; } fd;   /* UTF-8 file name for logs, records and the ini */
+        utf8_of(fdw.cFileName, fd.cFileName, sizeof fd.cFileName);
         total++;
-        char stem[MAX_PATH];
+        char stem[MAX_PATH * 3];
         snprintf(stem, sizeof stem, "%s", fd.cFileName);
         char *dot = strrchr(stem, '.');
         if (dot && !_stricmp(dot, ".dll")) *dot = 0;
@@ -1403,10 +1426,18 @@ static void load_plugins(void)
             plugin_record(stem, fd.cFileName, "disabled: crashed during load last start");
             continue;
         }
-        char path[MAX_PATH];
-        snprintf(path, sizeof path, "%splugins\\%s", g_v3x_dir, fd.cFileName);
+        wchar_t path[V3X_WPATH];
+        size_t dl = wcslen(g_v3x_dirW), fl = wcslen(fdw.cFileName);
+        if (dl + 8 + fl + 1 > V3X_WPATH) {
+            LOG("FAILED to load %s: path too long", fd.cFileName);
+            plugin_record("?", fd.cFileName, "FAILED: path too long");
+            continue;
+        }
+        wmemcpy(path, g_v3x_dirW, dl);
+        wmemcpy(path + dl, L"plugins\\", 8);
+        wmemcpy(path + dl + 8, fdw.cFileName, fl + 1);
         marker_set(stem);
-        HMODULE m = LoadLibraryA(path);
+        HMODULE m = LoadLibraryW(path);
         if (!m) {
             DWORD e = GetLastError();
             marker_clear();
@@ -1461,7 +1492,7 @@ static void load_plugins(void)
             module_disable(m, st);
             rollback_module(m, name);
         }
-    } while (FindNextFileA(h, &fd));
+    } while (FindNextFileW(h, &fdw));
     FindClose(h);
     if (disabled) LOG("%d/%d plugins loaded, %d disabled in v3x.ini", ok, total - disabled, disabled);
     else LOG("%d/%d plugins loaded", ok, total);
@@ -1506,7 +1537,7 @@ static int WINAPI hk_entry(void)
     LOG("entry point reached on main thread %lu", g_main_thread);
 
     void *peek = (void *)GetProcAddress(GetModuleHandleA("user32.dll") ? GetModuleHandleA("user32.dll")
-                                                                         : LoadLibraryA("user32.dll"),
+                                                                         : LoadLibraryExW(L"user32.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32),
                                         "PeekMessageW");
     int s = peek ? api_hook(peek, (void *)hk_PeekMessageW, (void **)&g_PeekMessageW) : -1;
     LOG("frame hook (PeekMessageW): %s", s == 0 ? "ok" : "FAILED");
@@ -1520,9 +1551,9 @@ static int WINAPI hk_entry(void)
     return g_real_entry();
 }
 
-static void read_text_file(const char *path, char *out, size_t cap)
+static void read_text_file(const wchar_t *path, char *out, size_t cap)
 {
-    FILE *f = fopen(path, "rb");
+    FILE *f = _wfopen(path, L"rb");
     if (!f) return;
     size_t n = fread(out, 1, cap - 1, f);
     fclose(f);
@@ -1541,31 +1572,48 @@ static void boot(void)
     InitializeCriticalSection(&g_patch_lock);
     register_builtins();
 
-    /* Paths come from the exe, not from version.dll, so this works wherever the game lives. */
-    GetModuleFileNameA(NULL, g_game_dir, MAX_PATH);
-    char *slash = strrchr(g_game_dir, '\\');
+    /* Paths come from the exe, not from version.dll, so this works wherever the game lives. Wide first
+     * (L13); a path that does not fit leaves the dirs empty (files then resolve relative to the cwd). */
+    wchar_t exeW[V3X_WPATH];
+    DWORD en = GetModuleFileNameW(NULL, exeW, V3X_WPATH);
+    int path_bad = en == 0 || en >= V3X_WPATH - 16;
+    if (path_bad) en = 0;
+    exeW[en] = 0;
+    wmemcpy(g_game_dirW, exeW, (size_t)en + 1);
+    wchar_t *slash = wcsrchr(g_game_dirW, L'\\');
     if (slash) slash[1] = 0;
+    size_t gl = wcslen(g_game_dirW);
+    wmemcpy(g_v3x_dirW, g_game_dirW, gl);
+    wmemcpy(g_v3x_dirW + gl, L"v3x\\", 5);
+    if (gl) CreateDirectoryW(g_v3x_dirW, NULL);
+    /* ANSI copies for the API (frozen const char *); lossy = characters outside the ANSI code page */
+    BOOL lossy = FALSE;
+    int an = WideCharToMultiByte(CP_ACP, WC_NO_BEST_FIT_CHARS, g_game_dirW, -1, g_game_dir, MAX_PATH - 5, NULL, &lossy);
+    if (an <= 0) { g_game_dir[0] = 0; lossy = TRUE; }
     snprintf(g_v3x_dir, sizeof g_v3x_dir, "%sv3x\\", g_game_dir);
-    CreateDirectoryA(g_v3x_dir, NULL);
 
-    char logpath[MAX_PATH];
-    snprintf(logpath, sizeof logpath, "%sv3x.log", g_v3x_dir);
-    g_log = _fsopen(logpath, "w", _SH_DENYWR);
+    wchar_t logpath[V3X_WPATH];
+    if (!wpath(logpath, V3X_WPATH, g_v3x_dirW, "v3x.log")) g_log = _wfsopen(logpath, L"w", _SH_DENYWR);
     if (!g_log) {
         /* v3x.log can be held open by another process (e.g. Paradox's CrashReporter after a crash):
          * fall back to a per-process file so the session's log is never lost. */
-        snprintf(logpath, sizeof logpath, "%sv3x.%lu.log", g_v3x_dir, GetCurrentProcessId());
-        g_log = _fsopen(logpath, "w", _SH_DENYWR);
+        char alt[64];
+        snprintf(alt, sizeof alt, "v3x.%lu.log", GetCurrentProcessId());
+        if (!wpath(logpath, V3X_WPATH, g_v3x_dirW, alt)) g_log = _wfsopen(logpath, L"w", _SH_DENYWR);
     }
 
-    char vpath[MAX_PATH];
-    snprintf(vpath, sizeof vpath, "%s..\\caligula_branch.txt", g_game_dir);
-    read_text_file(vpath, g_version, sizeof g_version);
+    wchar_t vpath[V3X_WPATH];
+    if (!wpath(vpath, V3X_WPATH, g_game_dirW, "..\\caligula_branch.txt")) read_text_file(vpath, g_version, sizeof g_version);
 
     read_module_layout();
-    char exe[MAX_PATH]; GetModuleFileNameA(NULL, exe, MAX_PATH);
-    LOG("V3X %s api v%d, exe=%s base=%p size=0x%zx game=%s", V3X_LOADER_SEMVER, V3X_API_VERSION, exe, g_base, g_size,
-        g_version);
+    char exe[V3X_WPATH * 3];
+    LOG("V3X %s api v%d, exe=%s base=%p size=0x%zx game=%s", V3X_LOADER_SEMVER, V3X_API_VERSION, utf8_of(exeW, exe, sizeof exe),
+        g_base, g_size, g_version);
+    if (path_bad) LOG("ERROR: the game path is too long (> %d chars): v3x files are not found", V3X_WPATH - 16);
+    if (lossy)
+        LOG("WARNING: the game folder has characters outside the ANSI code page: the loader works, but plugins that "
+            "open files through api->game_dir / v3x_dir with ANSI functions (fopen, CreateFileA) will fail. "
+            "Move the game to a plain path to be safe.");
     log_config_load();
 
     if (GetEnvironmentVariableA("V3X_DISABLE", NULL, 0)) { LOG("V3X_DISABLE set, not hooking"); return; }
@@ -1588,7 +1636,11 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
         DisableThreadLibraryCalls(inst);
         int missing = v3x_proxy_resolve();
         boot();
-        if (missing) LOG("WARNING: %d version.dll exports unresolved", missing);
+        if (missing < 0)
+            LOG("ERROR: the system version.dll could not be loaded: its functions fail closed for the game "
+                "(return 0 / error, GetLastError = ERROR_MOD_NOT_FOUND)");
+        else if (missing)
+            LOG("WARNING: %d version.dll exports unresolved (they fail closed: return 0 / error)", missing);
     } else if (reason == DLL_PROCESS_DETACH) {
         /* Process exit or unload: never block here. Only a plain store; hooks stay, the log FILE,
          * console and plugin threads are left to the OS (v3x.log is flushed after every line). */

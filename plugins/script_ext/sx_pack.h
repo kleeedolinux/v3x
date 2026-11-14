@@ -9,6 +9,7 @@
 #endif
 #include <windows.h>
 #include "v3x_script.h"
+#include "v3x_safe.h"
 
 #define SX_MAX_PACKS 16
 #define SX_MAX_FILES 512
@@ -40,7 +41,8 @@ static int sx_valid_pack(const char *s)
 }
 
 /* 1 if rel is a safe relative path: printable ASCII, no drive/colon, no leading separator, no empty,
- * "." or ".." component, max 200 chars, not the manifest itself. */
+ * "." or ".." component, max 200 chars, not the manifest itself, and v3x_path_rel_ok (no reserved
+ * device names such as CON, NUL, COM1, LPT1, no trailing dot/space). */
 static int sx_valid_rel(const char *rel)
 {
     if (!rel || !rel[0]) return 0;
@@ -61,7 +63,7 @@ static int sx_valid_rel(const char *rel)
             c = rel + i + 1;
         }
     }
-    return _stricmp(rel, SX_MANIFEST) != 0;
+    return _stricmp(rel, SX_MANIFEST) != 0 && v3x_path_rel_ok(rel) == V3X_R_OK;
 }
 
 /* 1 if the file is localization (*.yml) and data lacks the UTF-8 BOM. */
@@ -93,11 +95,23 @@ static int sx_mkdirs(char *path)
     return 1;
 }
 
+/* sx_root + pack + "\\" + rel through v3x_path_join_checked: rel must be clean, and no existing
+ * component from the pack folder down (pack folder, subfolders, the file) may be a reparse point
+ * (junction / symlink), so neither a write nor a delete-by-manifest can leave the pack folder.
+ * rel "" = the pack folder itself, with a trailing separator. 0 = refused. */
 static int sx_path(char *out, size_t cap, const char *pack, const char *rel)
 {
-    int k = snprintf(out, cap, "%s%s\\%s", sx_root, pack, rel ? rel : "");
-    if (k <= 0 || (size_t)k >= cap) return 0;
-    for (char *p = out; *p; p++) if (*p == '/') *p = '\\';
+    char r[300];
+    if (cap) out[0] = 0;
+    if (!sx_root[0] || !sx_valid_pack(pack)) return 0;
+    int k = rel && *rel ? snprintf(r, sizeof r, "%s/%s", pack, rel) : snprintf(r, sizeof r, "%s", pack);
+    if (k <= 0 || (size_t)k >= sizeof r) return 0;
+    if (v3x_path_join_checked(out, cap, sx_root, r, V3X_PATH_CHECK_REPARSE) != V3X_R_OK) return 0;
+    if (!(rel && *rel)) {
+        size_t n = strlen(out);
+        if (n + 2 > cap) { out[0] = 0; return 0; }
+        out[n] = '\\'; out[n + 1] = 0;
+    }
     return 1;
 }
 
@@ -132,15 +146,16 @@ static int sx_begin_pack(const char *pack)
     }
     /* delete the files of the previous session's manifest (validated again: never outside the pack) */
     char man[MAX_PATH];
-    sx_path(man, sizeof man, pack, SX_MANIFEST);
-    FILE *f = fopen(man, "rb");
+    FILE *f = sx_path(man, sizeof man, pack, SX_MANIFEST) ? fopen(man, "rb") : NULL;
     if (f) {
         char line[260];
         while (fgets(line, sizeof line, f)) {
             size_t k = strlen(line);
             while (k && (line[k - 1] == '\n' || line[k - 1] == '\r')) line[--k] = 0;
             char fp[MAX_PATH];
+            /* validated again (never outside the pack, never through or onto a reparse point) */
             if (sx_valid_rel(line) && sx_path(fp, sizeof fp, pack, line)) DeleteFileA(fp);
+            else if (line[0]) sx_log("begin_pack %s: manifest entry refused (unsafe path or reparse point), not deleted", pack, 0);
         }
         fclose(f);
         DeleteFileA(man);
@@ -185,8 +200,7 @@ static int sx_end_pack(const char *pack)
     char *out = need <= sizeof buf ? buf : (big = (char *)malloc(need));
     if (!out) return V3X_SCRIPT_EIO;
     for (int i = 0; i < p->n; i++) { size_t l = strlen(p->files[i]); memcpy(out + k, p->files[i], l); k += l; out[k++] = '\n'; }
-    sx_path(man, sizeof man, pack, SX_MANIFEST);
-    int ok = sx_write_raw(man, NULL, 0, out, k);
+    int ok = sx_path(man, sizeof man, pack, SX_MANIFEST) && sx_write_raw(man, NULL, 0, out, k);
     free(big);
     p->active = 0;
     return ok ? p->n : V3X_SCRIPT_EIO;

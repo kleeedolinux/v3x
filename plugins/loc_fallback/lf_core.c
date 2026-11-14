@@ -546,6 +546,27 @@ static int cmp_u64(const void *a, const void *b)
     return x < y ? -1 : x > y;
 }
 
+/* <cache>.keys = u64 hash of the vanilla file list, u64 count, count x u64 key hashes. The file is a
+ * cache (not trusted): sizes are checked, and the sorted / unique order bh_has relies on is restored.
+ * Returns a malloc'd array (count in *out_n), or NULL when it does not match or is corrupt. */
+static uint64_t *lf_keys_parse(const char *kb, size_t kn, uint64_t vh, size_t *out_n)
+{
+    uint64_t hdr[2];
+    *out_n = 0;
+    if (!kb || kn < 16 || (kn - 16) % 8) return NULL;
+    memcpy(hdr, kb, 16);
+    if (hdr[0] != vh || hdr[1] != (kn - 16) / 8) return NULL;
+    size_t n = (size_t)hdr[1];
+    uint64_t *b = (uint64_t *)malloc(kn - 16 + 8);
+    if (!b) return NULL;
+    if (n) memcpy(b, kb + 16, n * 8);
+    qsort(b, n, sizeof *b, cmp_u64);
+    size_t u = 0;
+    for (size_t i = 0; i < n; i++) if (!u || b[u - 1] != b[i]) b[u++] = b[i];
+    *out_n = u;
+    return b;
+}
+
 static int bh_has(const lf_ctx *c, const char *k, size_t n)
 {
     if (!c->nbh) return 0;
@@ -793,10 +814,11 @@ int lf_run(const lf_paths *p, const lf_cfg *cfg, lf_result *r)
         size_t kn = 0;
         char *kb = p->cache[0] && !cfg->force ? read_all(kp, &kn) : NULL;
         uint64_t hdr[2];
-        if (kb && kn >= 16 && (kn - 16) % 8 == 0 && (memcpy(hdr, kb, 16), hdr[0] == vh) && hdr[1] == (kn - 16) / 8) {
-            c.nbh = c.bh_cap = (size_t)hdr[1];
-            c.bh = malloc(kn - 16 + 8);
-            if (c.bh) memcpy(c.bh, kb + 16, kn - 16); else c.nbh = c.bh_cap = 0;
+        size_t kcount = 0;
+        uint64_t *kh = lf_keys_parse(kb, kn, vh, &kcount);
+        if (kh) {
+            c.bh = kh;
+            c.nbh = c.bh_cap = kcount;
             r->vanilla_keys_cached = 1;
         } else {
             c.hash_only = 1;

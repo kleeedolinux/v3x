@@ -16,11 +16,13 @@
 #define PSAPI_VERSION 2   /* GetProcessMemoryInfo / GetPerformanceInfo = the K32* exports of kernel32 */
 #endif
 #include <stdio.h>
+#include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
 #include "dr_core.h"
 #include "v3x.h"
 #include "v3x_util.h"
+#include "v3x_safe.h"
 #include <psapi.h>
 #include <tlhelp32.h>
 
@@ -30,6 +32,22 @@ V3X_EXPORT const char *v3x_plugin_name = "doctor";
 V3X_PLUGIN_MANIFEST("doctor", "0.5.0", "v3x", "health check: doctor | doctor fix <id> | doctor report", "*");
 
 static const V3X_API *api;
+
+/* L10 (docs/security-audit.md): log lines carry mod / file / engine text; control characters,
+ * C1 controls and bidi overrides are replaced (v3x_sanitize_line) so a crafted name cannot forge
+ * v3x.log lines (parsed by doctor and the installer). */
+static void slog(const char *fmt, ...) V3X_PRINTF(1, 2);
+static void slog(const char *fmt, ...)
+{
+    if (!api) return;
+    char raw[1536], clean[1536];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(raw, sizeof raw, fmt, ap);
+    va_end(ap);
+    v3x_sanitize_line(clean, sizeof clean, raw);
+    api->log(TAG, "%s", clean);
+}
 static CRITICAL_SECTION g_lock;          /* one run at a time (auto run vs console command) */
 static volatile LONG g_auto_started;
 static double g_first_frame_ms;
@@ -255,7 +273,7 @@ static const char *state_word(int s)
     return s >= 0 && s <= DR_PS_CRASH_SKIP ? w[s] : "?";
 }
 
-static void sb_add(capbuf *b, const char *fmt, ...)
+static V3X_PRINTF(2, 3) void sb_add(capbuf *b, const char *fmt, ...)
 {
     char line[2600];
     va_list ap;
@@ -371,7 +389,7 @@ static void do_fix(const char *id)
         int rc = dr_apply_fix(api->v3x_dir(), &x->fix, msg, sizeof msg);
         LeaveCriticalSection(&g_lock);
         api->print("%s: %s", x->id, msg);
-        api->log(TAG, "fix %s: %s", x->id, msg);
+        slog("fix %s: %s", x->id, msg);
         if (rc > 0) fixed++;
     }
     if (!matched) {
@@ -420,7 +438,7 @@ static void cmd_doctor(const char *args, void *user)
 static void log_summary_main(void *u)   /* main thread: one log line, nothing else */
 {
     char *s = (char *)u;
-    api->log(TAG, "%s", s);
+    slog("%s", s);
     free(s);
 }
 
@@ -434,12 +452,12 @@ static DWORD WINAPI auto_thread(void *u)
     size_t cap = sizeof sum + 400;
     char *s = (char *)malloc(cap);
     if (s) {
-        snprintf(s, cap, "%s", sum);
+        V3xStr sb; v3x_str_init(&sb, s, cap);
+        v3x_str_append(&sb, sum);
         int first = 1;
         for (int i = 0; i < r->res.n; i++)   /* name the problems so they are visible in v3x.log */
-            if (r->res.r[i].sev == DR_PROBLEM && strlen(s) + strlen(r->res.r[i].id) + 4 < cap) {
-                strcat(s, first ? ": " : ", ");
-                strcat(s, r->res.r[i].id);
+            if (r->res.r[i].sev == DR_PROBLEM) {
+                v3x_str_appendf(&sb, "%s%s", first ? ": " : ", ", r->res.r[i].id);
                 first = 0;
             }
         if (!V3X_HAS(api, run_on_main) || api->run_on_main(log_summary_main, s)) log_summary_main(s);
@@ -479,6 +497,6 @@ V3X_EXPORT int v3x_plugin_load(const V3X_API *a)
         api->register_command("doctor", "health check: doctor | doctor fix <ID> | doctor report", cmd_doctor, NULL);
     if (api->api_version >= 3 && api->on_event) api->on_event(V3X_EVENT_LOAD_TRANSITION, on_transition, NULL);
     api->on_frame(on_frame, NULL);
-    api->log(TAG, "ready: type 'doctor' in the V3X console (auto check at the first game load)");
+    slog("ready: type 'doctor' in the V3X console (auto check at the first game load)");
     return 0;
 }

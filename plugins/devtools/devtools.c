@@ -44,10 +44,12 @@
 #include <objbase.h>
 #include <dxgi1_4.h>
 #include <stdio.h>
+#include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
 #include "v3x.h"
+#include "v3x_safe.h"
 
 V3X_EXPORT const char *v3x_plugin_name = "devtools";
 V3X_PLUGIN_MANIFEST("devtools", "0.5.0", "v3x", "CPU and RAM usage inside the game", "release/1.15.1");
@@ -772,13 +774,12 @@ static void string_hints(uintptr_t fn, char *out, size_t cap)
         if (c > bestc[0]) { memcpy(best[1], best[0], sizeof best[1]); bestc[1] = bestc[0]; memcpy(best[0], cand, sizeof cand); bestc[0] = c; }
         else if (c > bestc[1]) { memcpy(best[1], cand, sizeof cand); bestc[1] = c; }
     }
-    size_t o = 0;
+    V3xStr ob; v3x_str_init(&ob, out, cap);
     for (int i = 0; i < 2 && bestc[i]; i++) {
         char tmp[80];
         if (bestc[i] == 3) shorten_path(best[i], tmp, sizeof tmp);
         else snprintf(tmp, sizeof tmp, "%.60s", best[i]);
-        o += snprintf(out + o, cap - o, "%s\"%s\"", i ? " " : "", tmp);
-        if (o >= cap) break;
+        v3x_str_appendf(&ob, "%s\"%s\"", i ? " " : "", tmp);
     }
 }
 
@@ -901,15 +902,15 @@ static void init_dxgi(void)
 
 /* ------------------------------------------------------------------ report helpers */
 
-static const char *fmt_bytes(double b, char *out)
+static const char *fmt_bytes(double b, char *out, size_t cap)
 {
     double a = b < 0 ? -b : b;
-    if (a >= 1024.0 * 1024 * 1024) sprintf(out, "%.2f GB", b / (1024.0 * 1024 * 1024));
-    else if (a >= 1024.0 * 1024) sprintf(out, "%.1f MB", b / (1024.0 * 1024));
-    else sprintf(out, "%.0f KB", b / 1024.0);
+    if (a >= 1024.0 * 1024 * 1024) snprintf(out, cap, "%.2f GB", b / (1024.0 * 1024 * 1024));
+    else if (a >= 1024.0 * 1024) snprintf(out, cap, "%.1f MB", b / (1024.0 * 1024));
+    else snprintf(out, cap, "%.0f KB", b / 1024.0);
     return out;
 }
-#define B(x) fmt_bytes((double)(x), (char[24]){0})
+#define B(x) fmt_bytes((double)(x), (char[32]){0}, 32)
 
 static int cmp_float(const void *a, const void *b)
 {
@@ -1255,13 +1256,16 @@ static void write_report(const char *trigger)
 
 /* ------------------------------------------------------------------ worker thread */
 
-static void log_line(const char *fmt, const char *arg)
+static V3X_PRINTF(1, 2) void log_line(const char *fmt, ...)
 {
     FILE *f = fopen(g_log_path, "a");
     if (!f) return;
     SYSTEMTIME st; GetLocalTime(&st);
     fprintf(f, "[%02d:%02d:%02d] ", st.wHour, st.wMinute, st.wSecond);
-    fprintf(f, fmt, arg);
+    va_list ap;
+    va_start(ap, fmt);
+    vfprintf(f, fmt, ap);
+    va_end(ap);
     fputc('\n', f);
     fclose(f);
 }
@@ -1431,7 +1435,8 @@ static void cmd_profile(const char *args, void *user)
         if (_stricmp(verb, verbs[i].name)) continue;
         InterlockedExchange(&g_req_report, verbs[i].req);
         SetEvent(g_wake);
-        api->print(verbs[i].msg, g_log_path);
+        if (verbs[i].req == REQ_REPORT) api->print("report requested (written to %s)", g_log_path);
+        else api->print("%s", verbs[i].msg);
         return;
     }
     api->print("usage: profile on|off|report|reset  (profiler is %s, log %s)", g_profiling ? "ON" : "off", g_log_path);

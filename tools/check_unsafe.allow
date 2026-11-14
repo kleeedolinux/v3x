@@ -1,0 +1,5 @@
+# Allowlist for tools/check_unsafe.sh. One entry per line, each with a reason comment above it:
+#   <path>              whole file exempt
+#   <path>:<fixed text> only lines of that file that contain the text
+# Prefer an inline comment "v3x-unsafe-ok: <reason>" on the line itself.
+# (empty: every scanned file is clean)

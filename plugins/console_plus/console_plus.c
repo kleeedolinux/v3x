@@ -59,10 +59,12 @@
  * Config: v3x/console_plus.ini (defaults: console_plus.ini.example).
  * Console: `complete` (status), `complete <command>` (what its arguments complete), `find <text>`. */
 #include <stdio.h>
+#include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
 #include <windows.h>
 #include "v3x.h"
+#include "v3x_safe.h"
 #include "v3x_rtti.h"
 #include "cp_logic.h"
 #include "cp_names.h"
@@ -75,6 +77,22 @@ static const V3X_API *api;
 static CpCfg g_cfg;
 static DWORD g_main_tid;
 #define TAG "console_plus"
+
+/* L10 (docs/security-audit.md): log lines carry mod / file / engine text; control characters,
+ * C1 controls and bidi overrides are replaced (v3x_sanitize_line) so a crafted name cannot forge
+ * v3x.log lines (parsed by doctor and the installer). */
+static void slog(const char *fmt, ...) V3X_PRINTF(1, 2);
+static void slog(const char *fmt, ...)
+{
+    if (!api) return;
+    char raw[1536], clean[1536];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(raw, sizeof raw, fmt, ap);
+    va_end(ap);
+    v3x_sanitize_line(clean, sizeof clean, raw);
+    api->log(TAG, "%s", clean);
+}
 
 /* ------------------------------------------------------------------ engine types (1.15.1) */
 typedef struct { union { char buf[16]; char *ptr; } u; uint64_t size, cap; } CStr;   /* MSVC std::string */
@@ -226,15 +244,15 @@ static int find_db(const V3xRtti *r, int k) { return find_db_named(r, k, CP_KIND
 static uint8_t *find_resource_getter(const V3xRtti *r, const char *mangled, const char *what)
 {
     void *tvt = v3x_rtti_find_vtable(r, mangled);
-    if (!tvt) return api->log(TAG, "  %s: no CTransactionResource vtable", what), (uint8_t *)NULL;
+    if (!tvt) return slog("  %s: no CTransactionResource vtable", what), (uint8_t *)NULL;
     void *obj = find_data_qword(r->base, r->ptr_base + ((uintptr_t)tvt - r->base));
-    if (!obj) return api->log(TAG, "  %s: no resource object", what), (uint8_t *)NULL;
+    if (!obj) return slog("  %s: no resource object", what), (uint8_t *)NULL;
     uint8_t *x = api->find_xref(obj, 0), *fs = x ? api->function_start(x) : NULL;
-    if (!fs) return api->log(TAG, "  %s: resource not referenced", what), (uint8_t *)NULL;
+    if (!fs) return slog("  %s: resource not referenced", what), (uint8_t *)NULL;
     for (int i = 1; i < 8; i++) {
         uint8_t *y = api->find_xref(obj, i);
         if (!y) break;
-        if (api->function_start(y) != fs) return api->log(TAG, "  %s: resource referenced outside its getter", what), (uint8_t *)NULL;
+        if (api->function_start(y) != fs) return slog("  %s: resource referenced outside its getter", what), (uint8_t *)NULL;
     }
     return fs;
 }
@@ -244,18 +262,18 @@ static int find_db_named(const V3xRtti *r, int k, const char *db, int gamedb)
     char m[256];
     snprintf(m, sizeof m, ".?AV?$CTransactionResource@V?$unique_ptr@V%s@@U?$default_delete@V%s@@@std@@@std@@@NPdxTransactions@@", db, db);
     void *tvt = v3x_rtti_find_vtable(r, m);
-    if (!tvt) return api->log(TAG, "  %s: no CTransactionResource vtable", db), 0;
+    if (!tvt) return slog("  %s: no CTransactionResource vtable", db), 0;
     void *obj = find_data_qword(r->base, r->ptr_base + ((uintptr_t)tvt - r->base));
-    if (!obj) return api->log(TAG, "  %s: no resource object", db), 0;
+    if (!obj) return slog("  %s: no resource object", db), 0;
     uint8_t *x = api->find_xref(obj, 0), *fs = x ? api->function_start(x) : NULL;
-    if (!fs || memcmp(fs, DBG_PRO, sizeof DBG_PRO) != 0) return api->log(TAG, "  %s: getter shape differs (xref %p)", db, (void *)x), 0;
+    if (!fs || memcmp(fs, DBG_PRO, sizeof DBG_PRO) != 0) return slog("  %s: getter shape differs (xref %p)", db, (void *)x), 0;
     for (int i = 1; i < 8; i++) {
         uint8_t *y = api->find_xref(obj, i);
         if (!y) break;
-        if (api->function_start(y) != fs) return api->log(TAG, "  %s: resource referenced outside its getter", db), 0;
+        if (api->function_start(y) != fs) return slog("  %s: resource referenced outside its getter", db), 0;
     }
     void *dvt = v3x_rtti_find_vtable(r, db);
-    if (!dvt || (gamedb && !has_gamedb_base(r, dvt, db))) return api->log(TAG, "  %s: database class is not a CGameDatabase", db), 0;
+    if (!dvt || (gamedb && !has_gamedb_base(r, dvt, db))) return slog("  %s: database class is not a CGameDatabase", db), 0;
     A.dbget[k] = (db_getter_fn)fs;
     A.dbvt[k] = dvt;
     return 1;
@@ -268,8 +286,8 @@ static int count_db_kinds(void) { int n = 0; for (int k = 1; k < CK_COUNT; k++) 
  * Failure only disables names (ids are still completed). */
 static void find_names_anchors(const V3xRtti *r, uint8_t *ac_end)
 {
-#define NFAIL(...) do { snprintf(A.names_why, sizeof A.names_why, __VA_ARGS__); api->log(TAG, "display names off: %s", A.names_why); return; } while (0)
-    if (find_db_named(r, CK_EVENT, "CEventDatabase", 0)) api->log(TAG, "event database found");
+#define NFAIL(...) do { snprintf(A.names_why, sizeof A.names_why, __VA_ARGS__); slog("display names off: %s", A.names_why); return; } while (0)
+    if (find_db_named(r, CK_EVENT, "CEventDatabase", 0)) slog("event database found");
     uint8_t *lg = find_resource_getter(r, ".?AV?$CTransactionResource@VCLocalizationManager@@@NPdxTransactions@@", "CLocalizationManager");
     if (!lg || memcmp(lg, LOC_PRO, sizeof LOC_PRO) || memcmp(lg + 31, LOC_PRO2, sizeof LOC_PRO2)) NFAIL("localization getter not found / shape differs");
     uint8_t *u = api->pattern_scan(PAT_LOCUSE);
@@ -298,7 +316,7 @@ static void find_names_anchors(const V3xRtti *r, uint8_t *ac_end)
     A.loc_find = lf;
     A.con_print = (void (*)(void *, const CStr *, uint8_t))pf;
     uintptr_t b = api->image_base();
-    api->log(TAG, "display names: localization getter exe+0x%llx, map lookup exe+0x%llx, console print exe+0x%llx",
+    slog("display names: localization getter exe+0x%llx, map lookup exe+0x%llx, console print exe+0x%llx",
              (unsigned long long)(lg - (uint8_t *)b), (unsigned long long)(lf - (uint8_t *)b), (unsigned long long)(pf - (uint8_t *)b));
 #undef NFAIL
 }
@@ -307,7 +325,7 @@ static void find_wild_anchors(void);
 static int find_anchors(void)
 {
     memset(&A, 0, sizeof A);
-#define FAIL(...) do { snprintf(A.why, sizeof A.why, __VA_ARGS__); api->log(TAG, "in-game completion off: %s", A.why); return 0; } while (0)
+#define FAIL(...) do { snprintf(A.why, sizeof A.why, __VA_ARGS__); slog("in-game completion off: %s", A.why); return 0; } while (0)
     void *s = api->find_string(FOUND_STR);
     uint8_t *x = s ? api->find_xref(s, 0) : NULL;
     uint8_t *fe;
@@ -327,7 +345,7 @@ static int find_anchors(void)
     if (memcmp(grow, PUSH_GROW, sizeof PUSH_GROW) != 0) FAIL("push_back shape differs");
     A.push = (push_fn)push;
     uintptr_t b = api->image_base();
-    api->log(TAG, "autocomplete exe+0x%llx, manager getter exe+0x%llx (slot exe+0x%llx), matcher exe+0x%llx, push exe+0x%llx",
+    slog("autocomplete exe+0x%llx, manager getter exe+0x%llx (slot exe+0x%llx), matcher exe+0x%llx, push exe+0x%llx",
              (unsigned long long)(A.f_ac - (uint8_t *)b), (unsigned long long)(A.getter - (uint8_t *)b),
              (unsigned long long)((uint8_t *)A.mgr_slot - (uint8_t *)b), (unsigned long long)(A.matcher - (uint8_t *)b),
              (unsigned long long)(push - (uint8_t *)b));
@@ -344,7 +362,7 @@ static int find_anchors(void)
         find_names_anchors(&r, fe);
         v3x_rtti_free(&r);
     }
-    api->log(TAG, "%d of %d databases found", found, CK_DB_KINDS);
+    slog("%d of %d databases found", found, CK_DB_KINDS);
     if (!A.dbget[CK_COUNTRY]) FAIL("country definition database not found");
     A.ok = 1;
     find_wild_anchors();
@@ -494,7 +512,7 @@ static int loc_ready(void)
     }
     L.lang = lang; L.buckets = b; L.mask = mask; L.gen++;
     cstr_copy((const CStr *)lang, L.lang_name, sizeof L.lang_name);
-    api->log(TAG, "localization %s: %d keys indexed", L.lang_name[0] ? L.lang_name : "?", L.n);
+    slog("localization %s: %d keys indexed", L.lang_name[0] ? L.lang_name : "?", L.n);
     return 1;
 }
 
@@ -646,8 +664,8 @@ static int discover(int *slot, LiveObj *o, int n, int target_kind, const char *w
     int off = cp_discover_field(objs, n, 0x400, g_set[target_kind], g_nset[target_kind], safe_read, NULL, 60, &pct);
     free(objs);
     *slot = off >= 0 ? off : -2;
-    if (off >= 0) api->log(TAG, "live objects: %s at +0x%x (%d%% of the sample)", what, off, pct);
-    else api->log(TAG, "live objects: %s NOT found (best %d%%)", what, pct);
+    if (off >= 0) slog("live objects: %s at +0x%x (%d%% of the sample)", what, off, pct);
+    else slog("live objects: %s NOT found (best %d%%)", what, pct);
     return *slot;
 }
 
@@ -683,7 +701,7 @@ static void discover_char_names(LiveObj *o, int n)
         F.ch_name[0] = best[a]; F.ch_layout[0] = bl[a];
         F.ch_name[1] = best[b] >= 0 ? best[b] : -2; F.ch_layout[1] = bl[b];
     }
-    api->log(TAG, "live objects: character name keys at %d / %d (%d sampled)", F.ch_name[0], F.ch_name[1], sampled);
+    slog("live objects: character name keys at %d / %d (%d sampled)", F.ch_name[0], F.ch_name[1], sampled);
 }
 
 static void build_live_names(int k)
@@ -802,7 +820,7 @@ static void check_event_layout(const void *cb)
     if (!A.dbget[CK_EVENT]) return;
     const uint8_t *p = (const uint8_t *)cb;
     if (!p || !mem_has(p, 0x90, EVCB_LOOP, sizeof EVCB_LOOP) || !mem_has(p, 0x90, EVCB_NAME, sizeof EVCB_NAME)) {
-        api->log(TAG, "engine event completer shape differs: event titles off");
+        slog("engine event completer shape differs: event titles off");
         A.dbget[CK_EVENT] = NULL;
     }
 }
@@ -835,7 +853,7 @@ static int validate(uint8_t *data, int n)
     int bad = names * 2 < n;                   /* most "names" are not strings: wrong layout */
     if (help != g_vlog_help || (engine_cb > 0) != g_vlog_cb || bad != g_vlog_bad) {
         g_vlog_help = help; g_vlog_cb = engine_cb > 0; g_vlog_bad = bad;
-        api->log(TAG, "registry check (%d commands, %d readable names): help desc %s, engine completers %d -> %s",
+        slog("registry check (%d commands, %d readable names): help desc %s, engine completers %d -> %s",
                  n, names, help ? "ok" : "missing", engine_cb,
                  bad ? "layout differs, in-game completion OFF" : (help && engine_cb) ? "ok" : "not complete yet, retrying");
     }
@@ -872,10 +890,10 @@ static void learn_gs(uint8_t *e, const char *nm)
     if (!g_gs[K].ok) {
         g_gs[K].ok = 1; g_gs[K].root = root; g_gs[K].arr = ao; g_gs[K].cnt = co;
         snprintf(g_gs[K].from, sizeof g_gs[K].from, "%s", nm);
-        api->log(TAG, "live %s: objects by id at [[[exe+0x%llx]+0x608]+0x120]+0x%x (count +0x%x), from `%s`", CP_KINDS[K].name,
+        slog("live %s: objects by id at [[[exe+0x%llx]+0x608]+0x120]+0x%x (count +0x%x), from `%s`", CP_KINDS[K].name,
                  (unsigned long long)(root - b), ao, co, nm);
     } else if (g_gs[K].root != root || g_gs[K].arr != ao || g_gs[K].cnt != co) {
-        if (!g_gs[K].conflict) api->log(TAG, "live %s: `%s` and `%s` disagree -> names for this kind OFF", CP_KINDS[K].name, g_gs[K].from, nm);
+        if (!g_gs[K].conflict) slog("live %s: `%s` and `%s` disagree -> names for this kind OFF", CP_KINDS[K].name, g_gs[K].from, nm);
         g_gs[K].conflict = 1;
     }
 }
@@ -898,7 +916,7 @@ static void scan_registry(void)
             if (v < 0) g_invalid = 1;
             else if (g_loads && ++g_vfails_after_load >= 5) {
                 g_invalid = 1;
-                api->log(TAG, "registry check still failing after a game load: in-game completion OFF");
+                slog("registry check still failing after a game load: in-game completion OFF");
             }
             reg_unlock(lk);
             return;
@@ -945,15 +963,16 @@ static void scan_registry(void)
         added++;
         const CpCmd c = *rec;
         if (g_cfg.log_installs) {
-            char ks[160]; size_t o = 0; ks[0] = 0;
-            for (int k = 0; k < c.nargs && o < sizeof ks - 24; k++)
-                o += snprintf(ks + o, sizeof ks - o, "%s%s%s", k ? " " : "", CP_KINDS[c.args[k].kind].name, c.args[k].nlit ? "+words" : "");
-            api->log(TAG, "  %s: %s%s%s", nm, ks, c.from_ini ? " (ini)" : "", c.replaced_engine ? " (replaces engine completer)" : "");
+            char ks[160]; V3xStr ksb; v3x_str_init(&ksb, ks, sizeof ks);
+            for (int k = 0; k < c.nargs; k++)
+                v3x_str_appendf(&ksb, "%s%s%s", k ? " " : "", CP_KINDS[c.args[k].kind].name, c.args[k].nlit ? "+words" : "");
+            char nms[128]; v3x_sanitize_line(nms, sizeof nms, nm);   /* command names can come from mods / ini */
+            slog("  %s: %s%s%s", nms, ks, c.from_ini ? " (ini)" : "", c.replaced_engine ? " (replaces engine completer)" : "");
         }
     }
     g_last_count = n;
     reg_unlock(lk);
-    if (added) api->log(TAG, "registry %d commands: completion added to %d (total %d)", n, added, g_ncmd);
+    if (added) slog("registry %d commands: completion added to %d (total %d)", n, added, g_ncmd);
 }
 
 static void on_frame(void *u)
@@ -988,7 +1007,7 @@ static int g_hooks;                      /* 1 matcher, 2 autocomplete */
 static void game_print(const char *s)
 {
     if (g_console && A.con_print) { CStr t; cstr_temp(&t, s); A.con_print(g_console, &t, 1); }
-    else api->log(TAG, "%s", s);
+    else slog("%s", s);
 }
 
 static void name_line(char *o, size_t n, const CpName *e, const char *kind)
@@ -1171,7 +1190,7 @@ static fwd4_fn o_execline;
 
 static void find_wild_anchors(void)
 {
-#define WFAIL(...) do { snprintf(W.why, sizeof W.why, __VA_ARGS__); api->log(TAG, "wildcards off: %s", W.why); A.execline = NULL; return; } while (0)
+#define WFAIL(...) do { snprintf(W.why, sizeof W.why, __VA_ARGS__); slog("wildcards off: %s", W.why); A.execline = NULL; return; } while (0)
     memset((void *)&W, 0, sizeof W);
     A.execline = NULL;
     if (!g_cfg.wildcards) { snprintf(W.why, sizeof W.why, "wildcards=0"); return; }
@@ -1194,7 +1213,7 @@ static void find_wild_anchors(void)
             const uint8_t *root; uint32_t c, k, v;
             if (cp_decode_overlord(t, 0x80, &root, &c, &k, &v) && root >= b && root < be) {
                 W.root = root; W.cnt = c; W.keys = k; W.vals = v; found = 1;
-                api->log(TAG, "wildcards: GetOverlord exe+0x%llx: game state [[[exe+0x%llx]+0x608]+0x120], ids < +0x%x, keys +0x%x, values +0x%x",
+                slog("wildcards: GetOverlord exe+0x%llx: game state [[[exe+0x%llx]+0x608]+0x120], ids < +0x%x, keys +0x%x, values +0x%x",
                          (unsigned long long)(t - b), (unsigned long long)(root - b), c, k, v);
             }
         }
@@ -1202,7 +1221,7 @@ static void find_wild_anchors(void)
     if (!found) WFAIL("GetOverlord shape differs");
     A.execline = xl;
     W.ok = 1;
-    api->log(TAG, "wildcards: console ExecuteLine exe+0x%llx", (unsigned long long)(xl - b));
+    slog("wildcards: console ExecuteLine exe+0x%llx", (unsigned long long)(xl - b));
 #undef WFAIL
 }
 
@@ -1218,10 +1237,10 @@ static void learn_player(uint8_t *e, const char *nm)
     if (!W.ply_ok) {
         W.ply_ok = 1; W.ply_off = off;
         snprintf(W.ply_from, sizeof W.ply_from, "%s", nm);
-        api->log(TAG, "wildcards: player country id at [[exe+0x%llx]+0x608]+0x%x, from `%s`", (unsigned long long)(root - b), off, nm);
+        slog("wildcards: player country id at [[exe+0x%llx]+0x608]+0x%x, from `%s`", (unsigned long long)(root - b), off, nm);
     } else if (off != W.ply_off && !W.ply_conflict) {
         W.ply_conflict = 1;
-        api->log(TAG, "wildcards: `%s` and `%s` read the player country differently -> M:* OFF", W.ply_from, nm);
+        slog("wildcards: `%s` and `%s` read the player country differently -> M:* OFF", W.ply_from, nm);
     }
 }
 
@@ -1270,7 +1289,7 @@ static int wild_countries(CpCountry **out, uint32_t *player, char *why, size_t w
 static void con_out(void *con, const char *s)
 {
     if (con && A.con_print) { CStr t; cstr_temp(&t, s); A.con_print(con, &t, 1); }
-    api->log(TAG, "%s", s);
+    slog("%s", s);
 }
 
 static int wild_argok(const char *cmd, int argi, const char *tok, size_t tn, void *u)
@@ -1359,20 +1378,20 @@ static void install_wild_hook(void)
 {
     if (!A.execline) return;
     int h = api->hook(A.execline, (void *)hk_execline, (void **)&o_execline);
-    if (h != 0) { api->log(TAG, "wildcards off: ExecuteLine hook failed (%d)", h); A.execline = NULL; W.ok = 0; return; }
-    api->log(TAG, "wildcards on: * (subjects) M:* (player's subjects) TAG:* ALL in country arguments");
+    if (h != 0) { slog("wildcards off: ExecuteLine hook failed (%d)", h); A.execline = NULL; W.ok = 0; return; }
+    slog("wildcards on: * (subjects) M:* (player's subjects) TAG:* ALL in country arguments");
 }
 
 static void install_name_hooks(void)
 {
     if (!g_cfg.names) return;
-    if (!A.loc_get) { api->log(TAG, "display names off: %s", A.names_why[0] ? A.names_why : "anchors missing"); return; }
+    if (!A.loc_get) { slog("display names off: %s", A.names_why[0] ? A.names_why : "anchors missing"); return; }
     int h = api->hook(A.matcher, (void *)hk_matcher, (void **)&o_matcher);
-    if (h != 0) { api->log(TAG, "display names off: matcher hook failed (%d)", h); A.loc_get = NULL; return; }
+    if (h != 0) { slog("display names off: matcher hook failed (%d)", h); A.loc_get = NULL; return; }
     g_hooks |= 1;
     if (api->hook(A.f_ac, (void *)hk_autocomplete, (void **)&o_autocomplete) == 0) g_hooks |= 2;
-    else api->log(TAG, "Autocomplete hook failed: name lists go to v3x.log instead of the game console");
-    api->log(TAG, "display names on (matcher hook%s)", g_hooks & 2 ? " + console output" : "");
+    else slog("Autocomplete hook failed: name lists go to v3x.log instead of the game console");
+    slog("display names on (matcher hook%s)", g_hooks & 2 ? " + console output" : "");
 }
 
 /* ------------------------------------------------------------------ V3X console window */
@@ -1491,12 +1510,14 @@ static BOOL tab_read(HANDLE in, char *out, DWORD outsz, LPDWORD nread)
         if (r.nmatch > 1) {
             /* list the candidates under the line, then start a fresh input line */
             SetConsoleCursorPosition(g_conout, cur);
-            char lst[2048]; size_t o = 0;
-            o += snprintf(lst + o, sizeof lst - o, "\n");
+            /* candidates are help words / database keys of any length (mods): bounded builder, the
+             * closing newline is always kept (room reserved) */
+            char lst[2048]; V3xStr lb; v3x_str_init(&lb, lst, sizeof lst - 1);
+            v3x_str_append(&lb, "\n");
             int shown_m = r.nmatch < 64 ? r.nmatch : 64;
-            for (int i = 0; i < shown_m && o < sizeof lst - 40; i++) o += snprintf(lst + o, sizeof lst - o, "%s  ", r.cands[r.idx[i]]);
-            if (r.nmatch > shown_m) o += snprintf(lst + o, sizeof lst - o, "... (%d)", r.nmatch);
-            snprintf(lst + o, sizeof lst - o, "\n");
+            for (int i = 0; i < shown_m; i++) v3x_str_appendf(&lb, "%s  ", r.cands[r.idx[i]]);
+            if (r.nmatch > shown_m) v3x_str_appendf(&lb, "... (%d)", r.nmatch);
+            lst[lb.len] = '\n'; lst[lb.len + 1] = 0;
             con_write(lst);
             if (GetConsoleScreenBufferInfo(g_conout, &bi)) start = bi.dwCursorPosition;
             shown = 0;
@@ -1520,14 +1541,14 @@ static BOOL WINAPI hk_ReadConsoleA(HANDLE in, LPVOID buf, DWORD n, LPDWORD nread
 static int install_v3x_console(void)
 {
     p_GetThreadDescription = (GetThreadDescription_t)(void *)GetProcAddress(GetModuleHandleA("kernel32.dll"), "GetThreadDescription");
-    if (!p_GetThreadDescription) return api->log(TAG, "V3X console: GetThreadDescription missing, Tab completion off"), 0;
+    if (!p_GetThreadDescription) return slog("V3X console: GetThreadDescription missing, Tab completion off"), 0;
     void *rc = (void *)GetProcAddress(GetModuleHandleA("kernel32.dll"), "ReadConsoleA");
     if (!rc) return 0;
     g_conout = CreateFileA("CONOUT$", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
-    if (g_conout == INVALID_HANDLE_VALUE) return api->log(TAG, "V3X console: no console window, Tab completion off"), 0;
+    if (g_conout == INVALID_HANDLE_VALUE) return slog("V3X console: no console window, Tab completion off"), 0;
     int h = api->hook(rc, (void *)hk_ReadConsoleA, (void **)&o_ReadConsoleA);
-    if (h != 0) { CloseHandle(g_conout); g_conout = INVALID_HANDLE_VALUE; return api->log(TAG, "V3X console: hook failed (%d)", h), 0; }
-    api->log(TAG, "V3X console: Tab completion on");
+    if (h != 0) { CloseHandle(g_conout); g_conout = INVALID_HANDLE_VALUE; return slog("V3X console: hook failed (%d)", h), 0; }
+    slog("V3X console: Tab completion on");
     return 1;
 }
 
@@ -1540,8 +1561,8 @@ static void cmd_complete(const char *args, void *u)
         if (!c) { api->print("%s: no completion installed (unknown, no argument kinds, or engine's own completer)", args); return; }
         api->print("%s%s:", c->name, c->from_ini ? " (from console_plus.ini)" : "");
         for (int k = 0; k < c->nargs; k++) {
-            char w[512]; size_t o = 0; w[0] = 0;
-            for (int i = 0; i < c->args[k].nlit && o < sizeof w - 32; i++) o += snprintf(w + o, sizeof w - o, " %s", g_pool.w[c->args[k].lit0 + i]);
+            char w[512]; V3xStr wb; v3x_str_init(&wb, w, sizeof w);
+            for (int i = 0; i < c->args[k].nlit; i++) v3x_str_appendf(&wb, " %s", g_pool.w[c->args[k].lit0 + i]);
             api->print("  arg %d: %s%s%s", k + 1, CP_KINDS[c->args[k].kind].name, w[0] ? " + words:" : "", w);
         }
         return;
@@ -1551,32 +1572,32 @@ static void cmd_complete(const char *args, void *u)
     else snprintf(st, sizeof st, "%s", g_invalid ? "OFF (registry layout differs)" : g_validated ? "on" : "waiting for the command registry");
     api->print("console_plus: in-game %s, %d commands completed, %ld completer calls, %ld candidates pushed, %ld bad db reads",
                st, g_ncmd, (long)g_calls, (long)g_pushed, (long)g_bad_db);
-    char ks[1024]; size_t o = 0; ks[0] = 0;
+    char ks[1024]; V3xStr ksb; v3x_str_init(&ksb, ks, sizeof ks);
     for (int k = 1; k < CK_COUNT; k++)
-        if (CP_KINDS[k].db) o += snprintf(ks + o, sizeof ks - o, " %s%s", CP_KINDS[k].name, A.dbget[k] ? "" : "(missing)");
+        if (CP_KINDS[k].db) v3x_str_appendf(&ksb, " %s%s", CP_KINDS[k].name, A.dbget[k] ? "" : "(missing)");
     api->print("  kinds:%s event(%s)", ks, g_event_cb ? "engine" : "missing");
     api->print("  V3X console Tab completion: %s, %ld Tabs", g_conout != INVALID_HANDLE_VALUE ? "on" : "off", (long)g_tabs);
     if (!g_cfg.names) api->print("  display names: off (names=0)");
     else if (!A.loc_get) api->print("  display names: OFF (%s)", A.names_why[0] ? A.names_why : "anchors missing");
     else {
-        char ns[1400]; size_t o2 = 0; ns[0] = 0;
-        for (int k = 1; k < CK_COUNT && o2 < sizeof ns - 40; k++)
-            if (g_nm_built[k]) o2 += snprintf(ns + o2, sizeof ns - o2, " %s=%d", CP_KINDS[k].name, g_nm[k].n);
+        char ns[1400]; V3xStr nsb; v3x_str_init(&nsb, ns, sizeof ns);
+        for (int k = 1; k < CK_COUNT; k++)
+            if (g_nm_built[k]) v3x_str_appendf(&nsb, " %s=%d", CP_KINDS[k].name, g_nm[k].n);
         api->print("  display names: on (hooks %s), language %s, %d localization keys, %ld name Tabs, %ld completed from names",
                    g_hooks == 3 ? "matcher+console" : g_hooks ? "matcher" : "none", L.lang_name[0] ? L.lang_name : "(not read yet)", L.n,
                    (long)g_name_tabs, (long)g_name_hits);
         api->print("  indexed:%s", ns[0] ? ns : " nothing yet (first Tab on a name builds the index)");
-        char gs[400]; size_t o3 = 0; gs[0] = 0;
+        char gs[400]; V3xStr gsb; v3x_str_init(&gsb, gs, sizeof gs);
         for (int k = CK_N_STATE; k <= CK_N_BUILDING; k++)
-            o3 += snprintf(gs + o3, sizeof gs - o3, " %s:%s", CP_KINDS[k].name, g_gs[k].conflict ? "conflict" : g_gs[k].ok ? "ok" : "unknown");
+            v3x_str_appendf(&gsb, " %s:%s", CP_KINDS[k].name, g_gs[k].conflict ? "conflict" : g_gs[k].ok ? "ok" : "unknown");
         api->print("  live objects:%s", gs);
     }
     if (!A.execline) api->print("  wildcards: off (%s)", W.why[0] ? W.why : "no in-game part");
     else api->print("  wildcards: on (* M:* TAG:* ALL in country arguments), player id %s, %ld lines expanded, %ld commands run",
                     W.ply_conflict ? "conflict" : W.ply_ok ? "known" : "not decoded yet", (long)W.lines, (long)W.runs);
-    char cs[2048]; o = 0; cs[0] = 0;
-    for (int i = 0; i < g_ncmd && o < sizeof cs - 64; i++) o += snprintf(cs + o, sizeof cs - o, "%s ", g_cmds[i].name);
-    if (g_ncmd) api->print("  commands: %s", cs);
+    char cs[2048]; V3xStr csb; v3x_str_init(&csb, cs, sizeof cs);
+    for (int i = 0; i < g_ncmd; i++) v3x_str_appendf(&csb, "%s ", g_cmds[i].name);
+    if (g_ncmd) api->print("  commands: %s%s", cs, csb.truncated ? "..." : "");
 }
 
 /* ------------------------------------------------------------------ load */
@@ -1590,7 +1611,7 @@ static void load_cfg(void)
     size_t n = fread(text, 1, sizeof text - 1, f); fclose(f);
     text[n] = 0;
     cp_parse_ini(text, &g_cfg);
-    if (g_cfg.bad_lines) api->log(TAG, "console_plus.ini: %d lines ignored", g_cfg.bad_lines);
+    if (g_cfg.bad_lines) slog("console_plus.ini: %d lines ignored", g_cfg.bad_lines);
 }
 
 V3X_EXPORT int v3x_plugin_load(const V3X_API *a)
@@ -1598,7 +1619,7 @@ V3X_EXPORT int v3x_plugin_load(const V3X_API *a)
     api = a;
     g_main_tid = GetCurrentThreadId();
     load_cfg();
-    if (!g_cfg.enabled) { api->log(TAG, "disabled in console_plus.ini"); return 0; }
+    if (!g_cfg.enabled) { slog("disabled in console_plus.ini"); return 0; }
     int any = 0;
     fields_reset();
     if (g_cfg.game_console && find_anchors()) {

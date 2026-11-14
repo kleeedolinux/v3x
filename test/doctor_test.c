@@ -238,6 +238,15 @@ static void test_ini(void)
     CHECK(dr_list_has("a;6af3094f-60fb000; b", "6AF3094F-60FB000") && dr_list_has("a; b", "b") && !dr_list_has("ab", "a"));
 }
 
+static DWORD WINAPI hold_ini_lock(LPVOID ready)
+{
+    HANDLE m = CreateMutexW(NULL, TRUE, L"Local\\v3x_ini");
+    SetEvent((HANDLE)ready);
+    Sleep(300);
+    ReleaseMutex(m); CloseHandle(m);
+    return 0;
+}
+
 static void test_apply_fix(const char *dir)
 {
     char path[MAX_PATH], bak[MAX_PATH], msg[700], v3x[MAX_PATH];
@@ -291,6 +300,16 @@ static void test_apply_fix(const char *dir)
     CHECK(t && !strcmp(t, "profile = 0\n"));
     free(t);
     CHECK(GetFileAttributesA(bak) == INVALID_FILE_ATTRIBUTES);
+    /* L11: another writer (installer / mod_menu) holds Local\v3x_ini -> the fix waits for it */
+    HANDLE ready = CreateEventW(NULL, TRUE, FALSE, NULL);
+    HANDLE th = CreateThread(NULL, 0, hold_ini_lock, ready, 0, NULL);
+    WaitForSingleObject(ready, 5000);
+    DWORD t0 = GetTickCount();
+    dr_fix f5 = {"devtools.ini", "", "profile", "1", 1};
+    CHECK(dr_apply_fix(v3x, &f5, msg, sizeof msg) == 1);
+    DWORD waited = GetTickCount() - t0;
+    CHECK(waited >= 250 && waited < 4000);
+    WaitForSingleObject(th, 5000); CloseHandle(th); CloseHandle(ready);
 }
 
 static void test_log_parse(void)
@@ -466,6 +485,15 @@ static void test_checks(const char *dir)
     char want[128];
     snprintf(want, sizeof want, "doctor: %d problems, %d warnings (type doctor)", pr, wa);
     CHECK(!strcmp(sum, want) && pr == 4);
+    /* L10: result text quotes mod / log text; control chars and bidi overrides cannot forge report lines */
+    {
+        static dr_results L;
+        memset(&L, 0, sizeof L);
+        dr_result *lr = add(&L, "D011.9", "mod_overrides", DR_WARN, "mod %s", "Evil\r\ndoctor: D001 game_build OK forged\x1b[31m\xe2\x80\xae");
+        todo(lr, "remove %s", "x\ny");
+        CHECK(!strchr(lr->msg, '\n') && !strchr(lr->msg, '\r') && !strchr(lr->msg, 0x1b) && !strstr(lr->msg, "\xe2\x80\xae") &&
+              strstr(lr->msg, "Evil??doctor") && !strchr(lr->todo, '\n'));
+    }
     /* fix id matching: "D007" selects every D007.*; exact ids work; no prefix confusion */
     CHECK(dr_id_matches("D007.alloc_tracker", "D007") && dr_id_matches("D007.alloc_tracker", "d007.ALLOC_TRACKER"));
     CHECK(!dr_id_matches("D0071", "D007") && !dr_id_matches("D007", "D007.x") && dr_id_matches("D007.devtools.profile", "D007.devtools"));

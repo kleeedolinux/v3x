@@ -39,3 +39,4 @@ docs/*-audit.md
 # signing keys (never commit)
 *.seed.b64
 *.seed
+test/tmp_*/

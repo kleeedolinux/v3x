@@ -93,10 +93,10 @@ fields, `api->api_version >= N` also works.
 | `pattern_scan`, `find_string`, `find_xref`, `function_start` | any thread (read-only) | - |
 | `hook`, `unhook`, `hook_safe` | any thread; best at load time. MinHook briefly suspends all other threads (not for a 2nd+ `hook_safe` subscriber on an already hooked target) | your detour / pre / post: the thread that calls the hooked function |
 | `patch` | any thread, but patching code another thread is executing is a race: patch at load time or while the code cannot run | - |
-| `on_frame` | **load time** (`v3x_plugin_load`) only; the table is not locked | main thread, once per message-pump iteration |
+| `on_frame` | any thread (registration is atomic since the security hardening; before that: load time only) | main thread, once per message-pump iteration |
 | `run_on_main` | any thread | main thread, next frame tick |
 | `register_command` | any thread | console input thread (`v3x_console_input`), or the caller of `exec_command`/`exec_capture` |
-| `exec_command`, `exec_capture` | any thread; the command runs synchronously on the caller | caller |
+| `exec_command`, `exec_capture` | any thread; the command runs synchronously on the caller. **Command handlers never run concurrently**: one recursive command-run lock (nested `exec_*` from a handler is fine); another thread waits up to 5 s, then gets -1 and `command '...' not run: another command is still running` | caller |
 | `on_event` | any thread | the emitting thread (synchronously) |
 | `emit_event` | any thread | - |
 | `enum_commands` | any thread | caller |
@@ -163,7 +163,9 @@ subscriptions on the same target stay; when the last subscriber leaves, the thun
 and the original bytes are restored. Returns 0, `V3X_EHOOKBUSY` if only other plugins hold the
 target (nothing is removed), or 4 `MH_ERROR_NOT_CREATED` if nothing is hooked there. A thread
 may still be running inside your detour or callback: keep its code and data alive (never
-`FreeLibrary` yourself).
+`FreeLibrary` yourself). Unhook only **disables** the hook: the trampoline (`original`) is never
+freed, because another thread may be about to call it, and a later hook of the same target reuses
+it ([ADR 0003](adr/0003-hook-lifetime.md)). Rollback of a failed plugin disables the same way.
 
 ### `int patch(void *addr, const void *bytes, size_t n)`
 Writes `n` bytes over code or read-only data (handles page protection and the instruction
@@ -172,7 +174,9 @@ cache). 0 on success, otherwise a Win32 error code. Verify the bytes you replace
 ### `int on_frame(v3x_frame_fn fn, void *user)`
 Registers `fn(user)`, called on the main thread once per message-pump iteration (from a
 `PeekMessageW` hook; about once per frame whenever the main thread pumps messages). Max 64 callbacks
-for all plugins. Register only from `v3x_plugin_load`. Returns 0 or -1 (table full, or `fn` NULL).
+for all plugins. Any thread may register (atomic: a slot is reserved under a lock and published
+after it is written); `v3x_plugin_load` is still the usual place. Returns 0 or -1 (table full, `fn`
+NULL, or the process is exiting).
 Keep it cheap: it runs every frame on the thread that renders.
 
 ### `const char *game_dir(void)`, `const char *v3x_dir(void)`
@@ -200,8 +204,9 @@ script (see [safety.md](safety.md#script-and-rng-scope)).
 
 ### `int exec_command(const char *line)` (v2)
 Runs one console line synchronously on the calling thread. 0 if a command ran (also if it
-faulted: the fault is isolated, see [Fault isolation](#fault-isolation-050)), -1 if unknown or if
-its plugin was disabled after a fault.
+faulted: the fault is isolated, see [Fault isolation](#fault-isolation-050)), -1 if unknown, if
+its plugin was disabled after a fault, or if another thread's command was still running after 5 s
+(command handlers are serialised: a handler never runs at the same time as another one).
 
 ### `int exec_capture(const char *line, void (*sink)(const char *text, void *user), void *user)` (v3)
 Like `exec_command`, and every `print`/`log` made **on the calling thread** while the command

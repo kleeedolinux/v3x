@@ -69,7 +69,7 @@ static void lock_release(void) { InterlockedExchange(&g_owner, 0); }
 static char g_summary[512];
 static volatile LONG g_mirror_owner;       /* thread id currently inside api->log for a summary */
 
-static void summary(const char *fmt, ...)
+static V3X_PRINTF(1, 2) void summary(const char *fmt, ...)
 {
     va_list ap;
     va_start(ap, fmt);
@@ -100,7 +100,7 @@ static void out_raw(const char *s, DWORD n)
 static void out_str(const char *s) { out_raw(s, (DWORD)strlen(s)); }
 
 /* Caller holds the lock. Prefixes a timestamp and the thread id. */
-static void clog(const char *fmt, ...)
+static V3X_PRINTF(1, 2) void clog(const char *fmt, ...)
 {
     SYSTEMTIME t;
     GetLocalTime(&t);
@@ -159,8 +159,8 @@ static unsigned long long g_snap_avail_mb, g_snap_priv_mb;   /* from the last me
 
 static void mem_snapshot(void)
 {
-    MEMORYSTATUSEX ms = {sizeof ms};
-    PROCESS_MEMORY_COUNTERS_EX pc = {sizeof pc};
+    MEMORYSTATUSEX ms = {.dwLength = sizeof ms};
+    PROCESS_MEMORY_COUNTERS_EX pc = {.cb = sizeof pc};
     GlobalMemoryStatusEx(&ms);
     K32GetProcessMemoryInfo(GetCurrentProcess(), (PROCESS_MEMORY_COUNTERS *)&pc, sizeof pc);
     g_snap_avail_mb = ms.ullAvailPageFile / MB;
@@ -183,7 +183,7 @@ static const char *addr_str(DWORD64 a)
         const WCHAR *b = g_wmod;
         for (DWORD i = 0; i < n; i++) if (g_wmod[i] == L'\\' || g_wmod[i] == L'/') b = g_wmod + i + 1;
         if (!WideCharToMultiByte(CP_UTF8, 0, b, -1, g_modname, sizeof g_modname, NULL, NULL))
-            strcpy(g_modname, "?");
+            safe_strcpy(g_modname, sizeof g_modname, "?");
         snprintf(g_symbuf, sizeof g_symbuf, "%s+0x%llx", g_modname, (unsigned long long)(a - (uintptr_t)m));
     } else {
         g_modname[0] = 0;
@@ -271,16 +271,16 @@ static unsigned long long decode_cxx(const EXCEPTION_RECORD *er)
 {
     unsigned long long h = 1469598103934665603ull;
     g_types[0] = 0; g_what[0] = 0;
-    if (er->NumberParameters < 4) { strcpy(g_types, "?(no params)"); return h; }
+    if (er->NumberParameters < 4) { safe_strcpy(g_types, sizeof g_types, "?(no params)"); return h; }
     uintptr_t obj = er->ExceptionInformation[1];
     const uint8_t *ti = (const uint8_t *)er->ExceptionInformation[2];
     uintptr_t base = er->ExceptionInformation[3];
-    if (!ti || !readable(ti, 16)) { strcpy(g_types, "?(no ThrowInfo)"); return h; }
+    if (!ti || !readable(ti, 16)) { safe_strcpy(g_types, sizeof g_types, "?(no ThrowInfo)"); return h; }
     int32_t cta_rva = *(const int32_t *)(ti + 12);
     const uint8_t *cta = (const uint8_t *)(base + (uint32_t)cta_rva);
-    if (!cta_rva || !readable(cta, 4)) { strcpy(g_types, "?(no CatchableTypeArray)"); return h; }
+    if (!cta_rva || !readable(cta, 4)) { safe_strcpy(g_types, sizeof g_types, "?(no CatchableTypeArray)"); return h; }
     int32_t n = *(const int32_t *)cta;
-    if (n < 0 || n > 64 || !readable(cta + 4, (size_t)n * 4)) { strcpy(g_types, "?(bad CatchableTypeArray)"); return h; }
+    if (n < 0 || n > 64 || !readable(cta + 4, (size_t)n * 4)) { safe_strcpy(g_types, sizeof g_types, "?(bad CatchableTypeArray)"); return h; }
     int is_exception = 0;
     size_t o = 0;
     for (int i = 0; i < n; i++) {
@@ -303,7 +303,7 @@ static unsigned long long decode_cxx(const EXCEPTION_RECORD *er)
     if (is_exception && obj && readable((void *)obj, 16)) {
         const char *what = *(const char *const *)(obj + 8);
         if (what) safe_strcpy(g_what, sizeof g_what, what);
-        else strcpy(g_what, "(null)");
+        else safe_strcpy(g_what, sizeof g_what, "(null)");
     }
     return h;
 }
@@ -540,8 +540,8 @@ static void on_frame(void *user)
     ULONGLONG now = GetTickCount64();
     if (g_sampled_once && now - g_last_sample < 1000) return;
     g_last_sample = now;
-    MEMORYSTATUSEX ms = {sizeof ms};
-    PROCESS_MEMORY_COUNTERS_EX pc = {sizeof pc};
+    MEMORYSTATUSEX ms = {.dwLength = sizeof ms};
+    PROCESS_MEMORY_COUNTERS_EX pc = {.cb = sizeof pc};
     GlobalMemoryStatusEx(&ms);
     K32GetProcessMemoryInfo(GetCurrentProcess(), (PROCESS_MEMORY_COUNTERS *)&pc, sizeof pc);
     unsigned long long priv = pc.PrivateUsage, avail = ms.ullAvailPageFile;

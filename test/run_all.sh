@@ -6,6 +6,11 @@
 #   QUICK=1 test/run_all.sh         skip the shutdown test
 #   ONLY="abi compat" test/run_all.sh   run only the named tests (names as in the table)
 #   V3X_TMP=D:/v3x_tmp              scratch root (default $TEMP/v3x); compiler caches go there too
+#   SANITIZE=1 test/run_all.sh      test executables with -fsanitize=undefined -fsanitize-trap=undefined
+#                                   (a UB trap = test crash; CI runs with SANITIZE=1)
+#   FUZZ_ITERS=200000 ONLY=fuzz test/run_all.sh   long fuzzing run (default 2000 inputs per target);
+#                                   the fuzz harnesses (test/fuzz/fuzz_*.c) are always UBSan-trap builds
+#   V3X_WERROR=1                    passed to ./build.sh: plugins also build with -Werror
 #
 # With ../binaries/victoria3.exe present, tests that can check anchors against the real exe (mapped
 # as an image; no game code runs) get it as an argument. Nothing is installed into ../binaries.
@@ -14,11 +19,26 @@ cd "$(dirname "$0")/.."
 S=${V3X_TMP:-${TEMP:-/tmp}/v3x}
 mkdir -p "$S"
 export TEMP=$S TMP=$S ZIG_GLOBAL_CACHE_DIR=$S/zcache ZIG_LOCAL_CACHE_DIR=$S/zcache
-CC="python -m ziglang cc -target x86_64-windows-gnu -O2 -Iinclude -Isdk"
+# SANITIZE=1: UBSan in trap mode for the test executables. Not checked there: `alignment` (x86 code
+# decoders read rel32/disp fields unaligned on purpose) and `function` (calls through hook stubs and
+# trampolines carry no type signature). MinHook (third party) and the deliberately faulting api_v5
+# plugin variants are built without it. The fuzz harnesses below use the full -fsanitize=undefined.
+SAN=""
+[[ ${SANITIZE:-} == 1 ]] && SAN="-fsanitize=undefined -fno-sanitize=alignment,function -fsanitize-trap=undefined"
+CCNS="python -m ziglang cc -target x86_64-windows-gnu -O2 -Iinclude -Isdk"
+CC="$CCNS $SAN"
+FUZZCC="python -m ziglang cc -target x86_64-windows-gnu -O1 -fsanitize=undefined -fsanitize-trap=undefined -Iinclude -Isdk -Isrc"
 M=third_party/minhook
 MH="$M/src/buffer.c $M/src/hook.c $M/src/trampoline.c $M/src/hde/hde64.c"
 T=$S/t
 mkdir -p "$T"
+if [[ -n $SAN ]]; then   # MinHook objects without UBSan (third-party code, not ours to fix)
+    mkdir -p "$T/mh_obj"
+    for f in buffer hook trampoline hde/hde64; do
+        python -m ziglang cc -target x86_64-windows-gnu -O2 -w -I$M/include -c -o "$T/mh_obj/$(basename $f).o" "$M/src/$f.c" || exit 100
+    done
+    MH="$T/mh_obj/buffer.o $T/mh_obj/hook.o $T/mh_obj/trampoline.o $T/mh_obj/hde64.o"
+fi
 EXE=../binaries/victoria3.exe
 [[ -f $EXE ]] || EXE=
 LOGDIR=$T/run_all_logs
@@ -71,6 +91,7 @@ t compat_old_loader "O=$T/oldloader; rm -rf \$O; mkdir -p \$O/src \$O/include &&
   cp $T/compat/compat_test.exe \$D/ && cd \$D && V3X_NO_CONSOLE=1 ./compat_test.exe old"
 
 # ---- core and SDK
+t api_proxy "$CC -o $T/proxy.exe test/api_proxy_test.c && $T/proxy.exe"
 t hook_safe "$CC -I$M/include -o $T/hst.exe test/hook_safe_test.c $MH && $T/hst.exe"
 t hook_chain "$CC -I$M/include -o $T/hct.exe test/hook_chain_test.c $MH && $T/hct.exe"
 t sdk "$CC -Isdk -Wno-unused-function -o $T/sdkt.exe test/sdk_test.c && $T/sdkt.exe $EXE"
@@ -82,7 +103,7 @@ t api_v4 "D=$T/api_v4_test; rm -rf \$D; mkdir -p \$D/v3x/plugins && cp build/ver
   $CC -o \$D/api_v4_test.exe test/api_v4_test.c -Lbuild -l:version.dll && cd \$D && V3X_NO_CONSOLE=1 ./api_v4_test.exe"
 t api_v5 "D=$T/api_v5; rm -rf \$D; mkdir -p \$D/v3x/plugins && cp build/version.dll \$D/ &&
   for v in FRAME_FAULT CMD_FAULT EVENT_FAULT MAIN_FAULT LOAD_FAULT LOAD_FAIL RELOAD MARKED; do
-    $CC -shared -DV5_\$v -o \$D/v3x/plugins/v5_\$(echo \$v | tr A-Z a-z).dll test/api_v5_plugin.c || exit 1; done &&
+    $CCNS -shared -DV5_\$v -o \$D/v3x/plugins/v5_\$(echo \$v | tr A-Z a-z).dll test/api_v5_plugin.c || exit 1; done &&
   printf '[log]\nlevel = info\nv5dbg = debug\n' > \$D/v3x/v3x.ini && printf 'v5_marked' > \$D/v3x/loading.marker &&
   printf 'crash_logger started\nUNHANDLED EXCEPTION 0xc0000005 at fake_mod.dll+0x1234 - process is going down\n' > \$D/v3x/crash.log &&
   $CC -o \$D/api_v5_test.exe test/api_v5_test.c -Lbuild -l:version.dll -luser32 && cd \$D && V3X_NO_CONSOLE=1 ./api_v5_test.exe"
@@ -98,6 +119,24 @@ t api_v5_gate_safe "gate_dir g1 && cd $T/g1 && V3X_NO_CONSOLE=1 V3X_BUILD_GATE=1
 t api_v5_gate_load_env "gate_dir g2 && cd $T/g2 && V3X_NO_CONSOLE=1 V3X_BUILD_GATE=1 V3X_UNKNOWN_BUILD=load ./api_v5_test.exe gateload"
 t api_v5_gate_load_ini "gate_dir g3 && printf 'console=0\nunknown_build = load\n[plugins]\n' > $T/g3/v3x/v3x.ini && cd $T/g3 && V3X_NO_CONSOLE=1 V3X_BUILD_GATE=1 ./api_v5_test.exe gateload"
 t check_tool "python test/compat_check.py $T"
+# fuzzing (action 15): every test/fuzz/fuzz_*.c harness (other than the driver) with the driver, UBSan trap,
+# FUZZ_ITERS inputs per target (deterministic). Crash inputs land in $T/fuzz/.
+fuzz_all() {
+    local D=$T/fuzz n=0 bad=0
+    rm -rf "$D"; mkdir -p "$D"
+    for f in test/fuzz/fuzz_*.c; do
+        [[ $f == test/fuzz/fuzz_main.c ]] && continue
+        local b; b=$(basename "$f" .c)
+        n=$((n + 1))
+        if ! $FUZZCC -o "$D/$b.exe" "$f" test/fuzz/fuzz_main.c; then echo "BUILD FAILED: $f"; bad=$((bad + 1)); continue; fi
+        FUZZ_OUT=$D FUZZ_ITERS=${FUZZ_ITERS:-2000} "$D/$b.exe" || { echo "FUZZ FAILED: $f"; bad=$((bad + 1)); }
+    done
+    echo "$n checks, $bad failed (fuzz harness files)"
+    [[ $bad == 0 ]]
+}
+t fuzz "fuzz_all"
+# banned unsafe C idioms (tools/check_unsafe.sh by sec-plugins: += snprintf accumulate, strcpy, sprintf, ...)
+[[ -f tools/check_unsafe.sh ]] && t check_unsafe "bash tools/check_unsafe.sh && echo '1 checks, 0 failed'"
 
 # ---- plugin offline tests (docs/testing.md)
 t alloc_tracker "$CC -o $T/att.exe test/alloc_tracker_test.c && $T/att.exe ${EXE:+$EXE build/plugins/alloc_tracker.dll}"
@@ -131,6 +170,9 @@ t doctor "D=$T/dr; rm -rf \$D; mkdir -p \$D/e2e/v3x/plugins && $CC -o \$D/drt.ex
 
 # ---- end-to-end (link build/version.dll like victoria3.exe)
 t harness "e2e harness test/harness.c ironman_console && cd $T/harness && V3X_NO_CONSOLE=1 ./harness.exe"
+# L13: the same in a folder whose name is outside the ANSI code page (wide paths in the core)
+t harness_unicode "U=$T/uni_\$(printf '\\xc3\\xa4_\\xd0\\xb6_\\xe4\\xb8\\xad'); rm -rf \"\$U\" && cp -r $T/harness \"\$U\" && rm -f \"\$U/v3x/v3x.log\" &&
+  cd \"\$U\" && V3X_NO_CONSOLE=1 ./harness.exe && grep -q 'loaded plugin' v3x/v3x.log && echo '1 checks, 0 failed (plugin loaded from a non-ANSI path, v3x.log written)'"
 t devconsole "e2e devconsole_test test/devconsole_test.c devconsole && cd $T/devconsole_test && V3X_NO_CONSOLE=1 ./devconsole_test.exe"
 t devbridge "e2e devbridge_test test/devbridge_test.c devconsole devbridge && cd $T/devbridge_test && V3X_NO_CONSOLE=1 V3X_DEVBRIDGE_PIPE=v3x_devbridge_test ./devbridge_test.exe"
 t devtools "e2e devtools_test test/devtools_test.c devtools && echo interval_sec=2 > $T/devtools_test/v3x/devtools.ini && cd $T/devtools_test && V3X_NO_CONSOLE=1 V3X_PROFILE=1 ./devtools_test.exe"

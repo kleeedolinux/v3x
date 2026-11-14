@@ -30,7 +30,7 @@ int fl_match(const uint8_t *code, size_t avail, size_t off, const char *pat);
 /* Timeline: fixed-capacity event list; extra events are counted in `dropped`. Caller locks. */
 typedef struct { double t_ms; uint32_t tid; char text[132]; } fl_event;
 typedef struct { fl_event *ev; int n, cap, dropped; } fl_timeline;
-void fl_tl_add(fl_timeline *tl, double t_ms, uint32_t tid, const char *fmt, ...);
+void fl_tl_add(fl_timeline *tl, double t_ms, uint32_t tid, const char *fmt, ...) __attribute__((format(printf, 4, 5)));
 /* Formats "  +12345.6 ms  [tid 1234]  text" lines sorted by time (stable). Returns bytes written
  * (always NUL-terminated if cap > 0, truncated if needed). */
 size_t fl_tl_format(fl_timeline *tl, const char *header, char *out, size_t cap);

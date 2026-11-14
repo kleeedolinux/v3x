@@ -17,6 +17,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "v3x.h"
+#include "v3x_safe.h"
 #include "cs_core.h"
 
 V3X_EXPORT const char *v3x_plugin_name = "cpu_sched";
@@ -98,8 +99,8 @@ static uintptr_t worker_detour(void *obj)
 
 static void ids_line(char *out, size_t n, const uint32_t *ids, int k)
 {
-    size_t at = 0; out[0] = 0;
-    for (int i = 0; i < k && at + 12 < n; i++) at += (size_t)snprintf(out + at, n - at, i ? ",%u" : "%u", ids[i]);
+    V3xStr ob; v3x_str_init(&ob, out, n);
+    for (int i = 0; i < k; i++) v3x_str_appendf(&ob, i ? ",%u" : "%u", ids[i]);
 }
 
 static void map_text(int (*out)(const char *fmt, ...), int is_log)

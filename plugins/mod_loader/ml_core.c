@@ -438,6 +438,7 @@ static const char *ROOTS_DIRS[] = {"common/", "events/", "gui/", "gfx/", "locali
 
 static int is_stamp(const char *s)   /* "[hh:mm:ss]" */
 {
+    for (int i = 0; i < 10; i++) if (!s[i]) return 0;   /* never read past the terminator (found by fuzz_mod_loader) */
     return s[0] == '[' && s[3] == ':' && s[6] == ':' && s[9] == ']';
 }
 

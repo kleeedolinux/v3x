@@ -45,6 +45,10 @@ static void part_a(void)
     V3X_TEST_CHECK(all && !sx_valid_rel(NULL), "A unsafe paths rejected (absolute, drive, .., empty parts, trailing dot, wildcards, manifest)");
     char longp[260]; memset(longp, 'a', 201); longp[201] = 0;
     V3X_TEST_CHECK(!sx_valid_rel(longp), "A path > 200 chars rejected");
+    const char *dev[] = {"CON", "common/nul.txt", "aux/x.txt", "events/COM1", "lpt9.yml", "a/PRN.", "conin$", NULL};
+    all = 1;
+    for (int i = 0; dev[i]; i++) if (sx_valid_rel(dev[i])) { printf("  accepted: '%s'\n", dev[i]); all = 0; }
+    V3X_TEST_CHECK(all && sx_valid_rel("common/console.txt") && sx_valid_rel("com10.txt"), "A reserved device names rejected (CON, NUL, AUX, COM1, LPT9, PRN, CONIN$)");
 }
 
 static void part_b(void)
@@ -97,6 +101,30 @@ static void part_c(const char *tmp)
                    "C second session writes 1 file");
     V3X_TEST_CHECK(sx_begin_pack("p2") == 0 && sx_end_pack("p2") == 0, "C empty pack ok");
     V3X_TEST_CHECK(sx_end_pack("nope") == V3X_SCRIPT_ESTATE, "C end_pack of unknown pack -> ESTATE");
+
+    /* reparse points: a junction inside the pack pointing outside must neither be written through nor
+     * be followed by a delete-by-manifest */
+    char jdir[MAX_PATH], target[MAX_PATH], victim[MAX_PATH], cmd[3 * MAX_PATH];
+    snprintf(target, sizeof target, "%s\\c_outside", tmp);
+    CreateDirectoryA(target, NULL);
+    snprintf(victim, sizeof victim, "%s\\victim.txt", target);
+    f = fopen(victim, "wb"); if (f) { fputs("keep", f); fclose(f); }
+    V3X_TEST_CHECK(sx_begin_pack("p3") == 0, "C begin_pack p3");
+    snprintf(jdir, sizeof jdir, "%sp3\\j", sx_root);
+    snprintf(cmd, sizeof cmd, "cmd /c mklink /J \"%s\" \"%s\" >nul 2>nul", jdir, target);
+    int made = system(cmd) == 0 && (GetFileAttributesA(jdir) & FILE_ATTRIBUTE_REPARSE_POINT);
+    if (made) {
+        V3X_TEST_CHECK(sx_write_file("p3", "j/victim.txt", "x", 1) != 0 && file_eq(victim, "keep", 4),
+                       "C write through a junction in the pack refused (outside file unchanged)");
+        V3X_TEST_CHECK(sx_end_pack("p3") == 0, "C end_pack p3");
+        snprintf(p, sizeof p, "%sp3\\v3x_script_ext.manifest", sx_root);
+        f = fopen(p, "ab"); if (f) { fputs("j/victim.txt\n", f); fclose(f); }
+        V3X_TEST_CHECK(sx_begin_pack("p3") == 0 && exists(victim), "C manifest entry through a junction: refused, outside file kept");
+        RemoveDirectoryA(jdir);                         /* removes the junction, not the target */
+    } else {
+        printf("  (mklink /J not available: reparse-point checks skipped)\n");
+    }
+    DeleteFileA(victim); RemoveDirectoryA(target);
     DeleteFileA(outside);
 }
 

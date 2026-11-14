@@ -25,6 +25,8 @@
 #include <string.h>
 #include "v3x.h"
 #include "../../sdk/v3x_hook.h"   /* V3X_PASS8: forward 8 integer slots, whatever the real arg count */
+#include "../../sdk/v3x_mem.h"    /* fault-proof reads of computed addresses */
+#include "../../sdk/v3x_scan.h"   /* .text bounds */
 
 V3X_EXPORT const char *v3x_plugin_name = "content_packs";
 V3X_PLUGIN_MANIFEST("content_packs", "0.5.0", "v3x", "mounts extra content folders into the game file system", "release/1.15.1");
@@ -62,22 +64,33 @@ static const uint8_t *cp_rel32(const uint8_t *at, size_t insn_end_off)
     return at + insn_end_off + r;
 }
 
-/* mount = target of `45 33 C0 E8 rel32` (xor r8d,r8d ; call mount) */
-static const void *cp_resolve_mount(const uint8_t *fn, size_t n)
+/* 1 if [p, p+n) lies inside the code range [lo, hi) (L8: computed addresses are checked before use) */
+static int cp_in_code(const uint8_t *p, size_t n, const uint8_t *lo, const uint8_t *hi)
+{
+    return lo && p >= lo && p < hi && (size_t)(hi - p) >= n;
+}
+
+/* mount = target of `45 33 C0 E8 rel32` (xor r8d,r8d ; call mount); the target must be in [lo, hi) */
+static const void *cp_resolve_mount(const uint8_t *fn, size_t n, const uint8_t *lo, const uint8_t *hi)
 {
     static const uint8_t pat[] = {0x45, 0x33, 0xC0, 0xE8};
     const uint8_t *p = cp_find(fn, n, pat, sizeof pat);
-    return p && (size_t)(p - fn) + 8 <= n ? cp_rel32(p + 4, 4) : NULL;
+    const uint8_t *t = p && (size_t)(p - fn) + 8 <= n ? cp_rel32(p + 4, 4) : NULL;
+    return t && cp_in_code(t, 16, lo, hi) ? t : NULL;
 }
 
-/* refresh = call target at the jump target of `45 85 FF 0F 85 rel32` (test r15d,r15d ; jne X ; X: call refresh) */
-static const void *cp_resolve_refresh(const uint8_t *fn, size_t n)
+/* refresh = call target at the jump target of `45 85 FF 0F 85 rel32` (test r15d,r15d ; jne X ; X: call refresh).
+ * X is computed: it must be inside [lo, hi) and readable before its opcode is read; the call target too. */
+static const void *cp_resolve_refresh(const uint8_t *fn, size_t n, const uint8_t *lo, const uint8_t *hi)
 {
     static const uint8_t pat[] = {0x45, 0x85, 0xFF, 0x0F, 0x85};
     const uint8_t *p = cp_find(fn, n, pat, sizeof pat);
     if (!p || (size_t)(p - fn) + 9 > n) return NULL;
     const uint8_t *x = cp_rel32(p + 5, 4);
-    return x[0] == 0xE8 ? cp_rel32(x + 1, 4) : NULL;
+    uint8_t ins[5];
+    if (!cp_in_code(x, sizeof ins, lo, hi) || !v3x_mem_read((uintptr_t)x, ins, sizeof ins) || ins[0] != 0xE8) return NULL;
+    const uint8_t *t = cp_rel32(x + 1, 4);
+    return cp_in_code(t, 16, lo, hi) ? t : NULL;
 }
 
 static void cp_slashes(char *s)
@@ -199,8 +212,12 @@ V3X_EXPORT int v3x_plugin_load(const V3X_API *a)
 
     void *init = fn_by_string("../platform_specific_game_data");
     const uint8_t *md = fn_by_string("No subdirs mounted for game dir from candidates: {}");
-    g_mount = md ? (mount_fn)cp_resolve_mount(md, SCAN_BYTES) : NULL;
-    g_refresh = md ? (refresh_fn)cp_resolve_refresh(md, SCAN_BYTES) : NULL;
+    V3xSection text = {0, 0};
+    v3x_section(api->image_base(), ".text", &text);
+    const uint8_t *lo = text.ptr, *hi = text.ptr ? text.ptr + text.size : NULL;
+    if (md && (!cp_in_code(md, SCAN_BYTES, lo, hi) || !v3x_mem_readable((uintptr_t)md, SCAN_BYTES))) md = NULL;
+    g_mount = md ? (mount_fn)cp_resolve_mount(md, SCAN_BYTES, lo, hi) : NULL;
+    g_refresh = md ? (refresh_fn)cp_resolve_refresh(md, SCAN_BYTES, lo, hi) : NULL;
     uintptr_t base = api->image_base();
     api->log(TAG, "vfs_init=%p mount_data=%p mount=%p refresh=%p (rva %llx/%llx/%llx/%llx)", init, (void *)md,
              (void *)g_mount, (void *)g_refresh, init ? (unsigned long long)((uintptr_t)init - base) : 0ull,

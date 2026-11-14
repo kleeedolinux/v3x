@@ -252,6 +252,38 @@ static int g_step_of[A_N];
 static LARGE_INTEGER g_freq;
 static long long now(void) { LARGE_INTEGER t; QueryPerformanceCounter(&t); return t.QuadPart; }
 
+/* L5: the prefetch list is a cache file; only paths under the game folder, the Steam Workshop content
+ * folder of Victoria 3 and Documents\Paradox Interactive\Victoria 3 are ever opened. */
+static void strip_last(char *s)                  /* drops the last path component and trailing separators */
+{
+    size_t n = strlen(s);
+    while (n && (s[n - 1] == 0x5C || s[n - 1] == '/')) s[--n] = 0;
+    while (n && s[n - 1] != 0x5C && s[n - 1] != '/') s[--n] = 0;
+    while (n > 3 && (s[n - 1] == 0x5C || s[n - 1] == '/')) s[--n] = 0;
+}
+static void pf_roots(pl_pf *p)
+{
+    char g[MAX_PATH], w[MAX_PATH], ws[MAX_PATH + 32];
+    snprintf(g, sizeof g, "%s", api->game_dir());     /* ...\Victoria 3\binaries\ */
+    strip_last(g);                                      /* ...\Victoria 3 */
+    if (strlen(g) > 3) {
+        pl_pf_add_root(p, g);
+        snprintf(w, sizeof w, "%s", g);
+        strip_last(w); strip_last(w);                   /* ...\steamapps */
+        if (strlen(w) > 3 && snprintf(ws, sizeof ws, "%s\\workshop\\content\\529340", w) < (int)sizeof ws) pl_pf_add_root(p, ws);
+    }
+    typedef HRESULT(WINAPI * shgfp_fn)(HWND, int, HANDLE, DWORD, LPWSTR);
+    HMODULE sh = LoadLibraryExW(L"shell32.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    shgfp_fn f = sh ? (shgfp_fn)(void *)GetProcAddress(sh, "SHGetFolderPathW") : NULL;
+    wchar_t d[MAX_PATH];
+    char u[MAX_PATH * 3];
+    if (f && f(NULL, 0x0005 /* CSIDL_PERSONAL */, NULL, 0, d) == 0 && WideCharToMultiByte(CP_UTF8, 0, d, -1, u, sizeof u - 40, NULL, NULL)) {
+        size_t n = strlen(u);
+        snprintf(u + n, sizeof u - n, "\\Paradox Interactive\\Victoria 3");
+        pl_pf_add_root(p, u);
+    }
+}
+
 static DWORD WINAPI pf_main(LPVOID u)
 {
     (void)u;
@@ -280,7 +312,7 @@ static void step_post(V3X_HookCall *c)
 {
     int id = (int)(intptr_t)c->user;
     pl_step_leave(&S, g_step_of[id], GetCurrentThreadId(), now() - (long long)c->scratch[0]);
-    if (id == A_ASSET || id == A_INIT) F.stop = 1;   /* the blend-shape reads happen in the first asset pass */
+    if (id == A_ASSET || id == A_INIT) pl_pf_stop(&F);   /* the blend-shape reads happen in the first asset pass */
 }
 static void inner_pre(V3X_HookCall *c)
 {
@@ -491,7 +523,7 @@ V3X_EXPORT int v3x_plugin_load(const V3X_API *a)
         snprintf(path, sizeof path, "%spar_load_prefetch.txt", api->v3x_dir());
         if (!g_fn[A_AREAD] || !g_fn[A_BLEND] || !g_fn[A_ASSET] || !g_fn[A_INIT])
             api->log("par_load", "blendshape_cache: anchors missing, off");
-        else if (!(g_pf_loaded = pl_pf_load(&F, path) > 0))
+        else if ((pf_roots(&F), !(g_pf_loaded = pl_pf_load(&F, path) > 0)))
             api->log("par_load", "blendshape_cache: no list yet (this run records it)");
     }
     if (!g_fn[A_INIT]) { api->log("par_load", "game init anchor failed (%s): inactive", g_err[A_INIT]); return 1; }

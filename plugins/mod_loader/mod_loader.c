@@ -33,9 +33,11 @@
 #include <shlobj.h>
 #include <intrin.h>
 #include <stdio.h>
+#include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
 #include "v3x.h"
+#include "v3x_safe.h"
 #include "ml_core.h"
 
 V3X_EXPORT const char *v3x_plugin_name = "mod_loader";
@@ -73,6 +75,22 @@ typedef struct {
 } play_t;
 
 static const V3X_API *api;
+
+/* L10 (docs/security-audit.md): log lines carry mod / file / engine text; control characters,
+ * C1 controls and bidi overrides are replaced (v3x_sanitize_line) so a crafted name cannot forge
+ * v3x.log lines (parsed by doctor and the installer). */
+static void slog(const char *fmt, ...) V3X_PRINTF(1, 2);
+static void slog(const char *fmt, ...)
+{
+    if (!api) return;
+    char raw[1536], clean[1536];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(raw, sizeof raw, fmt, ap);
+    va_end(ap);
+    v3x_sanitize_line(clean, sizeof clean, raw);
+    api->log(TAG, "%s", clean);
+}
 static ml_config cfg;
 static pass8_fn o_stat, o_open;
 static void *g_stat_fn, *g_open_fn, *g_archive_fn;
@@ -125,7 +143,7 @@ static int walk(const walk_t *w, wchar_t *path, size_t plen, char *key, size_t k
     if (depth > 24 || plen + 4 >= 1024) return 0;
     uint64_t mt;
     if (w->dir && (!dir_mtime(path, &mt) || w->dir(w->u, key, mt))) return 0;
-    wcscpy(path + plen, L"\\*");
+    memcpy(path + plen, L"\\*", 3 * sizeof(wchar_t));      /* plen + 4 < 1024 checked above */
     WIN32_FIND_DATAW fd;
     HANDLE h = FindFirstFileExW(path, FindExInfoBasic, &fd, FindExSearchNameMatch, NULL, FIND_FIRST_EX_LARGE_FETCH);
     path[plen] = 0;
@@ -147,7 +165,7 @@ static int walk(const walk_t *w, wchar_t *path, size_t plen, char *key, size_t k
             size_t nl = wcslen(n);
             if (plen + 1 + nl + 4 >= 1024) { ok = 0; break; }
             path[plen] = L'\\';
-            wcscpy(path + plen + 1, n);
+            memcpy(path + plen + 1, n, (nl + 1) * sizeof(wchar_t));
             ok = walk(w, path, plen + 1 + nl, key, kl, depth + 1);
             path[plen] = 0;
             if (!ok) break;
@@ -224,7 +242,9 @@ static int cache_try(root_t *r, const wchar_t *w, size_t wn)
         for (uint32_t k = 0; ok && k < c->dirs.n; k++) {
             const char *rel = ml_dirs_name(&c->dirs, k);
             uint64_t mt;
-            wcscpy(p, w);
+            /* the index cache is a file under binaries/v3x: a recorded dir must be a clean relative path */
+            if (wn >= 1024 || (*rel && v3x_path_rel_ok(rel) != V3X_R_OK)) { ok = 0; break; }
+            memcpy(p, w, (wn + 1) * sizeof(wchar_t));
             size_t pl = wn;
             if (*rel) {
                 p[pl++] = L'\\';
@@ -260,7 +280,7 @@ static void build_index(root_t *r)
     r->build_ms = qms(t1.QuadPart - t0.QuadPart);
     if (!ok) { ml_hv_free(&r->hv); ml_dirs_free(&r->dirs); }
     InterlockedExchange(&r->state, ok ? IX_READY : IX_FAILED);
-    if (api) api->log(TAG, "index %s: %s, %u keys %u dirs, %.2f ms", r->norm,
+    if (api) slog("index %s: %s, %u keys %u dirs, %.2f ms", r->norm,
                       !ok ? "FAILED (root not indexed)" : r->from_cache ? "reused (signature unchanged)" : "built",
                       r->hv.n, r->dirs.n, r->build_ms);
 }
@@ -338,7 +358,7 @@ static root_t *root_get(void *opaque)
         MemoryBarrier();
         InterlockedIncrement(&g_nroots);
         if (want && !TrySubmitThreadpoolCallback(build_cb, r, NULL)) InterlockedExchange(&r->state, IX_FAILED);
-        if (api) api->log(TAG, "root %s (%s%s%s)", r->norm, ml_class_name(r->cls), r->play >= 0 ? ", playset" : "",
+        if (api) slog("root %s (%s%s%s)", r->norm, ml_class_name(r->cls), r->play >= 0 ? ", playset" : "",
                           r->hidden ? ", HIDDEN" : "");
     }
     ReleaseSRWLockExclusive(&g_lock);
@@ -349,7 +369,7 @@ static void note_mismatch(root_t *r, const char *name, int is_open)
 {
     LONG k = InterlockedIncrement(&g_nmismatch) - 1;
     if (k < 16) snprintf(g_mismatch[k], sizeof g_mismatch[k], "%s %s: %s", ml_root_leaf(r->norm), is_open ? "open" : "stat", name);
-    if (api && k < 16) api->log(TAG, "INDEX MISMATCH %s %s: '%s' exists but the index says no", r->norm, is_open ? "open" : "stat", name);
+    if (api && k < 16) slog("INDEX MISMATCH %s %s: '%s' exists but the index says no", r->norm, is_open ? "open" : "stat", name);
 }
 
 /* one PhysFS DIR probe (stat or openRead) on root r */
@@ -374,7 +394,7 @@ static uintptr_t probe(root_t *r, int is_open, pass8_fn orig, PASS8_ARGS)
             InterlockedIncrement64(&r->mismatch);
             note_mismatch(r, (const char *)a1_, is_open);
             if (!InterlockedExchange(&g_disabled, 1) && api)
-                api->log(TAG, "verify mismatch -> lookup cache OFF for this session (every probe goes to the engine)");
+                slog("verify mismatch -> lookup cache OFF for this session (every probe goes to the engine)");
         }
         return res;
     }
@@ -580,7 +600,7 @@ static void scan_errlog(void)
         for (int i = 0; i < g_nplay; i++)
             if (g_play[i].parse >= cfg.fatal_min && !g_play[i].hidden) {
                 g_play[i].hidden = 1;
-                if (api) api->log(TAG, "skip_fatal: hiding mod %s (%d parse errors last run)", g_play[i].leaf, g_play[i].parse);
+                if (api) slog("skip_fatal: hiding mod %s (%d parse errors last run)", g_play[i].leaf, g_play[i].parse);
             }
     InterlockedExchange(&g_errlog_done, 1);
 }
@@ -750,7 +770,7 @@ static void CALLBACK report_cb(PTP_CALLBACK_INSTANCE inst, void *ctx)
     AcquireSRWLockExclusive(&g_lock);   /* serializes writers; root_get() waits only on new roots */
     if (cfg.index_cache && g_dirty) {
         size_t b = cache_save();
-        if (api) api->log(TAG, "index file %s (%zu bytes)", b ? "written" : "NOT written", b);
+        if (api) slog("index file %s (%zu bytes)", b ? "written" : "NOT written", b);
     }
     if (cfg.report) write_report();
     ReleaseSRWLockExclusive(&g_lock);
@@ -763,7 +783,7 @@ static void on_transition(const char *name, void *data, void *user)
     snprintf(g_last_event, sizeof g_last_event, "transition %s->%s", t && t->from ? t->from : "?", t && t->to ? t->to : "?");
     char line[700];
     summary_line(line, sizeof line);
-    api->log(TAG, "%s: %s", g_last_event, line);
+    slog("%s: %s", g_last_event, line);
     if (cfg.report || cfg.index_cache) TrySubmitThreadpoolCallback(report_cb, NULL, NULL);
 }
 
@@ -810,12 +830,12 @@ V3X_EXPORT int v3x_plugin_load(const V3X_API *a)
     char *ini = read_file(p, 64 * 1024, NULL);
     if (ini) {
         int bad = ml_config_parse(&cfg, ini, err, sizeof err);
-        if (bad) api->log(TAG, "mod_loader.ini: %d bad line(s), first: %s", bad, err);
+        if (bad) slog("mod_loader.ini: %d bad line(s), first: %s", bad, err);
         free(ini);
     }
-    if (cfg.mode == ML_OFF) { api->log(TAG, "mode=off: nothing hooked"); return 0; }
+    if (cfg.mode == ML_OFF) { slog("mode=off: nothing hooked"); return 0; }
     paths_init();
-    if (cfg.index_cache) { cache_load(); api->log(TAG, "%s", g_cache_note); }
+    if (cfg.index_cache) { cache_load(); slog("%s", g_cache_note); }
     snprintf(p, sizeof p, "%s\\content_load.json", g_docs_native);
     char *js = read_file(p, 1u << 20, NULL);
     int np = js ? ml_parse_playset(js, add_play, NULL) : -1;
@@ -824,23 +844,23 @@ V3X_EXPORT int v3x_plugin_load(const V3X_API *a)
     const char *why = resolve();
     uintptr_t b = api->image_base();
     if (why) {
-        api->log(TAG, "PhysFS DIR archiver not resolved (%s) - mod_loader inactive", why);
+        slog("PhysFS DIR archiver not resolved (%s) - mod_loader inactive", why);
         return 0;
     }
-    api->log(TAG, "PhysFS DIR archiver: stat rva %llx, openRead rva %llx, error slot +0x%x%s", (unsigned long long)((uintptr_t)g_stat_fn - b),
+    slog("PhysFS DIR archiver: stat rva %llx, openRead rva %llx, error slot +0x%x%s", (unsigned long long)((uintptr_t)g_stat_fn - b),
              (unsigned long long)((uintptr_t)g_open_fn - b), (unsigned)g_err_off, g_err_off < 0 ? " NOT FOUND" : "");
     if (g_err_off < 0 && cfg.mode == ML_ON) {
         cfg.mode = ML_MEASURE;
-        api->log(TAG, "mode=on REFUSED: cannot set the PhysFS error code exactly like a real miss -> measure");
+        slog("mode=on REFUSED: cannot set the PhysFS error code exactly like a real miss -> measure");
     }
     int want_hide = cfg.skip_fatal || cfg.skip_mods[0];
-    if (want_hide && g_err_off < 0) api->log(TAG, "skip_mods/skip_fatal REFUSED (no PhysFS error slot)");
+    if (want_hide && g_err_off < 0) slog("skip_mods/skip_fatal REFUSED (no PhysFS error slot)");
     if (cfg.skip_fatal) scan_errlog();                 /* must be done before the first mount */
     else if (cfg.report) { HANDLE th = CreateThread(NULL, 0, errlog_thread, NULL, 0, NULL); if (th) CloseHandle(th); }
     int s1 = api->hook(g_stat_fn, (void *)stat_detour, (void **)&o_stat);
     int s2 = s1 ? -1 : api->hook(g_open_fn, (void *)open_detour, (void **)&o_open);
     if (s1 || s2) {
-        api->log(TAG, "hook failed (stat %d, openRead %d) - inactive", s1, s2);
+        slog("hook failed (stat %d, openRead %d) - inactive", s1, s2);
         if (!s1) api->unhook(g_stat_fn);
         return 0;
     }
@@ -849,7 +869,7 @@ V3X_EXPORT int v3x_plugin_load(const V3X_API *a)
         api->on_event("load_transition", on_transition, NULL);
         api->register_command("modload", "mod_loader: VFS probe stats + write v3x/mod_report.txt", cmd_modload, NULL);
     }
-    api->log(TAG, "ready: mode=%s, playset %d mod(s), index workshop=%d dlc=%d local=%d game=%d packs=%d, verify_every=%d, skip_fatal=%d skip_mods='%s'",
+    slog("ready: mode=%s, playset %d mod(s), index workshop=%d dlc=%d local=%d game=%d packs=%d, verify_every=%d, skip_fatal=%d skip_mods='%s'",
              cfg.mode == ML_ON ? "on" : "measure", np, cfg.index_workshop, cfg.index_dlc, cfg.index_local,
              cfg.index_game, cfg.index_packs, cfg.verify_every,
              cfg.skip_fatal, cfg.skip_mods);

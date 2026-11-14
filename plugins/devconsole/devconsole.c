@@ -28,6 +28,7 @@
 #define ZYCORE_STATIC_BUILD
 #include "../../third_party/zydis/Zydis.h"
 #include "v3x.h"
+#include "v3x_safe.h"
 
 V3X_EXPORT const char *v3x_plugin_name = "devconsole";
 V3X_PLUGIN_MANIFEST("devconsole", "0.5.0", "v3x", "reverse-engineering commands for the V3X console", "release/1.15.1");
@@ -160,9 +161,9 @@ static size_t dc_dis_one(uintptr_t a, char *line, size_t cap)
         return 1;
     }
     size_t len = ins.info.length;
-    char hex[64] = ""; size_t h = 0;
-    for (size_t i = 0; i < len && i < 10; i++) h += snprintf(hex + h, sizeof hex - h, "%02X ", b[i]);
-    if (len > 10) snprintf(hex + h, sizeof hex - h, "..");
+    char hex[64]; V3xStr hb; v3x_str_init(&hb, hex, sizeof hex);
+    for (size_t i = 0; i < len && i < 10; i++) v3x_str_appendf(&hb, "%02X ", b[i]);
+    if (len > 10) v3x_str_append(&hb, "..");
     snprintf(line, cap, "%-28s %-30s %s", where, hex, ins.text);
     for (ZyanU8 i = 0; i < ins.info.operand_count_visible; i++) {
         const ZydisDecodedOperand *op = &ins.operands[i];
@@ -367,19 +368,20 @@ static void cmd_mem(const char *args, void *user)
     char where[MAX_PATH];
     if (!avail) { dc_where(a, where, sizeof where); api->print("%s: not readable", where); return; }
     for (size_t off = 0; off < avail; off += 16) {
-        char line[160]; size_t l = 0;
+        /* `where` is a module path + symbol (up to MAX_PATH): bounded builder, never line[l++] */
+        char line[160 + MAX_PATH]; V3xStr lb; v3x_str_init(&lb, line, sizeof line);
         dc_where(a + off, where, sizeof where);
-        l += snprintf(line + l, sizeof line - l, "%-28s ", where);
+        v3x_str_appendf(&lb, "%-28s ", where);
         for (size_t i = 0; i < 16; i++) {
-            if (off + i < avail) l += snprintf(line + l, sizeof line - l, "%02X ", b[off + i]);
-            else l += snprintf(line + l, sizeof line - l, "   ");
+            if (off + i < avail) v3x_str_appendf(&lb, "%02X ", b[off + i]);
+            else v3x_str_append(&lb, "   ");
         }
-        l += snprintf(line + l, sizeof line - l, " |");
+        v3x_str_append(&lb, " |");
         for (size_t i = 0; i < 16 && off + i < avail; i++) {
             uint8_t c = b[off + i];
-            line[l++] = (c >= 0x20 && c < 0x7F) ? (char)c : '.';
+            v3x_str_appendc(&lb, (c >= 0x20 && c < 0x7F) ? (char)c : '.');
         }
-        line[l++] = '|'; line[l] = 0;
+        v3x_str_appendc(&lb, '|');
         api->print("%s", line);
     }
     if (avail < len) api->print("(only %zu of %zu bytes readable)", avail, len);

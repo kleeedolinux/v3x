@@ -77,7 +77,7 @@ int lg_config_parse(lg_config *c, const char *text, char *err, size_t errn)
                 static const char *pc[] = { "off", "build", "verify", "on" };
                 for (int i = 0; i < 4; i++) if (!_stricmp(v, pc[i])) { c->png_cache = i; ok = 1; }
             }
-            else if (!_stricmp(k, "cache_dir")) { ok = strlen(v) < sizeof c->cache_dir; if (ok) strcpy(c->cache_dir, v); }
+            else if (!_stricmp(k, "cache_dir")) { size_t vl = strlen(v); ok = vl < sizeof c->cache_dir; if (ok) memcpy(c->cache_dir, v, vl + 1); }
 #undef KI
         }
         if (!ok) {
@@ -171,10 +171,11 @@ int lg_root(lg_state *s, const void *key, const char *dir)
     int r = 255;
     for (int i = 0; i < s->nroots; i++)
         if (s->root_key[i] == key && !strcmp(s->roots[i], dir)) { r = i; break; }
-    if (r == 255 && s->nroots < LG_ROOTS && strlen(dir) < sizeof s->roots[0]) {
+    size_t dl = strlen(dir);
+    if (r == 255 && s->nroots < LG_ROOTS && dl < sizeof s->roots[0]) {
         r = s->nroots++;
         s->root_key[r] = key;
-        strcpy(s->roots[r], dir);
+        memcpy(s->roots[r], dir, dl + 1);
     }
     ReleaseSRWLockExclusive(&s->lock);
     return r;

@@ -176,11 +176,11 @@ static int sx_engine_resolve(const V3X_API *api, const char *tag, SxEngine *e)
     if (!v3x_section(api->image_base(), ".text", &text) || !v3x_section(api->image_base(), ".data", &data))
         return SX_WHY(e, "no .text/.data section");
     V3xAnchor A[] = {
-        {"run_effect_ui", "RunEffect", SX_P_RUNEFFECT, V3X_ANCHOR_ALL_SAME},
-        {"eff_parse", "Effect Runner", SX_P_PARSE, V3X_ANCHOR_ALL_SAME},
-        {"trg_parse", "Trigger Runner", SX_P_PARSE, V3X_ANCHOR_ALL_SAME},
-        {"trg_eval", NULL, SX_P_TRG_EVAL, 0},
-        {"exec_event", "Please specify event name", SX_P_EXECEVENT, V3X_ANCHOR_ALL_SAME},
+        {.name = "run_effect_ui", .string = "RunEffect", .pattern = SX_P_RUNEFFECT, .xref = V3X_ANCHOR_ALL_SAME},
+        {.name = "eff_parse", .string = "Effect Runner", .pattern = SX_P_PARSE, .xref = V3X_ANCHOR_ALL_SAME},
+        {.name = "trg_parse", .string = "Trigger Runner", .pattern = SX_P_PARSE, .xref = V3X_ANCHOR_ALL_SAME},
+        {.name = "trg_eval", .string = NULL, .pattern = SX_P_TRG_EVAL, .xref = 0},
+        {.name = "exec_event", .string = "Please specify event name", .pattern = SX_P_EXECEVENT, .xref = V3X_ANCHOR_ALL_SAME},
     };
     enum { A_RE, A_EP, A_TP, A_TE, A_EV, A_N };
     if (v3x_anchor_resolve_all(api, tag, A, A_N)) {
@@ -252,7 +252,7 @@ static LONG volatile sx_active;           /* 1 while a run is in progress (re-en
 static struct { const SxEngine *e; SxRngRec rec; void *saved; int took, acquired; } sx_rng_state;
 static void (*sx_run_log)(const char *fmt, ...);   /* optional */
 
-static int sx_fail(char *err, size_t en, int rc, const char *fmt, ...)
+static V3X_PRINTF(4, 5) int sx_fail(char *err, size_t en, int rc, const char *fmt, ...)
 {
     if (err && en) {
         va_list ap;

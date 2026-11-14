@@ -13,7 +13,14 @@
     --game-dir DIR   the "Victoria 3" folder (default: env V3X_GAME_DIR, else the parent of this
                      repo if it contains binaries/victoria3.exe)
     --cc "CMD"       compiler command (default: env V3X_CC, else "<python> -m ziglang cc")
-    --debug          -O0 -g instead of -O2
+    --debug          -O0 -g instead of -O2 (no _FORTIFY_SOURCE)
+    --werror         treat warnings as errors (also env V3X_WERROR=1)
+    --sanitize       build the offline test with -fsanitize=undefined -fsanitize-trap=undefined
+                     (also env V3X_SANITIZE=1)
+
+Release flags (same as ./build.sh, docs/adr/0004-sdk-safety.md): -O2 -fstack-protector-strong
+-D_FORTIFY_SOURCE=2 -ftrivial-auto-var-init=zero -fno-delete-null-pointer-checks, warnings -Wall -Wextra
+-Wformat=2 -Wvla -Wshadow -Wno-unused-function.
 
     python sdk/build_plugin.py check <plugin.dll> [--game-dir DIR] [--exe EXE] [--loader DLL]
                      [--unknown-build safe|load] [--json]
@@ -44,6 +51,10 @@ import subprocess
 import sys
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# hardening + warnings (keep in sync with build.sh V3X_HARDEN / V3X_WARN)
+HARDEN = ["-fstack-protector-strong", "-ftrivial-auto-var-init=zero", "-fno-delete-null-pointer-checks"]
+WARN = ["-Wall", "-Wextra", "-Wformat=2", "-Wvla", "-Wshadow", "-Wno-unused-function"]
+SANITIZE = ["-fsanitize=undefined", "-fsanitize-trap=undefined"]
 
 
 def is_test(path):
@@ -361,7 +372,11 @@ def main():
     ap.add_argument("--game-dir")
     ap.add_argument("--cc")
     ap.add_argument("--debug", action="store_true")
+    ap.add_argument("--werror", action="store_true")
+    ap.add_argument("--sanitize", action="store_true")
     a = ap.parse_args()
+    werror = a.werror or os.environ.get("V3X_WERROR") == "1"
+    sanitize = a.sanitize or os.environ.get("V3X_SANITIZE") == "1"
 
     pdir = os.path.abspath(a.plugin_dir)
     srcs = sorted(p for p in glob.glob(os.path.join(pdir, "*.c")) if not is_test(p))
@@ -377,9 +392,9 @@ def main():
     dll = os.path.join(out, name + ".dll")
 
     cc = compiler(a.cc) + ["-target", "x86_64-windows-gnu"]
-    cc += ["-O0", "-g"] if a.debug else ["-O2"]
-    cc += ["-Wall", "-Wno-unused-function", "-I" + os.path.join(REPO, "include"), "-I" + os.path.join(REPO, "sdk"),
-           "-I" + pdir]
+    cc += ["-O0", "-g"] if a.debug else ["-O2", "-D_FORTIFY_SOURCE=2"]
+    cc += HARDEN + WARN + (["-Werror"] if werror else [])
+    cc += ["-I" + os.path.join(REPO, "include"), "-I" + os.path.join(REPO, "sdk"), "-I" + pdir]
     if run(cc + ["-shared", "-o", dll] + srcs):
         print("BUILD FAILED")
         return 1
@@ -398,7 +413,7 @@ def main():
         os.makedirs(tdir, exist_ok=True)
         exe = os.path.join(tdir, name + "_test.exe")
         # the test #includes the plugin source itself, so only the test files are compiled
-        if run(cc + ["-o", exe] + tests):
+        if run(cc + (SANITIZE if sanitize else []) + ["-o", exe] + tests):
             print("TEST BUILD FAILED")
             return 1
         game_exe = a.test or (os.path.join(game, "binaries", "victoria3.exe") if game else "")

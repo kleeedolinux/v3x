@@ -58,36 +58,52 @@ typedef struct fl_stripe {
 } __attribute__((aligned(64))) fl_stripe;
 
 typedef struct fl_tokcache {
-    void *volatile *slots;        /* cap entries, zero = not cached */
+    void **slots;                 /* cap entries, zero = not cached. Shared by all threads without a lock:
+                                     every access is __atomic (store release / load acquire, plain movs
+                                     on x86-64), so the lock-free design is data-race free. */
     uint32_t cap;
     const void *dflt;             /* default string returned for unknown ids */
     void *const *reg_global;      /* exe global holding the registry pointer (may be NULL until CRT init) */
     fl_tokget_fn orig;            /* the engine lookup (trampoline) */
-    volatile long disabled;       /* 1 after a mismatch: forward everything */
-    volatile long mismatches;
+    long disabled;                /* 1 after a mismatch: forward everything (__atomic relaxed) */
+    long mismatches;              /* __atomic */
+    long bad_ready;               /* release-stored after bad_* are written by the first mismatch */
     int32_t bad_id;
     const void *bad_cached, *bad_orig;
     fl_stripe st[FL_STRIPES];
 } fl_tokcache;
 
+/* Stats: lost updates between two threads hashed onto the same stripe are acceptable, a data race is
+ * not, so counters use relaxed atomic load + store (no lock prefix, same code as a plain ++). */
+#define FL_INC(field) __atomic_store_n(&(field), __atomic_load_n(&(field), __ATOMIC_RELAXED) + 1, __ATOMIC_RELAXED)
+#define FL_ADD(field, v) __atomic_store_n(&(field), __atomic_load_n(&(field), __ATOMIC_RELAXED) + (v), __ATOMIC_RELAXED)
+
+static inline int fl_disabled(const fl_tokcache *c) { return __atomic_load_n(&c->disabled, __ATOMIC_RELAXED) != 0; }
+static inline void *fl_slot_load(const fl_tokcache *c, int32_t id) { return __atomic_load_n(&c->slots[id], __ATOMIC_ACQUIRE); }
+
+/* The registry is engine memory written under the engine's lock; we only read the pointer and the
+ * int32 size (each naturally aligned, so one indivisible load). */
 static inline int32_t fl_reg_size(const fl_tokcache *c)
 {
-    const uint8_t *reg = c->reg_global ? (const uint8_t *)*(void *const volatile *)c->reg_global : NULL;
-    return reg ? *(const volatile int32_t *)(reg + FL_REG_SIZE) : -1;
+    const uint8_t *reg = c->reg_global ? (const uint8_t *)__atomic_load_n((void *const *)c->reg_global, __ATOMIC_ACQUIRE) : NULL;
+    return reg ? __atomic_load_n((const int32_t *)(reg + FL_REG_SIZE), __ATOMIC_ACQUIRE) : -1;
 }
 
 static inline void fl_note_mismatch(fl_tokcache *c, int32_t id, const void *cached, const void *orig)
 {
-    if (__sync_fetch_and_add(&c->mismatches, 1) == 0) { c->bad_id = id; c->bad_cached = cached; c->bad_orig = orig; }
-    c->disabled = 1;
+    if (__atomic_fetch_add(&c->mismatches, 1, __ATOMIC_ACQ_REL) == 0) {
+        c->bad_id = id; c->bad_cached = cached; c->bad_orig = orig;
+        __atomic_store_n(&c->bad_ready, 1, __ATOMIC_RELEASE);
+    }
+    __atomic_store_n(&c->disabled, 1, __ATOMIC_RELAXED);
 }
 
 /* Stores orig's answer if it is provably permanent (see the header comment). */
 static inline void fl_tok_fill(fl_tokcache *c, fl_stripe *s, int32_t id, int32_t size_before, void *v)
 {
     if (v && v != c->dflt && id < size_before && (uint32_t)id < c->cap) {
-        c->slots[id] = v;
-        s->fills++;
+        __atomic_store_n(&c->slots[id], v, __ATOMIC_RELEASE);
+        FL_INC(s->fills);
     }
 }
 
@@ -97,15 +113,16 @@ static inline void fl_tok_fill(fl_tokcache *c, fl_stripe *s, int32_t id, int32_t
 static inline void *fl_tok_get(fl_tokcache *c, fl_stripe *s, int32_t id, int on, uint32_t verify_every,
                                uint64_t (*clock)(void))
 {
-    uint64_t n = ++s->calls;
-    if (c->disabled || id < 0 || (uint32_t)id >= c->cap) return c->orig(id);
+    uint64_t n = __atomic_load_n(&s->calls, __ATOMIC_RELAXED) + 1;
+    __atomic_store_n(&s->calls, n, __ATOMIC_RELAXED);
+    if (fl_disabled(c) || id < 0 || (uint32_t)id >= c->cap) return c->orig(id);
     int32_t size = fl_reg_size(c);
-    void *hit = id < size ? c->slots[id] : NULL;
+    void *hit = id < size ? fl_slot_load(c, id) : NULL;
     if (on && hit) {
-        s->hits++;
+        FL_INC(s->hits);
         if (verify_every && n % verify_every == 0) {
             void *v = c->orig(id);
-            s->verified++;
+            FL_INC(s->verified);
             if (v != hit) { fl_note_mismatch(c, id, hit, v); return v; }
         }
         return hit;
@@ -115,19 +132,19 @@ static inline void *fl_tok_get(fl_tokcache *c, fl_stripe *s, int32_t id, int on,
         uint64_t t0 = clock();
         v = c->orig(id);
         uint64_t t1 = clock();
-        volatile void *probe = id < fl_reg_size(c) ? c->slots[id] : NULL;
+        volatile void *probe = id < fl_reg_size(c) ? fl_slot_load(c, id) : NULL;
         (void)probe;
         uint64_t t2 = clock();
-        s->timed++; s->cyc_orig += t1 - t0; s->cyc_fast += t2 - t1;
+        FL_INC(s->timed); FL_ADD(s->cyc_orig, t1 - t0); FL_ADD(s->cyc_fast, t2 - t1);
     } else {
         v = c->orig(id);
     }
     if (hit) {                                    /* measure mode: compare */
-        s->hits++; s->verified++;
+        FL_INC(s->hits); FL_INC(s->verified);
         if (v != hit) fl_note_mismatch(c, id, hit, v);
         return v;
     }
-    s->misses++;
+    FL_INC(s->misses);
     fl_tok_fill(c, s, id, size, v);
     return v;
 }

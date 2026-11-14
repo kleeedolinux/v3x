@@ -254,8 +254,9 @@ void pl_pf_rec_read(pl_pf *p, const char *vfs, size_t n)
 
 void pl_pf_rec_root(pl_pf *p, const char *root)
 {
-    if (!root || !*root || strlen(root) >= sizeof p->last_root) return;
-    strcpy(p->last_root, root);
+    size_t rl = root ? strlen(root) : 0;
+    if (!rl || rl >= sizeof p->last_root) return;
+    memcpy(p->last_root, root, rl + 1);
     if (p->pending_root >= 0)
         for (int i = p->pending_root; i < p->n; i++)
             if (!p->e[i].native) p->e[i].native = join_root(root, p->e[i].vfs);
@@ -292,6 +293,52 @@ int pl_pf_save(pl_pf *p, const char *path, int *resolved)
     return p->n;
 }
 
+static int pl_is_sep(char c) { return c == '/' || c == 0x5C; }
+
+/* "X:\" + more, no ".." component, no ':' after the drive, no control chars, no doubled separator */
+static int pl_abs_drive_path(const char *s)
+{
+    if (!s || !((s[0] >= 'A' && s[0] <= 'Z') || (s[0] >= 'a' && s[0] <= 'z')) || s[1] != ':' || !pl_is_sep(s[2])) return 0;
+    for (const char *c = s; *c; c++) {
+        if ((unsigned char)*c < 0x20 || (c > s + 1 && *c == ':') || strchr("<>\"|?*", *c)) return 0;
+        if (c > s && pl_is_sep(c[-1]) && pl_is_sep(*c)) return 0;
+        if (c > s && c[0] == '.' && c[1] == '.' && pl_is_sep(c[-1]) && (!c[2] || pl_is_sep(c[2]))) return 0;
+    }
+    return 1;
+}
+
+int pl_pf_add_root(pl_pf *p, const char *dir)
+{
+    size_t n = dir ? strlen(dir) : 0;
+    if (p->nroots >= PL_PF_ROOTS || n < 3 || n >= sizeof p->roots[0] || !pl_abs_drive_path(dir)) return 0;
+    char *r = p->roots[p->nroots];
+    memcpy(r, dir, n + 1);
+    while (n > 3 && pl_is_sep(r[n - 1])) r[--n] = 0;      /* no trailing separator except "X:\" */
+    p->nroots++;
+    return 1;
+}
+
+int pl_pf_path_ok(const pl_pf *p, const char *native)
+{
+    if (!pl_abs_drive_path(native)) return 0;
+    size_t m = strlen(native);
+    for (int r = 0; r < p->nroots; r++) {
+        const char *root = p->roots[r];
+        size_t n = strlen(root);
+        if (m <= n) continue;
+        int ok = 1;
+        for (size_t i = 0; i < n && ok; i++) {
+            char a = native[i], b = root[i];
+            if (pl_is_sep(a) && pl_is_sep(b)) continue;
+            if (a >= 'A' && a <= 'Z') a = (char)(a + 32);
+            if (b >= 'A' && b <= 'Z') b = (char)(b + 32);
+            ok = a == b;
+        }
+        if (ok && (pl_is_sep(root[n - 1]) || pl_is_sep(native[n]))) return 1;   /* component boundary */
+    }
+    return 0;
+}
+
 int pl_pf_load(pl_pf *p, const char *path)
 {
     FILE *f = fopen(path, "r");
@@ -308,7 +355,7 @@ int pl_pf_load(pl_pf *p, const char *path)
         memset(e, 0, sizeof *e);
         e->size = _atoi64(line);
         e->vfs = _strdup(t1 + 1);
-        e->native = *nat ? _strdup(nat) : NULL;
+        e->native = *nat && pl_pf_path_ok(p, nat) ? _strdup(nat) : NULL;   /* outside the roots: never opened */
         if (!e->vfs) break;
         e->vfs_hash = pl_hash_path(e->vfs, strlen(e->vfs));
         p->n++;
@@ -324,30 +371,32 @@ long long pl_pf_run(pl_pf *p)
     for (int i = 0; i < p->n; i++) ps[i + 1] = ps[i] + (p->e[i].size > 0 ? p->e[i].size : 0);
     static uint8_t buf[1 << 20];
     uint64_t h = (uint64_t)p->content_hash;
-    for (int i = 0; i < p->n && !p->stop; i++) {
+#define PL_STOPPED() __atomic_load_n(&p->stop, __ATOMIC_ACQUIRE)
+#define PL_POS() __atomic_load_n(&p->engine_pos, __ATOMIC_ACQUIRE)
+    for (int i = 0; i < p->n && !PL_STOPPED(); i++) {
         pl_pf_ent *e = &p->e[i];
-        if (e->size < 0 || !e->native) { e->state = 3; continue; }
+        if (e->size < 0 || !e->native || !pl_pf_path_ok(p, e->native)) { __atomic_store_n(&e->state, 3, __ATOMIC_RELEASE); continue; }
         for (;;) {                                   /* stay at most `window` bytes ahead of the engine */
-            long pos = p->engine_pos;
-            if (p->stop || pos > i || i == pos || ps[i] + e->size - ps[pos < p->n ? pos : p->n] <= p->window) break;
+            long pos = PL_POS();
+            if (PL_STOPPED() || pos > i || i == pos || ps[i] + e->size - ps[pos < p->n ? pos : p->n] <= p->window) break;
             Sleep(1);
         }
-        if (p->stop) break;
-        if (p->engine_pos > i) { e->state = 3; continue; }  /* the engine is already past it */
+        if (PL_STOPPED()) break;
+        if (PL_POS() > i) { __atomic_store_n(&e->state, 3, __ATOMIC_RELEASE); continue; }  /* the engine is already past it */
         wchar_t w[1040];
         HANDLE fh = INVALID_HANDLE_VALUE;
-        e->state = 1;
+        __atomic_store_n(&e->state, 1, __ATOMIC_RELEASE);
         if (MultiByteToWideChar(CP_UTF8, 0, e->native, -1, w, 1040))
             fh = CreateFileW(w, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
                              FILE_FLAG_SEQUENTIAL_SCAN, NULL);
-        if (fh == INVALID_HANDLE_VALUE) { e->state = 3; InterlockedIncrement64(&p->files_failed); continue; }
+        if (fh == INVALID_HANDLE_VALUE) { __atomic_store_n(&e->state, 3, __ATOMIC_RELEASE); InterlockedIncrement64(&p->files_failed); continue; }
         DWORD got;
         while (ReadFile(fh, buf, sizeof buf, &got, NULL) && got) {
             h = pl_fnv_bytes(h, buf, got);
             InterlockedAdd64(&p->bytes_read, got);
         }
         CloseHandle(fh);
-        e->state = 2;
+        __atomic_store_n(&e->state, 2, __ATOMIC_RELEASE);
         InterlockedIncrement64(&p->files_read);
     }
     p->content_hash = (long long)h;
@@ -357,10 +406,10 @@ long long pl_pf_run(pl_pf *p)
 
 void pl_pf_engine_read(pl_pf *p, long k, uint64_t vfs_hash)
 {
-    InterlockedExchange(&p->engine_pos, k + 1);
+    __atomic_store_n(&p->engine_pos, k + 1, __ATOMIC_RELEASE);
     if (k >= p->n) { InterlockedIncrement64(&p->beyond); return; }
     if (p->e[k].vfs_hash != vfs_hash) { InterlockedIncrement64(&p->mismatch); return; }
-    long st = p->e[k].state;
+    long st = __atomic_load_n(&p->e[k].state, __ATOMIC_ACQUIRE);
     if (st == 2) InterlockedIncrement64(&p->hit);
     else if (st == 1) InterlockedIncrement64(&p->inflight);
     else InterlockedIncrement64(&p->miss);
@@ -379,6 +428,7 @@ static int dbrow_cmp(const void *a, const void *b)
 
 void pl_report(FILE *f, const pl_stats *s, const pl_dbtab *t, const pl_pathset *ps, const char *header, int top_db)
 {
+    (void)ps;   /* kept in the signature: distinct-path numbers are printed by the caller */
     static const char *INNAME[PL_IN_COUNT] = {"vfs_open", "lexer_file", "blendshape", "asset_read"};
     fprintf(f, "# par_load report%s%s\n", header ? " - " : "", header ? header : "");
     fprintf(f, "# wall ms per step on the thread that ran it; 'inner' = time inside VFSOpen / lexer-from-file /\n"

@@ -297,7 +297,7 @@ More: [docs/troubleshooting.md](docs/troubleshooting.md).
 **Multiplayer?** No. V3X is a single-player tool.
 
 **Ironman and achievements?** V3X does not touch achievement code or DLC ownership. But
-`ironman_console` (on by default) makes the console usable in ironman, and some opt-in plugins
+`ironman_console` (off by default) makes the console usable in ironman, and some opt-in plugins
 change the simulation. If achievements matter to you, set `ironman_console = 0` and leave the
 simulation options off.
 
@@ -313,6 +313,57 @@ programs flag on principle. All the source is here, and you can build it yoursel
 **Linux / Proton?** Untested. It may need `WINEDLLOVERRIDES="version=n,b"`.
 
 More: [docs/faq.md](docs/faq.md).
+
+## Security and memory safety
+
+V3X plugins are native code inside the game, so a bug in one is a bug in Victoria 3. The platform is
+built to make the safe way the easy way, in the spirit of Rust, within what C allows.
+
+**Memory safety in the SDK and the loader**
+
+* **Bounded by construction.** [`sdk/v3x_safe.h`](sdk/v3x_safe.h) gives plugins a bounded string
+  builder (`V3xStr`, never writes past its buffer, always NUL-terminated, reports truncation), a
+  checked byte reader (`V3xSpan`, every read is length-checked), checked arithmetic
+  (`v3x_add_ok`, `v3x_mul_ok`, `v3x_alloc_array`), result codes that must be used
+  (`V3X_MUST_USE`), checked path joins (no `..`, drive letters, device names or junctions) and
+  atomics for anything shared between threads.
+* **Unsafe idioms are banned.** `tools/check_unsafe.sh` fails the build on `strcpy`, `strcat`,
+  `sprintf`, `gets` and the unbounded `n += snprintf(...)` pattern; the allowlist is empty.
+* **Fault-proof reads of engine memory** ([`sdk/v3x_mem.h`](sdk/v3x_mem.h)) instead of raw
+  pointer chasing; RTTI and PE parsing are bounds-checked with 64-bit arithmetic.
+* **Hooks never free code that may still run.** Unhooking only disables; trampolines live for the
+  whole process; hook stubs are written, then made execute-only (never writable and executable).
+* **Thread rules are part of the API.** Every entry in [`include/v3x.h`](include/v3x.h) documents
+  which thread may call it; console commands are serialised; frame callbacks register atomically;
+  `log`/`print` carry printf format checking.
+
+**Containing bad plugins**
+
+* A plugin that crashes in its own load, frame, command or event code is caught, logged with
+  module and offset, and switched off; the game keeps running. (A crash inside a hooked engine
+  function cannot be caught; that is why hooks fail closed.)
+* A plugin that crashed during load last time is skipped once (crash-loop guard); a plugin whose
+  load fails has its hooks and patches rolled back.
+* On an unknown game build only plugins whose manifest declares that build are loaded.
+* The ABI is frozen by tests: every field offset is checked at compile time and plugins built
+  against the v1 to v4 headers are loaded by the current loader in CI.
+
+**Verified, not just written**
+
+* Hardened builds: stack protector, `_FORTIFY_SOURCE`, zero-initialised locals, `-Werror` on the
+  loader and SDK; tests also run under the undefined-behaviour sanitizer.
+* Every file parser (ini, caches, indexes, manifests, JSON, prefetch lists, paths) is fuzzed with
+  an in-tree mutational fuzzer on every test run; the fuzzers already found and fixed real bugs.
+
+**Supply chain**
+
+* Releases are signed with Ed25519 ([ADR 0001](docs/adr/0001-release-signing.md)). The one-line
+  installer, `V3X-Setup.exe` and the auto-updater check the signature before trusting any file,
+  and the updater installs only signed releases that support your game build.
+* CI pins every GitHub Action to a commit and the compiler to a hash; publishing runs in a
+  protected environment that waits for the maintainer's approval and cannot overwrite a release.
+
+Report a vulnerability: [SECURITY.md](SECURITY.md). Design decisions: [docs/adr/](docs/adr/).
 
 ## How the loader works
 
@@ -330,7 +381,6 @@ the game's own startup code runs, it loads every enabled plugin ([src/core.c](sr
 * The first release (`V3X-Setup.exe`) on GitHub Releases, and real screenshots.
 * Bring the in-progress items above into the game and publish their numbers.
 * Keep the bundled plugins working on new game versions (anchor updates).
-* Choose a license.
 
 ## Documentation
 

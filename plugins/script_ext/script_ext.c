@@ -37,7 +37,7 @@ static int g_reg_tried, g_hooked; /* registration anchors resolved / the registr
 static int g_registered_n;        /* keywords registered by the engine static init */
 static void (*g_registrar_orig)(void);
 
-static void log_fwd(const char *fmt, ...)
+static V3X_PRINTF(1, 2) void log_fwd(const char *fmt, ...)
 {
     if (!api) return;
     char b[512];

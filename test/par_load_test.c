@@ -228,6 +228,9 @@ int main(int argc, char **argv)
         int resolved = 0;
         V3X_TEST_CHECK(pl_pf_save(&rec, path, &resolved) == NPF && resolved == NPF, "recorder: %d/%d native paths resolved", resolved, NPF);
         pl_pf_reset(&ld);
+        V3X_TEST_CHECK(pl_pf_load(&ld, path) == NPF && ld.e[5].native == NULL, "no roots: list loads, no native path is kept");
+        pl_pf_reset(&ld);
+        V3X_TEST_CHECK(pl_pf_add_root(&ld, dir), "prefetch root added");
         V3X_TEST_CHECK(pl_pf_load(&ld, path) == NPF && ld.e[5].size == (long long)len[5] && ld.e[3].size == 0 &&
                        ld.e[9].vfs_hash == pl_hash_path("gfx/f09.mesh", 12), "list save/load round trip");
         /* run: the engine advances slowly; prefetch must stay inside the window and read every byte */
@@ -265,8 +268,25 @@ int main(int argc, char **argv)
         /* the engine already past an entry: it is skipped, not read */
         static pl_pf late; late = ld; late.engine_pos = NPF; late.window = 1 << 20;
         V3X_TEST_CHECK(pl_pf_run(&late) == 0, "entries the engine already passed are not read");
-        static pl_pf stopped; stopped = ld; stopped.stop = 1;
+        static pl_pf stopped; stopped = ld; pl_pf_stop(&stopped);
         V3X_TEST_CHECK(pl_pf_run(&stopped) == 0, "stop flag honoured");
+        /* L5: only drive paths under a root; never UNC, device, "..", streams */
+        static pl_pf rt; pl_pf_reset(&rt);
+        V3X_TEST_CHECK(pl_pf_add_root(&rt, "C:\\Games\\Victoria 3\\") && pl_pf_add_root(&rt, "D:/w/529340") &&
+                       !pl_pf_add_root(&rt, "\\\\srv\\share") && !pl_pf_add_root(&rt, "\\\\?\\C:\\x") && !pl_pf_add_root(&rt, "rel\\x") &&
+                       !pl_pf_add_root(&rt, "C:\\a\\..\\b"), "roots: drive paths only");
+        static const char *const good[] = {"C:\\Games\\Victoria 3\\game\\gfx\\a.mesh", "c:/games/victoria 3/x", "D:\\w\\529340\\123\\gfx\\b.mesh"};
+        static const char *const bad[] = {"\\\\srv\\share\\Games\\Victoria 3\\a", "\\\\?\\C:\\Games\\Victoria 3\\a", "\\\\.\\PhysicalDrive0",
+            "C:\\Games\\Victoria 3\\..\\..\\Windows\\win.ini", "C:\\Games\\Victoria 3x\\a", "C:\\Games\\Victoria 3", "C:\\Games\\Victoria 3\\a:ads",
+            "C:\\Games\\Victoria 3\\\\a", "E:\\other\\a", "C:\\Games\\Victoria 3\\a\x01", "relative\\a", ""};
+        int okg = 1, okb = 1;
+        for (size_t i = 0; i < sizeof good / sizeof *good; i++) okg &= pl_pf_path_ok(&rt, good[i]);
+        for (size_t i = 0; i < sizeof bad / sizeof *bad; i++) { int r = pl_pf_path_ok(&rt, bad[i]); if (r) printf("  accepted: %s\n", bad[i]); okb &= !r; }
+        V3X_TEST_CHECK(okg && okb, "path_ok: %d allowed paths pass, %d UNC/device/traversal/outside paths refused",
+                       (int)(sizeof good / sizeof *good), (int)(sizeof bad / sizeof *bad));
+        static pl_pf unc; unc = ld; unc.e[0].native = (char *)"\\\\127.0.0.1\\c$\\x"; unc.window = 1ll << 40;
+        pl_pf_run(&unc);
+        V3X_TEST_CHECK(unc.e[0].state == 3 && unc.files_read == NPF - 1, "run: a UNC path injected after load is not opened");
     }
 
     /* the real exe */

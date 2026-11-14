@@ -21,7 +21,12 @@
  * Names: lookups take the plain class name ("CFoo") and match ".?AVCFoo@@", ".?AUCFoo@@" and
  * anonymous/named-namespace forms (".?AVCFoo@?A0x1234abcd@@", ".?AVCFoo@ns@@"). A name starting
  * with ".?A" is compared exactly against the mangled string instead. Only primary vtables
- * (COL offset 0) are reported. */
+ * (COL offset 0) are reported.
+ *
+ * Bounds (audit L7): every RVA read from the image is checked against img_size in 64-bit arithmetic
+ * (no 32-bit wrap), a TypeDescriptor name must be NUL-terminated within the image (and within
+ * V3X_RTTI_NAME_MAX bytes) before it is accepted, and the PE headers are checked against `size`. The
+ * index then only points at validated names, so lookups never read past the image. */
 #ifndef V3X_RTTI_H
 #define V3X_RTTI_H
 
@@ -32,6 +37,8 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+
+#define V3X_RTTI_NAME_MAX 4096   /* longest accepted mangled name (bytes, without the NUL) */
 
 typedef struct { uint32_t td, col, vt, off; } V3xRttiEntry;   /* RVAs; vt = 0 if no vtable found */
 
@@ -69,20 +76,29 @@ static int v3x_rtti_build_range(V3xRtti *r, uintptr_t base, uint64_t ptr_base, u
 {
     r->base = base; r->ptr_base = ptr_base; r->img_size = img_size;
     r->e = 0; r->n = r->cap = 0;
-    lo = (lo + 3) & ~3u;
-    if (hi < lo + 24) return 0;
+    if (hi > img_size) hi = img_size;          /* [lo, hi) must lie inside the image */
+    uint64_t lo64 = ((uint64_t)lo + 3) & ~(uint64_t)3;
+    if ((uint64_t)hi < lo64 + 24) return 0;
     /* pass 1: COLs (ascending RVA, so e[] ends up sorted by col) */
-    for (uint32_t rva = lo; rva + 24 <= hi; rva += 4) {
+    for (uint64_t rva64 = lo64; rva64 + 24 <= hi; rva64 += 4) {
+        uint32_t rva = (uint32_t)rva64;
         const uint32_t *c = (const uint32_t *)(base + rva);
         if (c[0] != 1 || c[5] != rva) continue;
         uint32_t td = c[3];
-        if (td == 0 || td + 20 > img_size || c[1] > 0x10000000u) continue;
+        if (td == 0 || (uint64_t)td + 20 > img_size || c[1] > 0x10000000u) continue;
         const char *nm = (const char *)(base + td + 16);
         if (nm[0] != '.' || nm[1] != '?' || nm[2] != 'A') continue;
+        {   /* the name must end (NUL) inside the image: lookups read it as a C string later */
+            uint64_t room = (uint64_t)img_size - ((uint64_t)td + 16), k = 3;
+            if (room > V3X_RTTI_NAME_MAX + 1) room = V3X_RTTI_NAME_MAX + 1;
+            while (k < room && nm[k]) k++;
+            if (k >= room) continue;
+        }
         if (r->n == r->cap) {
+            if (r->cap > 0x01000000u) { v3x_rtti_free(r); return -1; }   /* 16M entries: not an image */
             uint32_t nc = r->cap ? r->cap * 2 : 4096;
-            void *p = r->e ? HeapReAlloc(GetProcessHeap(), 0, r->e, nc * sizeof *r->e)
-                           : HeapAlloc(GetProcessHeap(), 0, nc * sizeof *r->e);
+            void *p = r->e ? HeapReAlloc(GetProcessHeap(), 0, r->e, (size_t)nc * sizeof *r->e)
+                           : HeapAlloc(GetProcessHeap(), 0, (size_t)nc * sizeof *r->e);
             if (!p) { v3x_rtti_free(r); return -1; }
             r->e = (V3xRttiEntry *)p; r->cap = nc;
         }
@@ -92,11 +108,12 @@ static int v3x_rtti_build_range(V3xRtti *r, uintptr_t base, uint64_t ptr_base, u
     if (!r->n) return 0;
     /* pass 2: vtables = qword pointing at a COL, +8 */
     uint64_t pmin = ptr_base + r->e[0].col, pmax = ptr_base + r->e[r->n - 1].col;
-    for (uint32_t rva = (lo + 7) & ~7u; rva + 16 <= hi; rva += 8) {
-        uint64_t v = *(const uint64_t *)(base + rva);
+    for (uint64_t rva64 = ((uint64_t)lo + 7) & ~(uint64_t)7; rva64 + 16 <= hi; rva64 += 8) {
+        uint64_t v;
+        memcpy(&v, (const void *)(base + (uintptr_t)rva64), sizeof v);
         if (v < pmin || v > pmax) continue;
         int k = v3x_rtti__col_cmp_find(r, (uint32_t)(v - ptr_base));
-        if (k >= 0 && !r->e[k].vt) r->e[k].vt = rva + 8;
+        if (k >= 0 && !r->e[k].vt) r->e[k].vt = (uint32_t)rva64 + 8;
     }
     return 0;
 }
@@ -104,18 +121,29 @@ static int v3x_rtti_build_range(V3xRtti *r, uintptr_t base, uint64_t ptr_base, u
 /* Parse the PE headers at `base` and scan every .rdata section. Returns 0, -1 alloc, -2 bad PE. */
 static int v3x_rtti_build_ex(V3xRtti *r, uintptr_t base, size_t size, uint64_t ptr_base)
 {
-    const IMAGE_DOS_HEADER *dos = (const IMAGE_DOS_HEADER *)base;
+    IMAGE_DOS_HEADER dos;
+    IMAGE_NT_HEADERS64 nt;
     r->e = 0; r->n = r->cap = 0;
-    if (!base || dos->e_magic != IMAGE_DOS_SIGNATURE) return -2;
-    const IMAGE_NT_HEADERS64 *nt = (const IMAGE_NT_HEADERS64 *)(base + dos->e_lfanew);
-    if (nt->Signature != IMAGE_NT_SIGNATURE) return -2;
-    if (!size) size = nt->OptionalHeader.SizeOfImage;
-    const IMAGE_SECTION_HEADER *s = IMAGE_FIRST_SECTION(nt);
-    for (int i = 0; i < nt->FileHeader.NumberOfSections; i++) {
-        if (memcmp(s[i].Name, ".rdata", 7) != 0) continue;
-        uint32_t lo = s[i].VirtualAddress, hi = lo + s[i].Misc.VirtualSize;
+    /* size = bytes mapped at base (0 = trust SizeOfImage: a loaded module). Every header read is checked
+     * and copied out with memcpy (a crafted e_lfanew may be unaligned). */
+    if (!base || (size && size < sizeof dos)) return -2;
+    memcpy(&dos, (const void *)base, sizeof dos);
+    if (dos.e_magic != IMAGE_DOS_SIGNATURE || dos.e_lfanew < 0) return -2;
+    uint64_t nt_off = (uint64_t)dos.e_lfanew;
+    if (size && nt_off + sizeof nt > size) return -2;
+    memcpy(&nt, (const void *)(base + (uintptr_t)nt_off), sizeof nt);
+    if (nt.Signature != IMAGE_NT_SIGNATURE) return -2;
+    if (!size) size = nt.OptionalHeader.SizeOfImage;
+    if (size > 0xFFFFFFFFu) return -2;
+    uint64_t sec_off = nt_off + offsetof(IMAGE_NT_HEADERS64, OptionalHeader) + nt.FileHeader.SizeOfOptionalHeader;
+    if (sec_off + (uint64_t)nt.FileHeader.NumberOfSections * sizeof(IMAGE_SECTION_HEADER) > size) return -2;
+    for (int i = 0; i < nt.FileHeader.NumberOfSections; i++) {
+        IMAGE_SECTION_HEADER sh;
+        memcpy(&sh, (const void *)(base + (uintptr_t)sec_off + (size_t)i * sizeof sh), sizeof sh);
+        if (memcmp(sh.Name, ".rdata", 7) != 0) continue;
+        uint64_t lo = sh.VirtualAddress, hi = lo + sh.Misc.VirtualSize;
         if (hi > size) return -2;
-        return v3x_rtti_build_range(r, base, ptr_base, (uint32_t)size, lo, hi);
+        return v3x_rtti_build_range(r, base, ptr_base, (uint32_t)size, (uint32_t)lo, (uint32_t)hi);
     }
     return -2;
 }

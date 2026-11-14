@@ -10,6 +10,7 @@
  *   sdk/v3x_hook.h      hook_safe helpers, V3X_PASS8 for raw detours
  *   sdk/v3x_game.h      game context: script RNG scope owned by this thread? main thread?
  *   sdk/v3x_util.h      plugin file paths, atomic file writes, QPC time, leveled log, config reload
+ *   sdk/v3x_safe.h      bounded strings, checked readers/arithmetic, safe path joins, atomics (ADR 0004)
  *   sdk/v3x_testkit.h   offline tests against victoria3.exe mapped as an image (tests only)
  *
  * All helpers are header-only `static` functions (unused ones cost nothing; build with
@@ -18,7 +19,7 @@
 #ifndef V3X_SDK_H
 #define V3X_SDK_H
 
-#define V3X_SDK_VERSION 2   /* 2: v3x_util.h, testkit fills API v5 */
+#define V3X_SDK_VERSION 3   /* 2: v3x_util.h, testkit fills API v5; 3: v3x_safe.h, v3x_config_lock, V3X_PRINTF */
 
 #include "v3x.h"
 #include "v3x_rtti.h"
@@ -29,5 +30,6 @@
 #include "v3x_hook.h"
 #include "v3x_game.h"
 #include "v3x_util.h"
+#include "v3x_safe.h"
 
 #endif

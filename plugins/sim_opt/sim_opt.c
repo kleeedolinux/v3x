@@ -41,6 +41,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "v3x.h"
+#include "v3x_safe.h"
 #include "v3x_rtti.h"
 
 V3X_EXPORT const char *v3x_plugin_name = "sim_opt";
@@ -150,7 +151,7 @@ static int throttle_skip(Task *t)
 
 static void call_orig(Task *t, PASS8_ARGS)
 {
-    ((pass8_fn)t->orig)(PASS8);
+    ((pass8_fn)(void *)t->orig)(PASS8);   /* slots beyond the real arity are ignored (Win64 ABI) */
 }
 
 /* the shared slot-6 detour: rcx = task, rdx = Step* */
@@ -240,7 +241,7 @@ static int apply_throttle_list(const char *list)
 
 /* ---------------------------------------------------------------- report */
 
-static void outf(const char *fmt, ...)
+static V3X_PRINTF(1, 2) void outf(const char *fmt, ...)
 {
     char buf[512];
     va_list ap; va_start(ap, fmt); vsnprintf(buf, sizeof buf, fmt, ap); va_end(ap);
@@ -349,8 +350,8 @@ static void tr_report(void)
          (long long)tr.iters_max, tr.iters ? (double)tr.recs / tr.iters : 0.0, (long long)tr.n_max,
          tr.run_qpc ? 100.0 * tr.par_qpc / tr.run_qpc : 0.0, tr.iter_qpc_max * q, (long long)tr.slow_runs, tr.last_ms,
          tr.last_iters, tr.last_n0, tr.last_nlast);
-    char h[160]; int k = 0;
-    for (int i = 0; i < TR_HB; i++) k += snprintf(h + k, sizeof h - k, "%s%s:%lld", i ? " " : "", TR_HNAMES[i], (long long)tr.hist[i]);
+    char h[160]; V3xStr hb; v3x_str_init(&hb, h, sizeof h);
+    for (int i = 0; i < TR_HB; i++) v3x_str_appendf(&hb, "%s%s:%lld", i ? " " : "", TR_HNAMES[i], (long long)tr.hist[i]);
     outf("diag_trades: iterations per run histogram %s%s", h, tr.other_calls ? " (parallel-for also called outside the task!)" : "");
 }
 
@@ -537,10 +538,10 @@ static void jr_report(void)
                     best[k] = i; break;
                 }
         }
-        char line[256]; int k = 0;
+        char line[256]; V3xStr lb; v3x_str_init(&lb, line, sizeof line);
         for (int i = 0; i < 5 && best[i] >= 0; i++)
-            k += snprintf(line + k, sizeof line - k, "%s#%ld %.1f ms", i ? ", " : "", (long)g_jrc[best[i]].key, g_jrc[best[i]].qpc * q);
-        if (k) outf("diag_journal: costliest countries in the monthly per-country stage (country id): %s", line);
+            v3x_str_appendf(&lb, "%s#%ld %.1f ms", i ? ", " : "", (long)g_jrc[best[i]].key, g_jrc[best[i]].qpc * q);
+        if (lb.len) outf("diag_journal: costliest countries in the monthly per-country stage (country id): %s", line);
     }
 }
 
@@ -859,7 +860,7 @@ static int load_tasks(void)
         g_throttle_on = nthr > 0;
     }
     api->log(TAG, "active: diag=%d throttle=%d (%d tasks) -- throttle changes the simulation, single-player only",
-             cfg.diag, g_throttle_on, nthr);
+             cfg.diag, (int)g_throttle_on, (int)nthr);
     return 0;
 }
 

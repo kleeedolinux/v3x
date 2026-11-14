@@ -58,19 +58,19 @@ static anchor_t ANCHORS[A_COUNT] = {
       { { 0x00, "48 8B C4 48 89 58 10 48 89 70 18 48 89 78 20 55" },
         { 0x23, "48 8B 01 48 8B 90 50 01 00 00" },
         { 0xFB, "48 8D 87 68 01 00 00" },          /* lea rax,[task+0x168]: name "From->To" */
-        { 0xDD, "48 8B 87 50 01 00 00 C5 FA 11 90 28 01 00 00" } } },  /* [[task+0x150]+0x128] = seconds (float) */
+        { 0xDD, "48 8B 87 50 01 00 00 C5 FA 11 90 28 01 00 00" } }, NULL },  /* [[task+0x150]+0x128] = seconds (float) */
     { "db_report", "Database Node Init Time: {} - {} ms - {} ms including dependencies",
       { { 0x29, "48 8B 41 08 48 8B 58 70 48 63 40 7C" },
         { 0x148, "4D 8B 8D A0 00 00 00" },
-        { 0x152, "49 8B 85 C0 00 00 00 49 8D 8D B0 00 00 00" } } },
+        { 0x152, "49 8B 85 C0 00 00 00 49 8D 8D B0 00 00 00" } }, NULL },
     { "db_load", "LoadNodesParallelFor",
-      { { 0x00, "48 89 5C 24 20 55 56 57 41 54 41 55 41 56 41 57" } } },
+      { { 0x00, "48 89 5C 24 20 55 56 57 41 54 41 55 41 56 41 57" } }, NULL },
     { "mesh", "Total time \"{}\" in {} ms",
-      { { 0x41, "48 8B 05 ?? ?? ?? ?? 44 8B A0 48 06 00 00" } } },
+      { { 0x41, "48 8B 05 ?? ?? ?? ?? 44 8B A0 48 06 00 00" } }, NULL },
     { "cs_start", "Starting checksum calculation",
-      { { 0x00, "48 89 5C 24 08 48 89 74 24 20 55 57 41 56" } } },
+      { { 0x00, "48 89 5C 24 08 48 89 74 24 20 55 57 41 56" } }, NULL },
     { "cs_feed", "Feeding into checksum: {}",
-      { { 0x00, "48 89 5C 24 08 44 88 44 24 18 48 89 54 24 10" } } },
+      { { 0x00, "48 89 5C 24 08 44 88 44 24 18 48 89 54 24 10" } }, NULL },
 };
 #define THUNK_STR      "IterateTypesThreaded"
 #define THUNK_LEA_BACK 0x24
@@ -280,7 +280,7 @@ static uintptr_t h_db_report(uintptr_t a, uintptr_t b, uintptr_t c, uintptr_t d)
             sum += (int64_t)own;
             if (g_cfg.db_nodes) {
                 char name[96];
-                if (fl_view_str((void *)(uintptr_t)(node + 8), name, sizeof name, readable) < 0) strcpy(name, "?");
+                if (fl_view_str((void *)(uintptr_t)(node + 8), name, sizeof name, readable) < 0) snprintf(name, sizeof name, "?");
                 EVENT(t, "  db node %-40s own %6lld ms  incl deps %6lld ms", name, (long long)own, (long long)incl);
             }
         }

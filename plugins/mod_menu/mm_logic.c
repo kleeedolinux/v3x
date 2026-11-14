@@ -18,7 +18,7 @@ static void sb_put(sb *s, const char *t, size_t len)
     s->p[s->n] = 0;
 }
 static void sb_puts(sb *s, const char *t) { sb_put(s, t, strlen(t)); }
-static void sb_printf(sb *s, const char *fmt, ...)
+static __attribute__((format(printf, 2, 3))) void sb_printf(sb *s, const char *fmt, ...)
 {
     char tmp[1024];
     va_list ap; va_start(ap, fmt);

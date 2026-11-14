@@ -51,8 +51,8 @@ static const uint8_t *rip_target(const uint8_t *fn, int disp_off)
 }
 
 static V3xAnchor A[] = {
-    {"TokenGetString", NULL, TOK_PAT, 0, 0, NULL, NULL},
-    {"WriteIndent", NULL, IND_PAT, 0, 0, NULL, NULL},
+    {.name = "TokenGetString", .pattern = TOK_PAT},
+    {.name = "WriteIndent", .pattern = IND_PAT},
 };
 
 /* both functions must read the same registry global and return the same default string, and the
@@ -74,7 +74,7 @@ static fl_tokcache *g_tc;
 static v3x_pass8_fn o_tok, o_ind;
 static int g_tok_on, g_ind_on;
 static fl_stripe g_ind_st[FL_STRIPES];   /* calls = hooked calls, hits = emulated, misses = declined */
-static volatile long g_exiting;
+static long g_exiting;            /* __atomic: set on the exit event, read by every detour */
 
 static inline fl_stripe *stripe(fl_stripe *base) { return &base[(__readgsdword(0x48) >> 2) & (FL_STRIPES - 1)]; }
 static uint64_t tsc(void) { return __rdtsc(); }
@@ -90,7 +90,7 @@ static void *tok_orig(int32_t id) { return (void *)o_tok((uint64_t)(uint32_t)id,
 uint64_t fl_tok_detour_c(uint32_t id) __attribute__((used));
 uint64_t fl_tok_detour_c(uint32_t id)
 {
-    if (g_exiting) return o_tok((uint64_t)id, 0, 0, 0, 0, 0, 0, 0);
+    if (__atomic_load_n(&g_exiting, __ATOMIC_RELAXED)) return o_tok((uint64_t)id, 0, 0, 0, 0, 0, 0, 0);
     fl_stripe *s = stripe(g_tc->st);
     return (uint64_t)fl_tok_get(g_tc, s, (int32_t)id, g_mode == 2, g_verify_every, tsc);
 }
@@ -141,12 +141,12 @@ __asm__(
 static uint64_t ind_detour(V3X_PASS8_ARGS)
 {
     fl_stripe *s = stripe(g_ind_st);
-    s->calls++;
-    if (g_mode == 2 && !g_exiting && !g_tc->disabled) {
+    FL_INC(s->calls);
+    if (g_mode == 2 && !__atomic_load_n(&g_exiting, __ATOMIC_RELAXED) && !fl_disabled(g_tc)) {
         void *t17 = fl_tok_get(g_tc, stripe(g_tc->st), FL_TOKEN_INDENT, 1, g_verify_every, NULL);
-        if (fl_indent((void *)a0_, t17, fl_stream_slot38)) { s->hits++; return 0; }
+        if (fl_indent((void *)a0_, t17, fl_stream_slot38)) { FL_INC(s->hits); return 0; }
     }
-    s->misses++;
+    FL_INC(s->misses);
     return o_ind(V3X_PASS8);
 }
 
@@ -154,8 +154,10 @@ static void sum(const fl_stripe *st, fl_stripe *o)
 {
     memset(o, 0, sizeof *o);
     for (int i = 0; i < FL_STRIPES; i++) {
-        o->calls += st[i].calls; o->hits += st[i].hits; o->misses += st[i].misses; o->fills += st[i].fills;
-        o->verified += st[i].verified; o->timed += st[i].timed; o->cyc_orig += st[i].cyc_orig; o->cyc_fast += st[i].cyc_fast;
+#define FL_RD(f) __atomic_load_n(&st[i].f, __ATOMIC_RELAXED)
+        o->calls += FL_RD(calls); o->hits += FL_RD(hits); o->misses += FL_RD(misses); o->fills += FL_RD(fills);
+        o->verified += FL_RD(verified); o->timed += FL_RD(timed); o->cyc_orig += FL_RD(cyc_orig); o->cyc_fast += FL_RD(cyc_fast);
+#undef FL_RD
     }
 }
 
@@ -165,19 +167,20 @@ static void report(const char *why, int to_console)
     fl_stripe t, d;
     sum(g_tc->st, &t);
     sum(g_ind_st, &d);
+    long mism = __atomic_load_n(&g_tc->mismatches, __ATOMIC_ACQUIRE);
     char line[640];
     snprintf(line, sizeof line,
              "[%s] mode=%s token_cache=%s: calls %llu, cache hits %llu (%.1f%%), misses %llu, filled %llu, compared %llu, "
              "MISMATCHES %ld%s; engine lookup %.0f cyc vs cache %.0f cyc (%llu timed) | indent=%s: calls %llu, emulated %llu, "
              "engine %llu",
-             why, g_mode == 2 ? "on" : g_mode == 1 ? "measure" : "off", g_tok_on ? (g_tc->disabled ? "DISABLED" : "active") : "no",
+             why, g_mode == 2 ? "on" : g_mode == 1 ? "measure" : "off", g_tok_on ? (fl_disabled(g_tc) ? "DISABLED" : "active") : "no",
              (unsigned long long)t.calls, (unsigned long long)t.hits, t.calls ? 100.0 * (double)t.hits / (double)t.calls : 0.0,
-             (unsigned long long)t.misses, (unsigned long long)t.fills, (unsigned long long)t.verified, g_tc->mismatches,
-             g_tc->mismatches ? " (cache turned off)" : "", t.timed ? (double)t.cyc_orig / (double)t.timed : 0.0,
+             (unsigned long long)t.misses, (unsigned long long)t.fills, (unsigned long long)t.verified, mism,
+             mism ? " (cache turned off)" : "", t.timed ? (double)t.cyc_orig / (double)t.timed : 0.0,
              t.timed ? (double)t.cyc_fast / (double)t.timed : 0.0, (unsigned long long)t.timed, g_ind_on ? "active" : "no",
              (unsigned long long)d.calls, (unsigned long long)d.hits, (unsigned long long)d.misses);
     api->log(TAG, "%s", line);
-    if (g_tc->mismatches)
+    if (mism && __atomic_load_n(&g_tc->bad_ready, __ATOMIC_ACQUIRE))
         api->log(TAG, "first mismatch: id %d cached %p engine %p", (int)g_tc->bad_id, g_tc->bad_cached, g_tc->bad_orig);
     if (to_console && api->print) api->print("%s", line);
 }
@@ -187,7 +190,7 @@ static void on_save_end(const char *n, void *d, void *u) { (void)n; (void)d; (vo
 static void on_exit_ev(const char *n, void *d, void *u)
 {
     (void)n; (void)d; (void)u;
-    g_exiting = 1;           /* static destructors may free the registry: forward everything from now on */
+    __atomic_store_n(&g_exiting, 1, __ATOMIC_RELAXED);   /* static destructors may free the registry: forward everything from now on */
     report("exit", 0);
 }
 

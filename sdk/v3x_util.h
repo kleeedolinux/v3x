@@ -37,6 +37,7 @@
 /* ---- paths under <game>/binaries/v3x/ */
 
 /* out = v3x_dir() + printf(fmt, ...). Returns out, or NULL (out = "") if it does not fit. */
+static char *v3x_path(const V3X_API *api, char *out, size_t cap, const char *fmt, ...) V3X_PRINTF(4, 5);
 static char *v3x_path(const V3X_API *api, char *out, size_t cap, const char *fmt, ...)
 {
     if (!out || !cap) return NULL;
@@ -85,6 +86,25 @@ static int v3x_file_write_atomic(const char *path, const void *data, size_t n)
     return -1;
 }
 
+/* Cross-process lock for read-modify-write of the shared v3x.ini (audit L11: mod_menu, doctor and the
+ * installer all rewrite it). Named mutex V3X_CONFIG_MUTEX; waits up to timeout_ms (an abandoned mutex
+ * counts as acquired). Returns the handle to pass to v3x_config_unlock, or NULL on timeout/error (the
+ * caller decides: the bundled plugins log and write anyway). Pair with v3x_file_write_atomic.
+ *   HANDLE lk = v3x_config_lock(5000); ...read, edit, v3x_file_write_atomic...; v3x_config_unlock(lk); */
+#define V3X_CONFIG_MUTEX L"Local\\v3x_ini"
+static HANDLE v3x_config_lock(DWORD timeout_ms)
+{
+    HANDLE m = CreateMutexW(NULL, FALSE, V3X_CONFIG_MUTEX);
+    if (!m) return NULL;
+    DWORD w = WaitForSingleObject(m, timeout_ms);
+    if (w != WAIT_OBJECT_0 && w != WAIT_ABANDONED) { CloseHandle(m); return NULL; }
+    return m;
+}
+static void v3x_config_unlock(HANDLE m)
+{
+    if (m) { ReleaseMutex(m); CloseHandle(m); }
+}
+
 /* ---- time (QueryPerformanceCounter; monotonic, any thread) */
 
 static int64_t v3x_qpc(void)
@@ -117,6 +137,7 @@ static int v3x_log_enabled(const V3X_API *api, const char *tag, int level)
 
 /* api->log_at on v5; on older loaders api->log with the same "ERROR: " / "WARNING: " prefix, and
  * debug/trace lines dropped. The message is formatted here (max ~1.9 KB, like the core's line). */
+static void v3x_logf(const V3X_API *api, int level, const char *tag, const char *fmt, ...) V3X_PRINTF(4, 5);
 static void v3x_logf(const V3X_API *api, int level, const char *tag, const char *fmt, ...)
 {
     static const char *const prefix[] = {"", "ERROR: ", "WARNING: ", "", "debug: ", "trace: "};

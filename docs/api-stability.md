@@ -86,10 +86,10 @@ string (`"unknown"` when the value is unknown), never NULL.
 | `pattern_scan`, `find_string`, `find_xref`, `function_start` | any thread (read-only) | - |
 | `hook`, `unhook`, `hook_safe` | any thread, best at load (MinHook briefly suspends other threads) | detour / pre / post: the thread calling the hooked function |
 | `patch` | load time, or while the code cannot run | - |
-| `on_frame` | `v3x_plugin_load` only | main thread, every message-pump iteration |
+| `on_frame` | any thread (atomic registration) | main thread, every message-pump iteration |
 | `run_on_main` | any thread | main thread, next frame tick |
 | `register_command` | any thread | console input thread, or the caller of `exec_command` / `exec_capture` |
-| `exec_command`, `exec_capture`, `emit_event`, `enum_commands` | any thread | synchronously on the caller |
+| `exec_command`, `exec_capture`, `emit_event`, `enum_commands` | any thread | synchronously on the caller; command handlers are serialised (one recursive lock, 5 s wait, then -1) |
 | `on_event` | any thread | the emitting thread; `config_reload` and `load_transition*` on the main thread |
 
 Process exit: once `ExitProcess` has started killing threads, every function returns at once
@@ -102,13 +102,26 @@ without effect; do nothing in `DllMain(DLL_PROCESS_DETACH)`.
   are skipped from then on and the game continues (logged as `FAULT in plugin ...`). Faults in
   hook detours / `hook_safe` pre/post, in engine code and in your own threads are **not** caught:
   they crash the game exactly as without V3X (crash_logger records them).
-* **Rollback**: `v3x_plugin_load` returning non-zero or faulting removes every hook the plugin
-  installed and restores its patches; its callbacks never run. Return non-zero whenever you
+* **Rollback**: `v3x_plugin_load` returning non-zero or faulting disables every hook the plugin
+  installed (trampolines are never freed: [ADR 0003](adr/0003-hook-lifetime.md)) and restores its
+  patches; its callbacks never run. Return non-zero whenever you
   could not install everything you need: half-installed plugins do not exist.
 * **Crash-loop guard**: if the game dies inside a plugin's load, that plugin is skipped on the
   next start (once) and the console says so.
 * **Unknown-build gate**: see [Game patches](#game-patches).
 * The `plugins` command always shows why a plugin is not running.
+* **Hook lifetime** (security hardening): `unhook` and rollback only disable; no trampoline or
+  hook stub is ever freed while the process runs. The hook stub pool is W^X (stubs read-execute,
+  their data read-write, never both).
+* **Command threading rule**: command handlers never run concurrently (see the thread rules).
+* **Proxy fails closed**: if `System32ersion.dll` cannot be loaded, the forwarded `version.dll`
+  functions return their failure value (`FALSE` / 0, `GetLastError` = `ERROR_MOD_NOT_FOUND`) instead
+  of crashing.
+* **Paths**: the loader opens its own files and loads plugins through wide (UTF-16) paths, so a
+  game folder outside the ANSI code page works. `game_dir()` / `v3x_dir()` stay ANSI (frozen
+  `const char *`); boot logs a WARNING when the folder cannot be represented in the ANSI code page.
+* **printf checking**: `log`, `print` and `log_at` carry `V3X_PRINTF` format attributes (GCC/clang);
+  no layout change (`test/abi_test.c`).
 
 ## Game patches
 

@@ -3,7 +3,8 @@
  *   api_v5_test.exe        loader_version, build_matches, log_at / log_level / `loglevel`, `reload` ->
  *                          config_reload on the main thread, fault isolation (on_frame, command, event,
  *                          run_on_main), rollback of a failed / faulting v3x_plugin_load (hooks + patches),
- *                          crash-loop marker, last-crash line from crash.log
+ *                          crash-loop marker, last-crash line from crash.log, threading rules (commands
+ *                          serialised across threads incl. nested exec, concurrent on_frame registration)
  *   api_v5_test.exe gate   with V3X_BUILD_GATE=1: unknown build, safe mode (only '*' / prefix manifests load)
  *   api_v5_test.exe gateload   same plugins with V3X_UNKNOWN_BUILD=load: all load
  * test/run_all.sh builds the plugin variants and the directories ($T/api_v5, $T/api_v5_gate):
@@ -109,6 +110,57 @@ static int gate_test(const V3X_API *api, int load_all)
     return fails ? 1 : 0;
 }
 
+/* ---- threading rules (audit M3): command handlers are serialised, on_frame registration is atomic */
+static volatile LONG g_inside, g_max_inside, g_runs;
+static const V3X_API *g_tapi;
+static void cmd_conc(const char *args, void *user)
+{
+    (void)args; (void)user;
+    LONG now = InterlockedIncrement(&g_inside);
+    for (LONG m = g_max_inside; now > m; m = g_max_inside) InterlockedCompareExchange(&g_max_inside, now, m);
+    Sleep(1);
+    InterlockedIncrement(&g_runs);
+    InterlockedDecrement(&g_inside);
+}
+static void cmd_nest(const char *args, void *user) { (void)args; (void)user; g_tapi->exec_command("v5conc"); }
+static DWORD WINAPI conc_thread(void *arg)
+{
+    (void)arg;
+    for (int i = 0; i < 25; i++) g_tapi->exec_command(i & 1 ? "v5nest" : "v5conc");
+    return 0;
+}
+#define FR_THREADS 8
+#define FR_PER 3
+static volatile LONG g_fr_calls[FR_THREADS * FR_PER], g_fr_ok;
+static void fr_cb(void *user) { InterlockedIncrement(&g_fr_calls[(intptr_t)user]); }
+static DWORD WINAPI frame_thread(void *arg)
+{
+    intptr_t t = (intptr_t)arg;
+    for (int k = 0; k < FR_PER; k++)
+        if (g_tapi->on_frame(fr_cb, (void *)(t * FR_PER + k)) == 0) InterlockedIncrement(&g_fr_ok);
+    return 0;
+}
+static void test_threading(const V3X_API *api)
+{
+    g_tapi = api;
+    CHECK(api->register_command("v5conc", "test", cmd_conc, NULL) == 0 && api->register_command("v5nest", "test", cmd_nest, NULL) == 0,
+          "threading: test commands registered");
+    HANDLE th[FR_THREADS];
+    for (int i = 0; i < 4; i++) th[i] = CreateThread(NULL, 0, conc_thread, NULL, 0, NULL);
+    WaitForMultipleObjects(4, th, TRUE, 60000);
+    for (int i = 0; i < 4; i++) CloseHandle(th[i]);
+    CHECK(g_runs == 100 && g_max_inside == 1, "threading: 4 threads x 25 commands (half nested): %ld ran, at most %ld at once (want 100, 1)",
+          g_runs, g_max_inside);
+    for (intptr_t i = 0; i < FR_THREADS; i++) th[i] = CreateThread(NULL, 0, frame_thread, (void *)i, 0, NULL);
+    WaitForMultipleObjects(FR_THREADS, th, TRUE, 60000);
+    for (int i = 0; i < FR_THREADS; i++) CloseHandle(th[i]);
+    pump(1);
+    int ran = 0, dup = 0;
+    for (int i = 0; i < FR_THREADS * FR_PER; i++) { ran += g_fr_calls[i] == 1; dup += g_fr_calls[i] > 1; }
+    CHECK(g_fr_ok > 0 && ran == g_fr_ok && dup == 0,
+          "threading: %d threads registering on_frame at once: %ld accepted, %d called exactly once, %d twice", FR_THREADS, g_fr_ok, ran, dup);
+}
+
 int main(int argc, char **argv)
 {
     setvbuf(stdout, NULL, _IONBF, 0);
@@ -210,6 +262,7 @@ int main(int argc, char **argv)
     CHECK(strstr(log, "crashed while loading plugin v5_marked last start") != NULL, "marker skip logged");
     CHECK(strstr(log, "last session crashed (crash.log): UNHANDLED EXCEPTION 0xc0000005 at fake_mod.dll+0x1234") != NULL,
           "last crash from crash.log logged");
+    test_threading(api);
     printf("%d checks, %d failed\n%s\n", checks, fails, fails ? "FAILED" : "ALL OK");
     return fails ? 1 : 0;
 }

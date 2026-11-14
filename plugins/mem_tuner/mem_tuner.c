@@ -198,15 +198,14 @@ static void census_walk(mt_census *c)
 static void *volatile g_pools[MT_MAXPOOLS];
 static void pool_line(char *b, size_t n)
 {
-    size_t o = 0; b[0] = 0;
-    for (int i = 0; i < MT_MAXPOOLS; i++) {
-        if (o + 1 >= n) break;
+    V3xStr sb; v3x_str_init(&sb, b, n);
+    for (int i = 0; i < MT_MAXPOOLS && !sb.truncated; i++) {
         void *p = g_pools[i]; if (!p) continue;
         unsigned char h[0x78]; SIZE_T got = 0; long long live, bytes, cap;
         if (!ReadProcessMemory(GetCurrentProcess(), p, h, sizeof h, &got) || got != sizeof h || mt_pool_check(h, &live, &bytes, &cap)) {
-            g_pools[i] = NULL; o += (size_t)snprintf(b + o, o < n ? n - o : 0, " | gui anim pool %d: gone", i); continue;
+            g_pools[i] = NULL; v3x_str_appendf(&sb, " | gui anim pool %d: gone", i); continue;
         }
-        o += (size_t)snprintf(b + o, o < n ? n - o : 0, " | gui anim pool %d: live %lld of %lld slots, array %lld MiB", i, live, cap, bytes >> 20);
+        v3x_str_appendf(&sb, " | gui anim pool %d: live %lld of %lld slots, array %lld MiB", i, live, cap, bytes >> 20);
     }
 }
 
@@ -281,17 +280,18 @@ static int mi_lines(int log, int threads)
     QueryPerformanceCounter(&q1);
     int have_os = (g_mia_got & 1) && mt_mi_os_read(g_mia.stats, &os) == 0;
     mt_mi_format(&s, &os, have_os, b, sizeof b);
-    size_t L = strlen(b);
-    snprintf(b + L, sizeof b - L, "; walk %.1f ms%s", (q1.QuadPart - q0.QuadPart) * 1000.0 / qf.QuadPart, key ? ", cookie-checked" : "");
+    V3xStr wb = {b, sizeof b, strlen(b), 0};       /* continue the line mt_mi_format wrote */
+    v3x_str_appendf(&wb, "; walk %.1f ms%s", (q1.QuadPart - q0.QuadPart) * 1000.0 / qf.QuadPart, key ? ", cookie-checked" : "");
     if (log) api->log(TAG, "%s", b); else api->print("%s", b);
     mt_mi_format_hist(&s, b, sizeof b);
     if (log) api->log(TAG, "%s", b); else api->print("%s", b);
     if (threads && s.nthr) {
         qsort(s.thr, (size_t)s.nthr, sizeof s.thr[0], by_free);
-        size_t o = (size_t)snprintf(b, sizeof b, "mimalloc by owner thread, most committed-but-not-in-use first (committed/in use MiB, segs):");
-        for (int i = 0; i < s.nthr && i < 10 && o < sizeof b; i++) {
+        V3xStr tb; v3x_str_init(&tb, b, sizeof b);
+        v3x_str_append(&tb, "mimalloc by owner thread, most committed-but-not-in-use first (committed/in use MiB, segs):");
+        for (int i = 0; i < s.nthr && i < 10; i++) {
             char nm[96]; teb_name(s.thr[i].tid, nm, sizeof nm);
-            o += (size_t)snprintf(b + o, sizeof b - o, " [%s] %llu/%llu (%u)", nm, MT_MIB(s.thr[i].committed), MT_MIB(s.thr[i].used), s.thr[i].segs);
+            v3x_str_appendf(&tb, " [%s] %llu/%llu (%u)", nm, MT_MIB(s.thr[i].committed), MT_MIB(s.thr[i].used), s.thr[i].segs);
         }
         if (log) api->log(TAG, "%s", b); else api->print("%s", b);
     }

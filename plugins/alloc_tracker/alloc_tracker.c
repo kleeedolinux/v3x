@@ -35,6 +35,7 @@
 #include <string.h>
 #include <errno.h>
 #include "v3x.h"
+#include "v3x_safe.h"
 #include "at_core.h"
 #include "../mem_tuner/mt_mi.h"
 
@@ -531,8 +532,8 @@ static void report(int top, out_fn out, void *ctx)
                      r->total / 1048576.0, (long long)r->big, r->maxsz / 1048576.0, hint(r->rva, h, sizeof h));
             out(ctx, line);
             if (r->frames[0]) {
-                char st[160]; int o = 0;
-                for (int k = 0; k < AT_FRAMES && r->frames[k] && o < (int)sizeof st - 12; k++) o += snprintf(st + o, sizeof st - o, " %08x", r->frames[k]);
+                char st[160]; V3xStr sb; v3x_str_init(&sb, st, sizeof st);
+                for (int k = 0; k < AT_FRAMES && r->frames[k]; k++) v3x_str_appendf(&sb, " %08x", r->frames[k]);
                 snprintf(line, sizeof line, "       stack (first >= %lld MiB block):%s", (long long)(g_stack_big >> 20), st);
                 out(ctx, line);
             }

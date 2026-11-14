@@ -153,15 +153,15 @@ static int apar_resolve(const V3X_API *a)
         return 0;
     }
     apar_scanpat sp[SP_N] = {
-        [SP_GUARD] = {P_GUARD_DTOR}, [SP_HAI_P] = {P_HAI_PSITE}, [SP_HAI_S] = {P_HAI_SSITE}, [SP_HAI_B] = {P_HAI_BSITE},
-        [SP_AI_S1] = {P_AI_S1SITE}, [SP_AI_I] = {P_AI_ISITE}, [SP_AI_A] = {P_AI_ASITE}, [SP_TR_A] = {P_TR_ASITE},
-        [SP_TR_X] = {P_TR_EXEC}, [SP_PG_SEQ] = {P_PG_SEQ},
+        [SP_GUARD] = {.pattern = P_GUARD_DTOR}, [SP_HAI_P] = {.pattern = P_HAI_PSITE}, [SP_HAI_S] = {.pattern = P_HAI_SSITE}, [SP_HAI_B] = {.pattern = P_HAI_BSITE},
+        [SP_AI_S1] = {.pattern = P_AI_S1SITE}, [SP_AI_I] = {.pattern = P_AI_ISITE}, [SP_AI_A] = {.pattern = P_AI_ASITE}, [SP_TR_A] = {.pattern = P_TR_ASITE},
+        [SP_TR_X] = {.pattern = P_TR_EXEC}, [SP_PG_SEQ] = {.pattern = P_PG_SEQ},
     };
     apar_multi_scan(text.ptr, text.size, sp, SP_N);
 
     /* range runner + scheduler global (required by everything) */
     {
-        V3xAnchor A = {"RunRangeExecutionParallel", S_RRP, P_RRP_PRO, V3X_ANCHOR_ALL_SAME};
+        V3xAnchor A = {.name = "RunRangeExecutionParallel", .string = S_RRP, .pattern = P_RRP_PRO, .xref = V3X_ANCHOR_ALL_SAME};
         if (v3x_anchor_resolve(api, &A)) GFAIL(G_RRP, "%s", A.err);
         R.rrp = (uint8_t *)A.result;
         uint8_t *s = near_(R.rrp, 0x300, P_RRP_SCHED);
@@ -174,7 +174,7 @@ static int apar_resolve(const V3X_API *a)
 next_G_RRP:
     if (!R.ok[G_RRP]) return 0;
     {
-        V3xAnchor A = {"heuristic", S_HEUR, P_HEUR_PRO, V3X_ANCHOR_ALL_SAME};
+        V3xAnchor A = {.name = "heuristic", .string = S_HEUR, .pattern = P_HEUR_PRO, .xref = V3X_ANCHOR_ALL_SAME};
         if (v3x_anchor_resolve(api, &A)) GFAIL(G_HEUR, "%s", A.err);
         R.heur = (uint8_t *)A.result;
         if (!near_(R.heur, 0x100, P_HEUR_FLAG)) GFAIL(G_HEUR, "Step+0xb0 test not found");
@@ -247,7 +247,7 @@ next_G_AI:
     }
 next_G_TR:
     {
-        V3xAnchor A = {"UpdatePopGrowthParallel", S_PGPAR, P_PG_PAR_PRO, V3X_ANCHOR_ALL_SAME};
+        V3xAnchor A = {.name = "UpdatePopGrowthParallel", .string = S_PGPAR, .pattern = P_PG_PAR_PRO, .xref = V3X_ANCHOR_ALL_SAME};
         if (v3x_anchor_resolve(api, &A)) GFAIL(G_PG, "%s", A.err);
         R.pg_par = (uint8_t *)A.result;
         if (sp[SP_PG_SEQ].n != 1 || call_tgt(sp[SP_PG_SEQ].hit[0] + 13) != R.pg_par) GFAIL(G_PG, "stage sequence not found");
@@ -480,7 +480,7 @@ static void rrp_post(V3X_HookCall *c)
 
 /* ---------------------------------------------------------------- report */
 typedef struct { char *p; size_t n, cap; } sbuf;
-static void sb(sbuf *b, const char *fmt, ...)
+static V3X_PRINTF(2, 3) void sb(sbuf *b, const char *fmt, ...)
 {
     if (b->n + 1 >= b->cap) return;
     va_list ap; va_start(ap, fmt);

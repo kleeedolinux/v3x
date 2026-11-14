@@ -28,13 +28,21 @@ int main(int argc, char **argv)
     /* at 0x40: test r15d,r15d ; jne +0x20 -> X = 0x40+9+0x20 = 0x69 ; X: call +0x50 -> 0x69+5+0x50 = 0xBE */
     memcpy(fn + 0x40, "\x45\x85\xFF\x0F\x85\x20\x00\x00\x00", 9);
     memcpy(fn + 0x69, "\xE8\x50\x00\x00\x00", 5);
-    check(cp_resolve_mount(fn, sizeof fn) == fn + 0x118, "mount = xor r8d,r8d; call target");
-    check(cp_resolve_refresh(fn, sizeof fn) == fn + 0xBE, "refresh = call at jne target");
-    check(cp_resolve_mount(fn, 0x12) == NULL, "mount: pattern cut by scan length -> NULL");
+    const uint8_t *lo = fn, *hi = fn + sizeof fn;          /* the "code range" of this synthetic image */
+    check(cp_resolve_mount(fn, sizeof fn, lo, hi) == fn + 0x118, "mount = xor r8d,r8d; call target");
+    check(cp_resolve_refresh(fn, sizeof fn, lo, hi) == fn + 0xBE, "refresh = call at jne target");
+    check(cp_resolve_mount(fn, 0x12, lo, hi) == NULL, "mount: pattern cut by scan length -> NULL");
+    check(cp_resolve_mount(fn, sizeof fn, lo, fn + 0x110) == NULL && cp_resolve_refresh(fn, sizeof fn, lo, fn + 0xB0) == NULL,
+          "L8: call targets outside the code range -> NULL");
+    memcpy(fn + 0x45, "\x00\x00\x00\x40", 4);              /* jne +0x40000000: X far outside, never read */
+    check(cp_resolve_refresh(fn, sizeof fn, lo, hi) == NULL, "L8: computed jne target outside the code range -> NULL, not dereferenced");
+    memcpy(fn + 0x45, "\x20\x00\x00\x00", 4);
+    check(cp_resolve_mount(fn, sizeof fn, NULL, NULL) == NULL && cp_resolve_refresh(fn, sizeof fn, NULL, NULL) == NULL,
+          "L8: no code range known -> NULL");
     fn[0x69] = 0x90;
-    check(cp_resolve_refresh(fn, sizeof fn) == NULL, "refresh: jne target not a call -> NULL");
+    check(cp_resolve_refresh(fn, sizeof fn, lo, hi) == NULL, "refresh: jne target not a call -> NULL");
     uint8_t none[64] = {0};
-    check(cp_resolve_mount(none, sizeof none) == NULL && cp_resolve_refresh(none, sizeof none) == NULL,
+    check(cp_resolve_mount(none, sizeof none, none, none + 64) == NULL && cp_resolve_refresh(none, sizeof none, none, none + 64) == NULL,
           "no patterns -> NULL");
 
     /* --- scan + mount order on a temp tree ---------------------------------------------------- */

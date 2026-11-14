@@ -71,20 +71,20 @@ typedef struct { const char *name; shape_t shape[4]; uint8_t *fn; } anchor_t;
 static anchor_t A[A_COUNT] = {
     { "load",  { { 0x00, "40 53 56 57 41 54 41 55 41 56 41 57" },
                  { 0x46, "4C 8B E9" },                          /* mov r13, rcx (this) */
-                 { 0x72, "41 39 5D 4C 0F 85" } } },             /* cmp [r13+0x4c], ebx; jne -> already loaded */
+                 { 0x72, "41 39 5D 4C 0F 85" } }, NULL },             /* cmp [r13+0x4c], ebx; jne -> already loaded */
     { "anim",  { { 0x00, "48 89 4C 24 08 55 53 56 57 41 54" },
                  { 0x2D, "48 8D B1 48 01 00 00" },              /* lea rsi, [rcx+0x148] import list */
-                 { 0x44, "4C 39 61 38 0F 84" } } },             /* cmp [rcx+0x38], r12; je -> no mesh data */
+                 { 0x44, "4C 39 61 38 0F 84" } }, NULL },             /* cmp [rcx+0x38], r12; je -> no mesh data */
     { "pass",  { { 0x00, "48 89 5C 24 08 48 89 74 24 10 57 48 83 EC 20 48 8B DA E8" },
                  { 0x20, "E8" },                                /* call IterateTypesThreaded */
-                 { 0x60, "48 8B 4B 28 E8" } } },                /* mov rcx,[bucket+0x28]; call anim import */
+                 { 0x60, "48 8B 4B 28 E8" } }, NULL },                /* mov rcx,[bucket+0x28]; call anim import */
     { "ctor",  { { 0x00, "48 89 5C 24 20 48 89 4C 24 08 55 56 57 41 54 41" },
                  { 0x62, "48 89 51 50" },                       /* mov [this+0x50], type */
-                 { 0x71, "48 8D 05 ?? ?? ?? ?? 48 89 01" } } }, /* lea rax, CMeshObject vftable; mov [rcx], rax */
+                 { 0x71, "48 8D 05 ?? ?? ?? ?? 48 89 01" } }, NULL }, /* lea rax, CMeshObject vftable; mov [rcx], rax */
     { "rdata", { { 0x00, "48 89 54 24 10 48 89 4C 24 08 53 41 56 41 57" },
-                 { 0x13, "48 8B 1A 4C 8B FA 4C 8B F1" } } },    /* mov rbx,[rdx]; mov r15,rdx; mov r14,rcx(type) */
+                 { 0x13, "48 8B 1A 4C 8B FA 4C 8B F1" } }, NULL },    /* mov rbx,[rdx]; mov r15,rdx; mov r14,rcx(type) */
     { "blend", { { 0x00, "48 89 5C 24 18 48 89 54 24 10 55 56 57 41 54 41 55 41 56 41 57" },
-                 { 0x21, "4D 8B E9 49 8B F0 48 8B DA 4C 8B F1" } } },  /* mov rsi, r8 (type) */
+                 { 0x21, "4D 8B E9 49 8B F0 48 8B DA 4C 8B F1" } }, NULL },  /* mov rsi, r8 (type) */
 };
 #define SHAPE_SPAN 0x100
 #define LOAD_RDATA_CALL "49 8D 95 D0 01 00 00 49 8B CD E8"   /* lea rdx,[r13+0x1d0]; mov rcx,r13; call rdata */
@@ -235,7 +235,7 @@ static double now_ms(void)
 
 static void fill_names(lm_entry *e, const void *type)
 {
-    if (lm_msvc_str((const uint8_t *)type + MT_NAME, e->name, sizeof e->name, readable) < 0) strcpy(e->name, "?");
+    if (lm_msvc_str((const uint8_t *)type + MT_NAME, e->name, sizeof e->name, readable) < 0) snprintf(e->name, sizeof e->name, "?");
     if (lm_msvc_str((const uint8_t *)type + MT_PATH, e->path, sizeof e->path, readable) < 0) e->path[0] = 0;
 }
 

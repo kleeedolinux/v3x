@@ -51,13 +51,13 @@ typedef struct { const char *name; int span; shape_t shape[4]; uint8_t *fn; } an
 static anchor_t A[A_COUNT] = {
     { "create", 0x240, { { 0x000, "48 89 5C 24 10 48 89 74 24 18 48 89 7C 24 20 48 89 4C 24 08 55 41 54 41 55 41 56 41 57" },
                          { 0x02C, "41 8B F9 45 8B F0 4C 8B E2 4C 8B F9" },        /* edi=flags r14d=a3 r12=path r15=out */
-                         { 0x204, "3B 5D DC 7E 0F 8B D3 48 8D 4D D0 E8" } } },    /* if size>cap: Reserve(&buf, size) */
+                         { 0x204, "3B 5D DC 7E 0F 8B D3 48 8D 4D D0 E8" } }, NULL },    /* if size>cap: Reserve(&buf, size) */
     { "getload", 0x100, { { 0x000, "48 89 4C 24 08 53 56 57 48 83 EC 40 41 8B D8 48 8B F2 48 8B F9" },
                           { 0x035, "48 8D 0D ?? ?? ?? ?? E8" },                    /* lea rcx, texture cache; call find */
                           { 0x051, "44 8B CB 48 8B D6 48 8D 4C 24 78 E8" },        /* CreateTexture(tmp, path, ?, flags) */
                           /* refcount layout we rely on: lock xadd [tex+8],-1; ==1 -> owner [tex+0x10] vslot1(owner, tex), tex vslot1 */
-                          { 0x086, "F0 0F C1 43 08 83 F8 01 75 1C 48 8B 4B 10 48 85 C9 74 09 48 8B 01 48 8B D3 FF 50 08 48 8B 03 48 8B CB FF 50 08" } } },
-    { "reserve", 0x40, { { 0x000, "48 89 5C 24 10 57 48 83 EC 20 48 8B D9 8B FA 3B 51 08 7E" } } },
+                          { 0x086, "F0 0F C1 43 08 83 F8 01 75 1C 48 8B 4B 10 48 85 C9 74 09 48 8B 01 48 8B D3 FF 50 08 48 8B 03 48 8B CB FF 50 08" } }, NULL },
+    { "reserve", 0x40, { { 0x000, "48 89 5C 24 10 57 48 83 EC 20 48 8B D9 8B FA 3B 51 08 7E" } }, NULL },
 };
 #define CT_RES_CALL 0x20F
 #define GOL_CT_CALL 0x05C
@@ -213,7 +213,7 @@ static uintptr_t h_ct(uintptr_t out, uintptr_t path, uintptr_t a3, uintptr_t fla
 
     char full[512];
     int n = mc_msvc_str((const void *)path, full, sizeof full, readable);
-    if (n < 0) { strcpy(full, "?"); n = 1; }
+    if (n < 0) { full[0] = '?'; full[1] = 0; n = 1; }
     uint64_t h = mc_hash(full, (size_t)n);
     gol_ctx *g = TlsGetValue(g_tls_gol);
     uint32_t loads = mc_record_load(&g_st, h, full, (size_t)n, x.bytes, ms, g != NULL);

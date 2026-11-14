@@ -6,12 +6,15 @@
  *   rel32/rip targets, xrefs, callers), v3x_anchor against THIS test exe through v3x_testkit (a
  *   string anchor, ambiguity, shape selection, prologue mismatch, unique/duplicate patterns,
  *   check callback), v3x_hook macros and the manifest macro, v3x_util (paths, atomic write, QPC,
- *   leveled logging on v5 and pre-v5 loaders, reload filter).
+ *   leveled logging on v5 and pre-v5 loaders, reload filter), v3x_safe (V3xStr builder incl. sizes 0/1,
+ *   exact fit, overflow and UTF-8 cuts, V3xSpan readers, checked arithmetic, path validation/join,
+ *   reparse refusal, log sanitising, atomics, V3X_ASSERT_MAIN).
  * Part 2 (with the exe): v3x_testkit maps victoria3.exe; v3x_game_resolve finds the script-RNG
  *   owner global (1.15.1: exe+0x540ae80) and v3x_script_random_allowed is 0 / 1 for a fake owner.
  * Exit code 0 = ALL OK. */
 #include "v3x_sdk.h"
 #include "v3x_testkit.h"
+#include "v3x_safe.h"
 
 #define CHECK V3X_TEST_CHECK
 #define NOINL __attribute__((noinline))
@@ -270,6 +273,258 @@ static void test_util(const V3X_API *tk)
     CHECK(v3x_reload_is_for(NULL, "me") && v3x_reload_is_for("ME", "me") && !v3x_reload_is_for("other", "me"),
           "util: v3x_reload_is_for (NULL = all, case-insensitive)");
     CHECK(V3X_HAS(tk, log_at) && V3X_HAS(tk, build_matches) && tk->build_matches("*") == 1, "testkit fills the API v5 fields");
+    HANDLE lk = v3x_config_lock(1000);
+    CHECK(lk != NULL, "util: v3x_config_lock acquires the v3x.ini mutex");
+    HANDLE again = v3x_config_lock(1000);   /* a mutex is recursive for its owner thread */
+    CHECK(again != NULL, "util: v3x_config_lock is recursive on the same thread");
+    v3x_config_unlock(again);
+    v3x_config_unlock(lk);
+    v3x_config_unlock(NULL);
+}
+
+/* ---- v3x_safe.h */
+static char g_safe_log[512];
+static void safe_log(const char *tag, const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    size_t n = strlen(g_safe_log);
+    snprintf(g_safe_log + n, sizeof g_safe_log - n, "[%s] ", tag);
+    n = strlen(g_safe_log);
+    vsnprintf(g_safe_log + n, sizeof g_safe_log - n, fmt, ap);
+    va_end(ap);
+}
+static uint32_t g_fake_main;
+static uint32_t fake_main_id(void) { return g_fake_main; }
+static const V3X_API *g_safe_api;
+static int g_off_main_result = -1;
+static DWORD WINAPI off_main_thread(LPVOID p) { (void)p; g_off_main_result = V3X_ASSERT_MAIN(g_safe_api); return 0; }
+
+static void test_safe_str(void)
+{
+    char b[8];
+    V3xStr s;
+    /* size 0 and NULL buffer */
+    v3x_str_init(&s, b, 0);
+    CHECK(v3x_str_append(&s, "x") == V3X_R_EARG && s.truncated && !strcmp(v3x_str_cstr(&s), ""), "str: cap 0 never writes");
+    v3x_str_init(&s, NULL, 10);
+    CHECK(s.cap == 0 && v3x_str_appendf(&s, "%d", 1) == V3X_R_EARG, "str: NULL buffer = cap 0");
+    /* size 1: only the NUL */
+    memset(b, 'Z', sizeof b);
+    v3x_str_init(&s, b, 1);
+    CHECK(v3x_str_append(&s, "") == V3X_R_OK && v3x_str_appendc(&s, 'a') == V3X_R_ETRUNC && b[0] == 0 && b[1] == 'Z',
+          "str: cap 1 holds only the NUL, byte after untouched");
+    /* exact fit: 7 chars + NUL in 8 */
+    memset(b, 'Z', sizeof b);
+    v3x_str_init(&s, b, sizeof b);
+    CHECK(v3x_str_append(&s, "abc") == V3X_R_OK && v3x_str_appendf(&s, "%04d", 12) == V3X_R_OK && s.len == 7 &&
+          !s.truncated && !strcmp(b, "abc0012"), "str: exact fit is not truncation (%s)", b);
+    CHECK(v3x_str_appendc(&s, 'x') == V3X_R_ETRUNC && s.truncated && !strcmp(b, "abc0012"), "str: one more byte -> truncated");
+    CHECK(v3x_str_append(&s, "") == V3X_R_ETRUNC && s.len == 7, "str: appends after truncation are no-ops");
+    v3x_str_clear(&s);
+    CHECK(!s.truncated && s.len == 0 && b[0] == 0, "str: clear resets");
+    /* overflow through appendf: the old n += snprintf idiom case */
+    char big[16 + 4];
+    memset(big, 'Z', sizeof big);
+    v3x_str_init(&s, big, 16);
+    for (int i = 0; i < 100; i++) v3x_str_appendf(&s, "%d,", i);
+    CHECK(s.truncated && s.len == 15 && strlen(big) == 15 && big[16] == 'Z' && !strncmp(big, "0,1,2,3,4,5,6,7", 15),
+          "str: 100 appendf into 16 bytes stays bounded (%s)", big);
+    v3x_str_init(&s, big, 16);
+    CHECK(v3x_str_appendf(&s, "%s", "0123456789abcdefghij") == V3X_R_ETRUNC && s.len == 15 && !strcmp(big, "0123456789abcde"),
+          "str: one long appendf keeps the prefix");
+    /* UTF-8: never cut a codepoint in half */
+    char u[6];
+    v3x_str_init(&s, u, sizeof u);   /* room 5 */
+    CHECK(v3x_str_append(&s, "ab\xE2\x82\xAC") == V3X_R_OK && !strcmp(u, "ab\xE2\x82\xAC"), "str: euro sign fits exactly");
+    v3x_str_init(&s, u, sizeof u);
+    CHECK(v3x_str_append(&s, "abc\xE2\x82\xAC") == V3X_R_ETRUNC && !strcmp(u, "abc") && s.len == 3,
+          "str: 3-byte codepoint cut -> dropped whole (%d)", (int)s.len);
+    v3x_str_init(&s, u, sizeof u);
+    CHECK(v3x_str_appendf(&s, "abcd%s", "\xC3\xA9") == V3X_R_ETRUNC && !strcmp(u, "abcd"), "str: appendf 2-byte cut");
+    v3x_str_init(&s, u, sizeof u);
+    CHECK(v3x_str_append(&s, "a\xF0\x9F\x98\x80" "b") == V3X_R_ETRUNC && !strcmp(u, "a\xF0\x9F\x98\x80"), "str: 4-byte fits, next cut");
+    v3x_str_init(&s, u, sizeof u);
+    CHECK(v3x_str_append(&s, "ab") == V3X_R_OK && v3x_str_append(&s, "c\xF0\x9F\x98\x80") == V3X_R_ETRUNC && !strcmp(u, "abc"),
+          "str: cut only inside the new append");
+    CHECK(v3x_utf8_trim_tail("ab\x80\x80\x80\x80", 6, 0) == 6, "utf8: stray continuation bytes are kept (not a cut)");
+    CHECK(v3x_utf8_trim_tail("ab\xE2\x82", 4, 0) == 2 && v3x_utf8_trim_tail("ab\xE2\x82", 4, 3) == 4, "utf8: trim respects floor");
+}
+
+static void test_safe_span(void)
+{
+    const uint8_t d[] = {0x01, 0x34, 0x12, 0x78, 0x56, 0x34, 0x12, 1, 2, 3, 4, 5, 6, 7, 8, 0xAA};
+    V3xSpan r;
+    uint8_t b8; uint16_t b16; uint32_t b32; uint64_t b64;
+    v3x_span_init(&r, d, sizeof d);
+    CHECK(v3x_span_u8(&r, &b8) == V3X_R_OK && b8 == 1 && v3x_span_u16le(&r, &b16) == V3X_R_OK && b16 == 0x1234 &&
+          v3x_span_u32le(&r, &b32) == V3X_R_OK && b32 == 0x12345678u && v3x_span_u64le(&r, &b64) == V3X_R_OK &&
+          b64 == 0x0807060504030201ull && v3x_span_remaining(&r) == 1, "span: u8/u16le/u32le/u64le");
+    CHECK(v3x_span_u16le(&r, &b16) == V3X_R_EBOUNDS && b16 == 0 && r.err && v3x_span_remaining(&r) == 0, "span: short read fails, out=0");
+    CHECK(v3x_span_u8(&r, &b8) == V3X_R_EBOUNDS && v3x_span_take(&r, 0) == NULL, "span: error is sticky");
+    v3x_span_init(&r, d, sizeof d);
+    CHECK(v3x_span_take(&r, sizeof d) == d && v3x_span_remaining(&r) == 0 && !r.err, "span: take exactly everything");
+    CHECK(v3x_span_take(&r, 0) == d + sizeof d && !r.err, "span: take(0) at the end is fine");
+    v3x_span_init(&r, d, sizeof d);
+    CHECK(v3x_span_take(&r, SIZE_MAX) == NULL && r.err, "span: take(SIZE_MAX) does not wrap");
+    v3x_span_init(&r, d, sizeof d);
+    CHECK(v3x_span_skip(&r, 3) == V3X_R_OK && v3x_span_skip(&r, 14) == V3X_R_EBOUNDS && r.err, "span: skip bounds");
+    v3x_span_init(&r, d, sizeof d);
+    CHECK(v3x_span_skip(&r, 1) == V3X_R_OK, "span: skip 1");
+    V3xSpan sub = v3x_span_sub(&r, 2);
+    CHECK(!sub.err && sub.len == 2 && v3x_span_u16le(&sub, &b16) == V3X_R_OK && b16 == 0x1234 && v3x_span_u8(&sub, &b8) != V3X_R_OK &&
+          !r.err && v3x_span_remaining(&r) == 13, "span: sub-span is bounded to its own length");
+    sub = v3x_span_sub(&r, 99);
+    CHECK(sub.err && sub.len == 0 && r.err, "span: oversized sub fails both");
+    v3x_span_init(&r, NULL, 5);
+    CHECK(r.len == 0 && v3x_span_u8(&r, &b8) == V3X_R_EBOUNDS, "span: NULL data = empty");
+}
+
+static void test_safe_math(void)
+{
+    size_t o = 7;
+    CHECK(v3x_add_ok(1, 2, &o) && o == 3, "math: add");
+    CHECK(!v3x_add_ok(SIZE_MAX, 1, &o) && o == 0, "math: add overflow");
+    CHECK(v3x_add_ok(SIZE_MAX - 1, 1, &o) && o == SIZE_MAX, "math: add at the edge");
+    CHECK(v3x_mul_ok(0, SIZE_MAX, &o) && o == 0 && v3x_mul_ok(1u << 16, 1u << 16, &o) && o == (size_t)1 << 32, "math: mul");
+    CHECK(!v3x_mul_ok(SIZE_MAX / 2 + 1, 2, &o) && o == 0, "math: mul overflow");
+    uint32_t u = 1;
+    int64_t i = 1;
+    CHECK(!v3x_add_ok_u32(0xFFFFFFFFu, 1, &u) && u == 0 && v3x_add_ok_u32(0xFFFFFFFEu, 1, &u) && u == 0xFFFFFFFFu, "math: u32");
+    CHECK(!v3x_add_ok_i64(INT64_MAX, 1, &i) && !v3x_add_ok_i64(INT64_MIN, -1, &i) && v3x_add_ok_i64(-5, 3, &i) && i == -2, "math: i64");
+    void *p = v3x_alloc_array(SIZE_MAX / 4, 8);
+    CHECK(p == NULL, "alloc_array: overflowing count -> NULL");
+    int *a = (int *)v3x_alloc_array(10, sizeof(int));
+    CHECK(a && a[9] == 0, "alloc_array: zeroed");
+    int *a2 = (int *)v3x_realloc_array(a, SIZE_MAX / 2, sizeof(int));
+    CHECK(a2 == NULL && a[0] == 0, "realloc_array: overflow keeps the old block");
+    a2 = (int *)v3x_realloc_array(a, 20, sizeof(int));
+    CHECK(a2 != NULL, "realloc_array: grows");
+    free(a2 ? a2 : a);
+    void *z = v3x_alloc_array(0, 8);
+    CHECK(z != NULL, "alloc_array: 0 elements = 1-byte block");
+    free(z);
+}
+
+static void test_safe_path(void)
+{
+    static const char *const good[] = {"a.txt", "dir/sub/file.ini", "dir\\x.dll", "icon.d/x", "CONSOLE", "COM10", "lpt", "a b",
+                                       ".hidden", "x..y", "\xC3\xA9t\xC3\xA9.txt", "COM\xC2\xB9x"};
+    static const char *const bad[] = {"", "..", ".", "../x", "a/../b", "a/..", "/abs", "\\abs", "C:\\x", "c:x", "a:b", "x/",
+                                      "a//b", "a\\\\b", "\\\\?\\C:\\x", "\\\\server\\share", "CON", "con.txt", "Nul", "aux.ini",
+                                      "prn", "con.d/x", "COM1", "lpt9.log", "com0", "CONIN$", "conout$", "dir/NUL.txt", "NUL .txt",
+                                      "COM\xC2\xB9", "LPT\xC2\xB3.x", "trail.", "trail ", "dir./x", "a\x01" "b", "a<b", "a>b",
+                                      "a|b", "a?b", "a*b", "a\"b", "a\x7f"};
+    int ok_good = 1, ok_bad = 1;
+    for (size_t k = 0; k < sizeof good / sizeof good[0]; k++)
+        if (v3x_path_rel_ok(good[k]) != V3X_R_OK) { ok_good = 0; printf("  wrongly rejected: %s\n", good[k]); }
+    for (size_t k = 0; k < sizeof bad / sizeof bad[0]; k++)
+        if (v3x_path_rel_ok(bad[k]) == V3X_R_OK) { ok_bad = 0; printf("  wrongly accepted: %s\n", bad[k]); }
+    CHECK(ok_good, "path: %d valid relative paths accepted", (int)(sizeof good / sizeof good[0]));
+    CHECK(ok_bad, "path: %d traversal/absolute/device/bad-char paths rejected", (int)(sizeof bad / sizeof bad[0]));
+    CHECK(v3x_path_rel_ok(NULL) == V3X_R_EARG, "path: NULL -> EARG");
+    char longp[V3X_PATH_REL_MAX + 2];
+    memset(longp, 'a', sizeof longp);
+    longp[V3X_PATH_REL_MAX + 1] = 0;
+    CHECK(v3x_path_rel_ok(longp) == V3X_R_EPATH, "path: overlong rejected");
+    for (int k = 200; k < V3X_PATH_REL_MAX; k += 200) longp[k] = '/';
+    longp[V3X_PATH_REL_MAX] = 0;
+    CHECK(v3x_path_rel_ok(longp) == V3X_R_OK, "path: exactly V3X_PATH_REL_MAX with components <= 255 accepted");
+    char comp[300];
+    memset(comp, 'b', 256);
+    comp[256] = 0;
+    CHECK(v3x_path_rel_ok(comp) == V3X_R_EPATH, "path: component of 256 bytes rejected");
+    comp[255] = 0;
+    CHECK(v3x_path_rel_ok(comp) == V3X_R_OK, "path: component of 255 bytes accepted");
+    CHECK(v3x_path_rel_ok_ex("a/b", V3X_PATH_SINGLE) == V3X_R_EPATH && v3x_path_rel_ok_ex("ab", V3X_PATH_SINGLE) == V3X_R_OK,
+          "path: SINGLE flag");
+
+    char out[32];
+    CHECK(v3x_path_join_checked(out, sizeof out, "C:\\g\\v3x\\", "a/b.txt", 0) == V3X_R_OK && !strcmp(out, "C:\\g\\v3x\\a\\b.txt"),
+          "join: base with separator, '/' normalised (%s)", out);
+    CHECK(v3x_path_join_checked(out, sizeof out, "C:\\g", "x", 0) == V3X_R_OK && !strcmp(out, "C:\\g\\x"), "join: separator added");
+    CHECK(v3x_path_join_checked(out, sizeof out, "", "x/y", 0) == V3X_R_OK && !strcmp(out, "x\\y"), "join: empty base");
+    strcpy(out, "junk");
+    CHECK(v3x_path_join_checked(out, sizeof out, "C:\\g\\", "..\\version.dll", 0) == V3X_R_EPATH && out[0] == 0,
+          "join: traversal -> EPATH, out empty");
+    CHECK(v3x_path_join_checked(out, 12, "C:\\g\\", "abcdefg", 0) == V3X_R_ETRUNC && out[0] == 0, "join: overlong output -> ETRUNC");
+    CHECK(v3x_path_join_checked(out, 12, "C:\\g\\", "abcdef", 0) == V3X_R_OK && !strcmp(out, "C:\\g\\abcdef"), "join: exact fit ok");
+    CHECK(v3x_path_join_checked(NULL, 5, "a", "b", 0) == V3X_R_EARG && v3x_path_join_checked(out, 0, "a", "b", 0) == V3X_R_EARG &&
+          v3x_path_join_checked(out, sizeof out, NULL, "b", 0) == V3X_R_EARG, "join: bad args");
+
+    /* reparse refusal: a junction inside the base */
+    char base[MAX_PATH], tgt[MAX_PATH], jn[MAX_PATH], cmd[3 * MAX_PATH], p[MAX_PATH];
+    GetTempPathA(sizeof base, base);
+    snprintf(base + strlen(base), sizeof base - strlen(base), "v3x_safe_%lu", (unsigned long)GetCurrentProcessId());
+    snprintf(tgt, sizeof tgt, "%s\\real", base);
+    snprintf(jn, sizeof jn, "%s\\link", base);
+    CreateDirectoryA(base, NULL);
+    CreateDirectoryA(tgt, NULL);
+    snprintf(cmd, sizeof cmd, "cmd /c mklink /J \"%s\" \"%s\" >NUL 2>&1", jn, tgt);
+    DWORD ja = (system(cmd), GetFileAttributesA(jn));
+    int made = ja != INVALID_FILE_ATTRIBUTES && (ja & FILE_ATTRIBUTE_REPARSE_POINT);
+    CHECK(v3x_path_join_checked(p, sizeof p, base, "real/x.txt", V3X_PATH_CHECK_REPARSE) == V3X_R_OK, "join: plain dir passes the reparse check");
+    CHECK(v3x_path_join_checked(p, sizeof p, base, "missing/deeper/x", V3X_PATH_CHECK_REPARSE) == V3X_R_OK, "join: missing path passes");
+    if (made) {
+        CHECK(v3x_path_join_checked(p, sizeof p, base, "link/x.txt", V3X_PATH_CHECK_REPARSE) == V3X_R_EREPARSE && p[0] == 0,
+              "join: junction component -> EREPARSE");
+        CHECK(v3x_path_join_checked(p, sizeof p, base, "link", V3X_PATH_CHECK_REPARSE) == V3X_R_EREPARSE, "join: junction as last component");
+        CHECK(v3x_path_join_checked(p, sizeof p, base, "link/x.txt", 0) == V3X_R_OK, "join: without the flag no check");
+        RemoveDirectoryA(jn);
+    } else printf("(mklink /J failed: junction checks skipped)\n");
+    RemoveDirectoryA(tgt);
+    RemoveDirectoryA(base);
+}
+
+static void test_safe_misc(void)
+{
+    char d[32];
+    CHECK(v3x_sanitize_line(d, sizeof d, "ok\nFAKE [12:00][core] x\r\t\x1b[31m") == 30 &&
+          !strcmp(d, "ok?FAKE [12:00][core] x???[31m"), "sanitize: control chars -> '?' (%s)", d);
+    CHECK(v3x_sanitize_line(d, sizeof d, "a\xC2\x85" "b\xE2\x80\xAE" "c\xE2\x81\xA6" "d\xC3\xA9") == 9 && !strcmp(d, "a?b?c?d\xC3\xA9"),
+          "sanitize: C1 / bidi override -> '?', other UTF-8 kept");
+    CHECK(v3x_sanitize_line(d, 5, "abc\xC3\xA9") == 3 && !strcmp(d, "abc"), "sanitize: cut at a codepoint boundary");
+    CHECK(v3x_sanitize_line(d, 1, "abc") == 0 && d[0] == 0 && v3x_sanitize_line(d, sizeof d, NULL) == 0 && v3x_sanitize_line(NULL, 4, "x") == 0,
+          "sanitize: cap 1 / NULL src / NULL dst");
+    CHECK(v3x_sanitize_linen(d, sizeof d, "abcdef", 3) == 3 && !strcmp(d, "abc"), "sanitize: n bounds the source");
+    CHECK(v3x_sanitize_linen(d, sizeof d, "a\xE2\x80", 3) == 3, "sanitize: truncated bidi prefix at n is copied, not over-read");
+
+    volatile int x = 1;
+    void *volatile pp = NULL;
+    int dummy;
+    CHECK(v3x_atomic_cas_int(&x, 1, 5) && v3x_atomic_load_int(&x) == 5 && !v3x_atomic_cas_int(&x, 1, 9) && x == 5 &&
+          v3x_atomic_add_int(&x, 2) == 7, "atomic: int load/cas/add");
+    v3x_atomic_store_int(&x, -1);
+    CHECK(x == -1 && v3x_atomic_cas_ptr(&pp, NULL, &dummy) && v3x_atomic_load_ptr(&pp) == &dummy &&
+          !v3x_atomic_cas_ptr(&pp, NULL, (void *)&x), "atomic: ptr cas/load");
+    v3x_atomic_store_ptr(&pp, NULL);
+    CHECK(pp == NULL, "atomic: ptr store");
+
+    V3X_API a;
+    memset(&a, 0, sizeof a);
+    a.api_version = 5;
+    a.struct_size = (uint32_t)sizeof a;
+    a.log = safe_log;
+    a.main_thread_id = fake_main_id;
+    g_fake_main = (uint32_t)GetCurrentThreadId();
+    g_safe_api = &a;
+    CHECK(V3X_ASSERT_MAIN(&a) == 1 && g_safe_log[0] == 0, "assert_main: on the main thread -> 1, silent");
+    HANDLE th = CreateThread(NULL, 0, off_main_thread, NULL, 0, NULL);
+    WaitForSingleObject(th, 5000);
+    CloseHandle(th);
+    CHECK(g_off_main_result == 0 && strstr(g_safe_log, "must run on the main thread") && strstr(g_safe_log, "sdk_test.c"),
+          "assert_main: other thread -> 0 + ERROR log (%s)", g_safe_log);
+    a.struct_size = (uint32_t)offsetof(V3X_API, hook_safe);
+    CHECK(V3X_ASSERT_MAIN(&a) == 1 && V3X_ASSERT_MAIN(NULL) == 1, "assert_main: pre-v4 loader / NULL -> 1 (unknown)");
+}
+
+static void test_safe(void)
+{
+    test_safe_str();
+    test_safe_span();
+    test_safe_math();
+    test_safe_path();
+    test_safe_misc();
 }
 
 int main(int argc, char **argv)
@@ -286,6 +541,7 @@ int main(int argc, char **argv)
     test_anchor(&api);
     test_hook_macros();
     test_util(&api);
+    test_safe();
     if (argc > 1) test_game(argv[1]);
     else printf("(no exe given: game checks skipped)\n");
     return v3x_testkit_done();

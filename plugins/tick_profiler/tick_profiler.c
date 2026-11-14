@@ -122,7 +122,7 @@ static uint64_t hk_run(void *ctx, void *task, void *c, void *d)
 
 /* ---- reporting ---- */
 
-static void outf(const char *fmt, ...)
+static V3X_PRINTF(1, 2) void outf(const char *fmt, ...)
 {
     char buf[512];
     va_list ap; va_start(ap, fmt); vsnprintf(buf, sizeof buf, fmt, ap); va_end(ap);

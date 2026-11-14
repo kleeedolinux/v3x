@@ -122,17 +122,20 @@ typedef struct {
     char *vfs, *native;                      /* malloc'd */
     uint64_t vfs_hash;
     long long size;
-    volatile long state;                     /* 0 = not read, 1 = reading, 2 = done, 3 = failed */
+    long state;                              /* __atomic: 0 = not read, 1 = reading, 2 = done, 3 = failed */
 } pl_pf_ent;
+#define PL_PF_ROOTS 8
 typedef struct {
     pl_pf_ent e[PL_PF_MAX];
     int n;
     /* recording */
     int pending_root;                        /* index of the first entry still waiting for a root (-1 none) */
     char last_root[520];
-    /* run */
-    volatile long engine_pos;                /* engine reads started (set by the hook) */
-    volatile long stop;
+    /* run: only native paths under one of these roots are ever opened (L5: never UNC / device paths) */
+    char roots[PL_PF_ROOTS][520];
+    int nroots;
+    long engine_pos;                         /* __atomic: engine reads started (set by the hook) */
+    long stop;                               /* __atomic: set by the init thread, polled by the prefetcher */
     long long window;
     volatile long long bytes_read, files_read, files_failed, content_hash;
     /* engine side */
@@ -148,6 +151,13 @@ void pl_pf_rec_root(pl_pf *p, const char *root);
  * Returns the number of lines written, -1 on error. `resolved` (may be NULL) = entries that exist. */
 int pl_pf_save(pl_pf *p, const char *path, int *resolved);
 int pl_pf_load(pl_pf *p, const char *path);          /* entries loaded (0 if missing), -1 on error */
+/* Allowed roots (call before pl_pf_load: the list file is a cache and is not trusted). A root must be
+ * an absolute drive path "X:\..."; returns 1 if added. With no roots nothing is prefetched. */
+int pl_pf_add_root(pl_pf *p, const char *dir);
+/* 1 if `native` is "X:\..." under one of the roots, without ".." components, doubled separators
+ * (so no UNC, \\?\ or \\.\ device path), ':' after the drive (alternate streams) or control chars. */
+int pl_pf_path_ok(const pl_pf *p, const char *native);
+static inline void pl_pf_stop(pl_pf *p) { __atomic_store_n(&p->stop, 1, __ATOMIC_RELEASE); }
 /* The prefetch loop (run it on its own thread). Returns files read. content_hash = FNV-1a over every
  * byte read, in order (tests compare it with the files' real content). */
 long long pl_pf_run(pl_pf *p);

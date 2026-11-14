@@ -19,6 +19,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <windows.h>
+#include "v3x_safe.h"
 
 #define MI_SEGSZ        (32ull << 20)
 #define MI_SLICESZ      (64ull << 10)
@@ -259,13 +260,12 @@ static int mt_mi_os_read(uint64_t stats, mt_mi_os *o)
 /* One-line summary (and optionally the size histogram / per-thread lines through `out`). */
 static void mt_mi_format(const mt_mi_sum *s, const mt_mi_os *os, int have_os, char *b, size_t n)
 {
-    size_t o = 0;
+    V3xStr sb; v3x_str_init(&sb, b, n);
     if (have_os)
-        o += (size_t)snprintf(b + o, n - o, "mimalloc os: committed %llu MiB (peak %llu), reserved %llu MiB, threads %lld, commit calls %lld | ",
+        v3x_str_appendf(&sb, "mimalloc os: committed %llu MiB (peak %llu), reserved %llu MiB, threads %lld, commit calls %lld | ",
                               MT_MIB(os->committed), MT_MIB(os->committed_peak), MT_MIB(os->reserved), (long long)os->threads,
                               (long long)os->commit_calls);
-    if (o >= n) return;
-    snprintf(b + o, n - o, "segments %llu (+%llu huge %llu MiB, %llu unparsed %llu MiB, mask!=VQ %llu): committed %llu MiB = "
+    v3x_str_appendf(&sb, "segments %llu (+%llu huge %llu MiB, %llu unparsed %llu MiB, mask!=VQ %llu): committed %llu MiB = "
              "IN USE %llu + page slack %llu + empty pages %llu + free spans %llu (pending decommit %llu) + meta %llu MiB; "
              "pages %llu (%llu empty); abandoned segs %llu (%llu MiB)",
              (unsigned long long)s->segs, (unsigned long long)s->huge, MT_MIB(s->huge_committed), (unsigned long long)s->bad,
@@ -275,10 +275,11 @@ static void mt_mi_format(const mt_mi_sum *s, const mt_mi_os *os, int have_os, ch
 }
 static void mt_mi_format_hist(const mt_mi_sum *s, char *b, size_t n)
 {
-    size_t o = (size_t)snprintf(b, n, "mimalloc by block size (in use / slack MiB, pages):");
-    for (int i = 0; i < MT_MI_HIST && o < n; i++)
+    V3xStr sb; v3x_str_init(&sb, b, n);
+    v3x_str_append(&sb, "mimalloc by block size (in use / slack MiB, pages):");
+    for (int i = 0; i < MT_MI_HIST; i++)
         if (s->hist_pages[i])
-            o += (size_t)snprintf(b + o, n - o, " %s %llu/%llu (%llu)", MT_MI_HIST_NAME[i], MT_MIB(s->hist_used[i]),
+            v3x_str_appendf(&sb, " %s %llu/%llu (%llu)", MT_MI_HIST_NAME[i], MT_MIB(s->hist_used[i]),
                                   MT_MIB(s->hist_slack[i]), (unsigned long long)s->hist_pages[i]);
 }
 #endif

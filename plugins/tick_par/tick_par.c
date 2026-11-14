@@ -38,6 +38,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include "v3x.h"
+#include "v3x_safe.h"
 #include "tick_par_sched.h"
 
 V3X_EXPORT const char *v3x_plugin_name = "tick_par";
@@ -147,7 +148,7 @@ static int read_str(const void *s, char *out, size_t n)
     return 1;
 }
 
-static void outf(const char *fmt, ...)
+static V3X_PRINTF(1, 2) void outf(const char *fmt, ...)
 {
     char buf[600];
     va_list ap; va_start(ap, fmt); vsnprintf(buf, sizeof buf, fmt, ap); va_end(ap);
@@ -159,7 +160,7 @@ static const char *PRIO_N[] = { "EARLY", "DEFAULT", "LATE" };
 
 static void write_graph_csv(void)
 {
-    char path[MAX_PATH], line[2048];
+    char path[MAX_PATH], line[4096], deps[2048];
     snprintf(path, sizeof path, "%stick_par_graph.csv", api->v3x_dir());
     HANDLE h = CreateFileA(path, GENERIC_WRITE, FILE_SHARE_READ, 0, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, 0);
     if (h == INVALID_HANDLE_VALUE) { api->log(TAG, "cannot write %s", path); return; }
@@ -168,13 +169,16 @@ static void write_graph_csv(void)
     WriteFile(h, line, (DWORD)k, &w, 0);
     for (int i = 0; i < g_nn; i++) {
         const Node *nd = &g_node[i];
-        k = snprintf(line, sizeof line, "%d,%s,%s,%s,", i, nd->name, nd->rate >= 0 && nd->rate < 6 ? RATE_N[nd->rate] : "?",
-                     nd->prio >= 0 && nd->prio < 3 ? PRIO_N[nd->prio] : "?");
+        /* deps are bounded separately so the row always ends with ",unresolved\r\n"
+         * (line: 512 name + 2047 deps + fixed fields < 4096) */
+        V3xStr db; v3x_str_init(&db, deps, sizeof deps);
         int first = 1;
-        for (int e = 0; e < g_edges && k < (int)sizeof line - 80; e++)
-            if (g_from[e] == i) { k += snprintf(line + k, sizeof line - k, "%s%s", first ? "" : " ", g_node[g_to[e]].name); first = 0; }
-        k += snprintf(line + k, sizeof line - k, ",%d\r\n", nd->unresolved);
-        if (k > 0 && k < (int)sizeof line) WriteFile(h, line, (DWORD)k, &w, 0);
+        for (int e = 0; e < g_edges && !db.truncated; e++)
+            if (g_from[e] == i) { v3x_str_appendf(&db, "%s%s", first ? "" : " ", g_node[g_to[e]].name); first = 0; }
+        V3xStr lb; v3x_str_init(&lb, line, sizeof line);
+        v3x_str_appendf(&lb, "%d,%.512s,%s,%s,%s,%d\r\n", i, nd->name, nd->rate >= 0 && nd->rate < 6 ? RATE_N[nd->rate] : "?",
+                        nd->prio >= 0 && nd->prio < 3 ? PRIO_N[nd->prio] : "?", deps, nd->unresolved);
+        if (!lb.truncated) WriteFile(h, line, (DWORD)lb.len, &w, 0);
     }
     CloseHandle(h);
     api->log(TAG, "runtime dependency graph (%d tasks, %d declared edges, deps = direct) -> %s", g_nn, g_edges, path);

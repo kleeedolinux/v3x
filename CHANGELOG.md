@@ -5,6 +5,48 @@ is append-only (plugins built for an older version keep working).
 
 ## Unreleased
 
+### Security hardening (core, SDK, build; docs/security-audit.md actions 7-10, 14, 15)
+
+#### Added
+- `sdk/v3x_safe.h` (header-only, C99/C++): `V3xStr` bounded string builder (never overruns,
+  `truncated` flag, cut at a UTF-8 boundary), `V3xSpan` checked byte reader, checked arithmetic
+  (`v3x_add_ok`, `v3x_mul_ok`, `v3x_alloc_array`), `V3xResult` + `V3X_MUST_USE`,
+  `v3x_path_rel_ok` / `v3x_path_join_checked` (no `..`, `:`, absolute, device names, optional
+  reparse-point refusal), `v3x_sanitize_line`, atomics, `V3X_ASSERT_MAIN`. [ADR 0004](docs/adr/0004-sdk-safety.md)
+- `sdk/v3x_util.h` `v3x_config_lock` / `v3x_config_unlock`: the shared `Local3x_ini` mutex for
+  v3x.ini read-modify-write.
+- `V3X_PRINTF(fmt, args)` in `include/v3x.h`; `log`, `print`, `log_at` are format-checked (no ABI change).
+- Thread rule of every API entry written in `include/v3x.h`.
+- `test/fuzz/`: deterministic in-tree mutational fuzzer (`v3x_fuzz.h` harness API, `fuzz_main.c`
+  driver, UBSan-trap, guard-page inputs) with harnesses for `v3x_safe.h`, `core_ini.h`,
+  `v3x_ini.h` and `v3x_rtti.h`; `t fuzz` in `test/run_all.sh` (`FUZZ_ITERS` for long runs).
+- `test/static_analysis.sh` (clang-tidy / cppcheck if installed, non-blocking report).
+- `test/api_proxy_test.c` (proxy fails closed), `harness_unicode` e2e test (non-ANSI game path),
+  threading checks in `test/api_v5_test.c`, hook-lifetime and W^X checks in `test/hook_chain_test.c`.
+- `SECURITY.md`, `docs/adr/0001`..`0004`.
+
+#### Changed
+- Hooks are never `MH_RemoveHook`'ed at runtime: `unhook` and rollback only disable, trampolines
+  are never freed (a thread may be about to call one). Raw hooks go through the per-target stub too,
+  so re-hooking reuses the same MinHook entry. [ADR 0003](docs/adr/0003-hook-lifetime.md)
+- Hook stub pool is W^X: stubs are generated once per page and the page is `PAGE_EXECUTE_READ`; the
+  per-hook data lives in separate read-write pages (was one RWX pool).
+- `api->on_frame` registration is atomic (any thread); command handlers are serialised by one
+  recursive command-run lock (another thread waits up to 5 s, then -1).
+- The `version.dll` proxy fails closed: every export starts at a fallback that returns the
+  function's failure value with `ERROR_MOD_NOT_FOUND`; `GetSystemDirectoryW` is bounds-checked.
+- The core opens its files (v3x.ini, v3x.log, loading.marker, crash.log, caligula_branch.txt) and
+  loads plugins through wide paths; `game_dir()` / `v3x_dir()` stay ANSI (WARNING when lossy).
+- `include/v3x_rtti.h`: 64-bit bounds arithmetic (no 32-bit RVA wrap), names must end inside the
+  image, PE headers checked against the mapped size and read with `memcpy` (found by the fuzzer: a
+  crafted unaligned `e_lfanew` was undefined behaviour).
+- Build: `-O2 -fstack-protector-strong -D_FORTIFY_SOURCE=2 -ftrivial-auto-var-init=zero
+  -fno-delete-null-pointer-checks -Wall -Wextra -Wformat=2 -Wvla -Wshadow` for everything,
+  `-Werror` for the core and the SDK headers (C and C++; `v3x_safe.h` also `-Wconversion`);
+  plugins with `V3X_WERROR=1`. Same flags in `sdk/build_plugin.py` (`--werror`, `--sanitize`).
+  `SANITIZE=1 test/run_all.sh` builds the test executables with UBSan (trap).
+- `v3x.ini` scanner of the loader moved to `src/core_ini.h` (unchanged rules) so it can be fuzzed.
+
 ### Loader 0.5.0, API v5 (stability release)
 
 The loader now has a version of its own (`loader_version()`, semver, "0.5.0"), separate from the

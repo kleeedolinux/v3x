@@ -38,6 +38,15 @@ extern "C" {
  * built against the frozen v1..v4 headers (test/compat_v*.h) into the current loader. */
 #define V3X_API_VERSION 5
 
+/* printf format checking for the variadic API entries (log, print, log_at) and SDK helpers. An attribute
+ * on the function-pointer FIELD (a typedef does not carry it in clang); it changes no layout or calling
+ * convention (test/abi_test.c). Compilers without GNU attributes (MSVC) get nothing. */
+#if defined(__GNUC__) || defined(__clang__)
+#define V3X_PRINTF(fmt_idx, args_idx) __attribute__((format(printf, fmt_idx, args_idx)))
+#else
+#define V3X_PRINTF(fmt_idx, args_idx)
+#endif
+
 #ifdef __cplusplus
 #define V3X_EXPORT extern "C" __declspec(dllexport)
 #else
@@ -158,12 +167,35 @@ typedef struct V3X_PluginManifest {
 #define V3X_PLUGIN_MANIFEST(name_, version_, author_, desc_, builds_) \
     V3X_PLUGIN_MANIFEST_EX(name_, version_, author_, desc_, builds_, 0u, 0u)
 
+/* ---- Thread rules of every API entry (security hardening, CHANGELOG Unreleased; docs/api-reference.md "Threads") ----------------
+ * "any" = callable from any thread at any time (before process exit). "main" = only on the game's main
+ * thread (v3x_plugin_load, on_frame / run_on_main callbacks, config_reload handlers).
+ *   log, log_at, log_level, print ............ any (log/print lines are written under one lock)
+ *   image_base, image_size, game_version, game_dir, v3x_dir, main_thread_id, game_build_id,
+ *   loader_version, build_matches ............ any (immutable after boot)
+ *   pattern_scan, find_string, find_xref, function_start ... any (read-only scans)
+ *   hook, unhook, hook_safe, patch ........... any; they suspend other threads while writing code. unhook
+ *                                               only DISABLES (the trampoline is never freed; a thread may
+ *                                               still be inside it): docs/adr/0003-hook-lifetime.md
+ *   on_frame ................................. any (registration is atomic); callbacks run on main
+ *   run_on_main .............................. any; the callback runs on main (next frame tick)
+ *   register_command, on_event, enum_commands  any
+ *   exec_command, exec_capture ............... any; COMMAND HANDLERS NEVER RUN CONCURRENTLY: the loader
+ *                                               serialises them with one recursive lock (a handler may exec
+ *                                               commands itself). A caller on another thread waits up to
+ *                                               5 s, then the command is not run (returns -1, "busy").
+ *                                               Handlers run on the CALLING thread (console input thread,
+ *                                               devbridge pipe thread, or whoever calls exec_*), so a
+ *                                               handler that touches game state must run_on_main.
+ *   emit_event ............................... any; subscribers run synchronously on the emitting thread
+ *   hook_safe pre/post callbacks ............. the thread that called the hooked function (often a worker)
+ * After process exit started every entry returns at once without effect (see on_event below). */
 typedef struct V3X_API {
     uint32_t api_version;   /* V3X_API_VERSION the loader was built with */
     uint32_t struct_size;   /* sizeof(V3X_API) of the loader; check before using newer fields */
 
     /* Logging to <game>/binaries/v3x/v3x.log. `tag` is usually your plugin name. */
-    void (*log)(const char *tag, const char *fmt, ...);
+    void (*log)(const char *tag, const char *fmt, ...) V3X_PRINTF(2, 3);
 
     /* Main module (victoria3.exe) */
     uintptr_t (*image_base)(void);
@@ -190,7 +222,8 @@ typedef struct V3X_API {
      * unhook removes only what the CALLING module (plugin DLL, found from the return address)
      * holds on `target`: its raw hook, or all of its hook_safe subscriptions there (other plugins'
      * subscriptions stay; the thunk is disabled and the original bytes restored when the last
-     * subscriber leaves). Returns V3X_EHOOKBUSY if only other plugins hold it,
+     * subscriber leaves). Since the security hardening (CHANGELOG Unreleased): unhook only DISABLES; the trampoline `original` stays valid
+     * (never freed) and a later hook on the same target reuses it. Returns V3X_EHOOKBUSY if only other plugins hold it,
      * MH_ERROR_NOT_CREATED (4) if nothing is hooked. */
     int (*hook)(void *target, void *detour, void **original);
     int (*unhook)(void *target);
@@ -214,7 +247,8 @@ typedef struct V3X_API {
      * exits the game). Ctrl+C in the console is swallowed so it cannot kill the game.
      *
      * register_command: `fn` runs on the console input thread (NOT the game's main thread) with
-     *   the rest of the line after the name (leading spaces stripped, never NULL). Names are
+     *   the rest of the line after the name (leading spaces stripped, never NULL). Since the security hardening:
+     *   handlers never run concurrently (one command-run lock, see the thread rules above). Names are
      *   case-insensitive, up to 31 chars. Returns 0, -1 table full / bad args, -2 name taken.
      * print: printf to the console (plain, no tag) and v3x.log; a trailing newline is added if
      *   missing. Output over 8 KB is truncated. Returns chars written or -1. Thread-safe.
@@ -226,7 +260,7 @@ typedef struct V3X_API {
      * Loader 0.5.0: on_frame, run_on_main, command and event callbacks (and v3x_plugin_load) run inside
      *   a fault guard; a fault disables that plugin's callbacks (docs/api-reference.md "Fault isolation"). */
     int (*register_command)(const char *name, const char *help, v3x_command_fn fn, void *user);
-    int (*print)(const char *fmt, ...);
+    int (*print)(const char *fmt, ...) V3X_PRINTF(1, 2);
     int (*run_on_main)(v3x_frame_fn fn, void *user);
     int (*exec_command)(const char *line);
 
@@ -324,7 +358,7 @@ typedef struct V3X_API {
      *   emits it on the MAIN thread (next frame tick) with data = const char * plugin name, or NULL
      *   for `reload` without a name (= every plugin). Re-read your ini in the handler if data is NULL
      *   or equals your name (sdk/v3x_util.h v3x_reload_is_for). */
-    void (*log_at)(int level, const char *tag, const char *fmt, ...);
+    void (*log_at)(int level, const char *tag, const char *fmt, ...) V3X_PRINTF(3, 4);
     int (*log_level)(const char *tag);
     const char *(*loader_version)(void);
     int (*build_matches)(const char *game_builds);

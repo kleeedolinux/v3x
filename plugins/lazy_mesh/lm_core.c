@@ -332,7 +332,7 @@ void lm_note_use(lm_entry *e, int site, double now_ms, int phase)
 /* ------------------------------------------------------------------ report */
 
 typedef struct { size_t n, cap; char *out; } sbuf;
-static void sb_printf(sbuf *b, const char *fmt, ...)
+static __attribute__((format(printf, 2, 3))) void sb_printf(sbuf *b, const char *fmt, ...)
 {
     if (b->n + 1 >= b->cap) return;
     va_list ap; va_start(ap, fmt);

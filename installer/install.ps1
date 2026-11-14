@@ -43,7 +43,7 @@ $v3xInstallRc = & {
     $Repo = 'kleeedolinux/v3x'
     # Release signing keys (Ed25519 public keys, 64 hex digits; '' = slot unused). MUST equal
     # V3X_RELEASE_KEY_CURRENT / V3X_RELEASE_KEY_NEXT in installer/release_keys.h (test_installer.py checks).
-    $ReleaseKeyCurrent = ''
+    $ReleaseKeyCurrent = '917706d50acc52c855d6fab87c3eb0f4cea3d2e8b83145f7f8155d72fa13f201'
     $ReleaseKeyNext = ''
     $OneLiner = 'irm https://v3extender.pages.dev/install.ps1 | iex'
 

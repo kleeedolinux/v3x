@@ -231,8 +231,9 @@ def main():
             check("[%s] %s: refused rc=8 ('%s'), setup not run, nothing removed" % (sh, what, want),
                   rc == 8 and want in out and why in out and "Uninstalling" not in out and os.path.isfile(V(g)), out)
         rc, out = run(sh, {"V3X_GAME_DIR": g, "V3X_ACTION": "uninstall", "V3X_YES": "1"}, script=plain_ps1)
-        check("[%s] the repo install.ps1 (no release key yet) refuses even a test-signed release rc=8" % sh,
-              rc == 8 and "no release key yet" in out and os.path.isfile(V(g)), out)
+        check("[%s] the repo install.ps1 refuses a release signed with the test key rc=8" % sh,
+              rc == 8 and ("no release key yet" in out or "signed with an unknown key" in out)
+              and os.path.isfile(V(g)), out)
         rc, out = run(sh, {"V3X_GAME_DIR": g, "V3X_ACTION": "status"})
         check("[%s] good signed release: 'Signature OK' then the setup runs" % sh, rc == 0 and "Signature OK" in out and "game folder:" in out, out)
         rc, out = run(sh, {"V3X_GAME_DIR": g, "V3X_SOURCE": os.path.join(root, "nowhere"), "V3X_YES": "1"})
